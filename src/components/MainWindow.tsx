@@ -455,7 +455,12 @@ export function MainWindow() {
     }
     const unsubscribeRecent = subscribeRecent(() => setRecent(getRecentItems()));
     // Keeps the relative timestamps honest without re-reading storage constantly.
-    const clockTimer = window.setInterval(() => setNowTick((value) => value + 1), 30_000);
+    // The same slow tick keeps relative timestamps and the hotkey-ownership
+    // notice honest, so a copy that quits clears the warning without a restart.
+    const clockTimer = window.setInterval(() => {
+      setNowTick((value) => value + 1);
+      if (isTauri()) void refreshHotkeys();
+    }, 30_000);
     return () => {
       unlisteners.forEach((unlisten) => unlisten());
       unsubscribeRecent();
@@ -530,6 +535,12 @@ export function MainWindow() {
               <button onClick={() => void api.openScreenRecordingSettings()}>
                 {t("openScreenSettings")}
               </button>
+            </div>
+          ) : hotkeys && !hotkeys.live ? (
+            <div className="permission-banner">
+              <ShieldAlert size={16} />
+              <span>{hotkeys.others.length > 0 ? t("hotkeysDead") : t("hotkeysNotLive")}</span>
+              <button onClick={() => void reclaimHotkeys()}>{t("hotkeysFix")}</button>
             </div>
           ) : null}
           <div className="home-drop-art" aria-hidden="true">
@@ -807,9 +818,7 @@ export function MainWindow() {
             {t("hotkeys")}
           </div>
           {hotkeys && hotkeys.live && hotkeys.others.length === 0 ? (
-            <p className="home-settings-hint">
-              {hotkeys.recentDuplicate ? t("hotkeysDuplicate") : t("hotkeysOk")}
-            </p>
+            <p className="home-settings-hint">{t("hotkeysOk")}</p>
           ) : null}
           {hotkeys && (!hotkeys.live || hotkeys.others.length > 0) ? (
             <div className="home-hotkeys is-warn">

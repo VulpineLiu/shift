@@ -159,6 +159,8 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 /// hotkey to whichever client registered it first, so the survivor must register again.
 #[tauri::command]
 fn reclaim_hotkeys(app: AppHandle) -> hotkeys::HotkeyStatus {
+    // Take the instance lock as well, so this copy is the owner once the others die.
+    let _ = hotkeys::acquire_instance(&app);
     for shortcut in hotkeys::HOTKEYS {
         let _ = app.global_shortcut().unregister(shortcut);
     }
@@ -166,16 +168,6 @@ fn reclaim_hotkeys(app: AppHandle) -> hotkeys::HotkeyStatus {
     hotkeys::status()
 }
 
-
-/// A second copy can never own the hotkeys, so it defers to the running one:
-/// mark the attempt (Settings will explain it), raise the copy that owns the
-/// shortcuts, and exit. A modal is useless here — an Accessory app has no
-/// activated UI to host it.
-fn defer_to_running_copy(app: &AppHandle) {
-    hotkeys::mark_duplicate_attempt(app);
-    hotkeys::wake_running_copy(app);
-    std::thread::sleep(std::time::Duration::from_millis(120));
-}
 
 fn shortcut_action(shortcut: &Shortcut) -> Option<&'static str> {
     if shortcut.matches(Modifiers::ALT | Modifiers::SHIFT, Code::Digit2) {
@@ -190,7 +182,7 @@ fn shortcut_action(shortcut: &Shortcut) -> Option<&'static str> {
 }
 
 fn register_shortcuts(app: &AppHandle) -> tauri::Result<()> {
-    hotkeys::set_live(true);
+    let mut all_ok = true;
     for shortcut in [
         "Alt+Shift+2",
         "Alt+Shift+3",
@@ -202,10 +194,11 @@ fn register_shortcuts(app: &AppHandle) -> tauri::Result<()> {
             }
             Err(error) => {
                 eprintln!("Could not register global shortcut {shortcut}: {error}");
-                hotkeys::note_registration_failed();
+                all_ok = false;
             }
         }
     }
+    hotkeys::refresh_live(all_ok);
     Ok(())
 }
 
@@ -278,16 +271,11 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             if !hotkeys::acquire_instance(app.handle()) {
-                // Another copy owns the global hotkeys, so this one could never
-                // react to the keyboard. Say so, then leave.
+                // A first copy already owns the hotkeys, so this copy's keyboard
+                // shortcuts can never fire. Stay usable, but let the UI say so
+                // instead of exiting silently: Settings offers a one-click takeover.
                 hotkeys::note_registration_failed();
-                for label in ["main", "radial", "editor", "capture", "recorder"] {
-                    if let Some(window) = app.get_webview_window(label) {
-                        let _ = window.hide();
-                    }
-                }
-                defer_to_running_copy(app.handle());
-                std::process::exit(0);
+                eprintln!("Another Shift instance is running; the global hotkeys belong to that copy.");
             }
 
             // Restore the persisted switch before the drag monitors start.
@@ -303,7 +291,6 @@ pub fn run() {
                 }
             }
 
-            hotkeys::spawn_watcher(app.handle().clone());
             setup_tray(app.handle())?;
             register_shortcuts(app.handle())?;
             drag_bridge::spawn(app.handle());

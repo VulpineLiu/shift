@@ -133,10 +133,10 @@ const messages: Record<Lang, Record<string, string>> = {
     autostartHint: "Start Shift automatically when you sign in.",
     hotkeys: "Keyboard shortcuts",
     hotkeysOk: "This copy of Shift owns the shortcuts, so the keyboard works.",
-    hotkeysDuplicate:
-      "A second copy of Shift tried to start and was closed automatically. macOS only gives global hotkeys to one copy, so keeping a single copy is what keeps the keyboard shortcuts working.",
     hotkeysNotLive:
       "macOS refused these shortcuts, usually because another app already uses them. Close the conflicting app and retry.",
+    hotkeysDead:
+      "Another copy of Shift is running, so this window's keyboard shortcuts do nothing.",
     hotkeysOthers:
       "{count} other Shift process is already running. macOS gives global hotkeys to only one of them, so the shortcuts of the others do nothing.",
     hotkeysFix: "Quit the other copies and reclaim the shortcuts",
@@ -286,8 +286,8 @@ const messages: Record<Lang, Record<string, string>> = {
     autostartHint: "登录系统后自动启动 Shift。",
     hotkeys: "键盘快捷键",
     hotkeysOk: "当前副本已持有快捷键，键盘快捷键可以正常使用。",
-    hotkeysDuplicate: "刚才有第二个 Shift 副本启动，已自动退出。macOS 只把全局快捷键交给其中一个副本，只保留一个副本才能保证快捷键生效。",
     hotkeysNotLive: "macOS 拒绝了这些快捷键，通常是被其他应用占用了。关闭冲突的应用后重试。",
+    hotkeysDead: "另一个 Shift 副本正在运行，因此本窗口的键盘快捷键不会生效。",
     hotkeysOthers: "检测到 {count} 个其他 Shift 进程。macOS 只把全局快捷键交给其中一个，其余副本按键盘不会有任何反应。",
     hotkeysFix: "退出其他副本并重新接管快捷键",
     accessCheck: "写入权限",

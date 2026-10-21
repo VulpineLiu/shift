@@ -1,12 +1,22 @@
 //! One instance, one owner of the global hotkeys.
 //!
-//! macOS delivers a registered global hotkey to only one process: whichever copy
-//! registers first silently owns it, and every later copy keeps logging
-//! "Registered global shortcut" while its hotkeys never fire. That is exactly how
-//! "the panel buttons work but the keyboard shortcuts do not" shows up, so the app
-//! refuses to run twice and can report who holds the hotkeys.
+//! macOS hands a global hotkey to a single client: whichever process registers it
+//! first silently owns it. A second copy still sees "Registered global shortcut"
+//! in its log, yet its hotkeys never fire — that is precisely how "the panel
+//! buttons save files but the keyboard shortcuts do nothing" shows up, which
+//! happens whenever an old /Applications copy runs next to a newer build.
+//!
+//! An advisory flock on a file in the app config dir tells a copy whether it is
+//! the first one. The owner behaves as before; a duplicate keeps working but says
+//! out loud that its hotkeys are dead and can take over in one click.
 
-use std::{fs::OpenOptions, sync::Mutex};
+use std::{
+    fs::OpenOptions,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
+};
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
@@ -14,26 +24,26 @@ use tauri::{AppHandle, Manager};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 
-/// Hotkeys that must be owned by exactly one instance.
+/// Hotkeys that only one instance can own.
 pub const HOTKEYS: [&str; 3] = ["Alt+Shift+2", "Alt+Shift+3", "Alt+Shift+4"];
 
-/// Keeps the advisory lock alive for the lifetime of the process.
+/// Held for the lifetime of the process so the lock survives setup.
 static INSTANCE_LOCK: Mutex<Option<std::fs::File>> = Mutex::new(None);
-static HOTKEYS_LIVE: Mutex<bool> = Mutex::new(true);
+/// Whether this process won the instance lock, i.e. it is the first copy.
+static INSTANCE_OWNER: AtomicBool = AtomicBool::new(false);
+static HOTKEYS_LIVE: AtomicBool = AtomicBool::new(true);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HotkeyStatus {
-    /// False when registration failed, which means another copy owns the hotkeys.
+    /// False when another copy owns the hotkeys, i.e. this copy's keys do nothing.
     pub live: bool,
     pub hotkeys: Vec<String>,
     /// Other running Shift processes.
     pub others: Vec<u32>,
-    /// True when a second copy tried to start in the last ten minutes.
-    pub recent_duplicate: bool,
 }
 
-/// True when this process may continue; false when another Shift already holds the lock.
+/// True when this process is the first Shift copy; false when another one runs.
 pub fn acquire_instance(app: &AppHandle) -> bool {
     let path = app
         .path()
@@ -44,7 +54,7 @@ pub fn acquire_instance(app: &AppHandle) -> bool {
         let _ = std::fs::create_dir_all(parent);
     }
     let Ok(file) = OpenOptions::new().create(true).write(true).open(&path) else {
-        // An unreadable config folder must not prevent the app from starting.
+        // An unreadable config folder must not stop the app from starting.
         return true;
     };
     #[cfg(unix)]
@@ -57,149 +67,56 @@ pub fn acquire_instance(app: &AppHandle) -> bool {
     if let Ok(mut guard) = INSTANCE_LOCK.lock() {
         *guard = Some(file);
     }
+    INSTANCE_OWNER.store(true, Ordering::Relaxed);
     true
 }
 
-/// Record that a capture hotkey could not be registered.
+/// True for the copy that won the instance lock.
+pub fn is_owner() -> bool {
+    INSTANCE_OWNER.load(Ordering::Relaxed)
+}
+
+/// Recompute whether this copy's hotkeys can actually fire. macOS reports
+/// success even for a copy that will never receive the events, so ownership of
+/// the instance lock is what decides - not the result of registration.
+pub fn refresh_live(registered_ok: bool) {
+    HOTKEYS_LIVE.store(is_owner() && registered_ok, Ordering::Relaxed);
+}
+
+/// Record that macOS refused a hotkey, usually because another app holds it.
 pub fn note_registration_failed() {
-    set_live(false);
+    HOTKEYS_LIVE.store(false, Ordering::Relaxed);
 }
 
-/// Track whether this instance owns the capture hotkeys.
-pub fn set_live(live: bool) {
-    if let Ok(mut guard) = HOTKEYS_LIVE.lock() {
-        *guard = live;
-    }
-}
-
-/// `recent_duplicate` stays false here; the command layer fills it in because
-/// only a command has access to the app's config directory.
 pub fn status() -> HotkeyStatus {
     HotkeyStatus {
-        recent_duplicate: false,
-        live: *HOTKEYS_LIVE.lock().unwrap_or_else(|error| error.into_inner()),
+        live: HOTKEYS_LIVE.load(Ordering::Relaxed),
         hotkeys: HOTKEYS.iter().map(|hotkey| hotkey.to_string()).collect(),
         others: other_pids(),
     }
 }
 
-/// Leave a trace so the running copy can explain why a launch "did nothing".
-pub fn mark_duplicate_attempt(app: &AppHandle) {
-    if let Ok(path) = attempt_path(app) {
-        let exe = std::env::current_exe()
-            .map(|value| value.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let line = format!("{}\t{}\n", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|value| value.as_secs())
-            .unwrap_or_default(), exe);
-        let _ = std::fs::write(path, line);
-    }
-}
-
-/// Seconds since a second copy last tried to start, if any.
-fn duplicate_attempt_age(app: &AppHandle) -> Option<u64> {
-    let text = std::fs::read_to_string(attempt_path(app).ok()?).ok()?;
-    let seconds: u64 = text.split('\t').next()?.parse().ok()?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
-    now.checked_sub(seconds)
-}
-
-/// Report a duplicate launch attempt when it is recent, then clear it so the
-/// notice is shown once.
-pub fn take_duplicate_attempt(app: &AppHandle) -> bool {
-    match duplicate_attempt_age(app) {
-        Some(age) if age < 600 => {
-            if let Ok(path) = attempt_path(app) {
-                let _ = std::fs::remove_file(path);
-            }
-            true
-        }
-        _ => false,
-    }
-}
-
-fn attempt_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
-    Ok(app
-        .path()
-        .app_config_dir()
-        .map_err(|error| error.to_string())?
-        .join("shift-duplicate-attempt"))
-}
-
-/// Ask the process that holds the instance lock to show itself.
-#[cfg(unix)]
-pub fn wake_running_copy(app: &AppHandle) -> bool {
-    use std::{io::Write, os::unix::net::UnixStream};
-
-    match socket_path(app) {
-        Ok(path) => match UnixStream::connect(path) {
-            Ok(mut stream) => {
-                stream.write_all(b"show\n").is_ok()
-            }
-            Err(_) => false,
-        },
-        Err(_) => false,
-    }
-}
-
-#[cfg(not(unix))]
-pub fn wake_running_copy(_app: &AppHandle) -> bool {
-    false
-}
-
-/// Accept wake-ups for as long as this process owns the instance lock.
-#[cfg(unix)]
-pub fn spawn_watcher(app: AppHandle) {
-    use std::os::unix::net::UnixListener;
-
-    let Ok(path) = socket_path(&app) else {
-        return;
-    };
-    // A socket left behind by a crashed copy would block the bind forever.
-    let _ = std::fs::remove_file(&path);
-    let Ok(listener) = UnixListener::bind(&path) else {
-        return;
-    };
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            if stream.is_ok() {
-                crate::show_main(&app);
-            }
-        }
-    });
-}
-
-#[cfg(not(unix))]
-pub fn spawn_watcher(_app: AppHandle) {}
-
-#[cfg(unix)]
-fn socket_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
-    let directory = app.path().app_config_dir().map_err(|error| error.to_string())?;
-    let path = directory.join("shift.sock");
-    // Unix socket paths are capped at ~104 bytes; fall back to the temp dir.
-    if path.as_os_str().len() > 90 {
-        return Ok(std::env::temp_dir().join(format!("shift-{}.sock", unsafe { libc::getuid() })));
-    }
-    Ok(path)
-}
-
-/// Pids of other Shift processes, excluding this one.
+/// Pids of the other Shift binaries currently running.
 pub fn other_pids() -> Vec<u32> {
-    let output = std::process::Command::new("/usr/bin/pgrep")
-        .args(["-x", "shift"])
-        .output();
-    let Ok(output) = output else {
+    #[cfg(not(unix))]
+    {
         return Vec::new();
-    };
-    other_instances(&String::from_utf8_lossy(&output.stdout), std::process::id())
+    }
+    #[cfg(unix)]
+    {
+        let Ok(output) = std::process::Command::new("/usr/bin/pgrep")
+            .args(["-x", "shift"])
+            .output()
+        else {
+            return Vec::new();
+        };
+        other_instances(&String::from_utf8_lossy(&output.stdout), std::process::id())
+    }
 }
 
-/// Keeps foreign processes out: only the same executable counts as another copy,
-/// except for the canonical /Applications install, whose path changes on upgrade.
+/// Keep foreign processes out: only the same executable counts as another copy.
+/// The canonical /Applications install is matched by path alone because it moves
+/// on upgrade, which is exactly when a stale copy tends to survive.
 pub fn other_instances(listing: &str, current: u32) -> Vec<u32> {
     let ours = std::env::current_exe()
         .ok()
@@ -215,8 +132,6 @@ pub fn other_instances(listing: &str, current: u32) -> Vec<u32> {
         .collect()
 }
 
-/// The canonical install path moves on upgrade, so matching it by name keeps a
-/// stale copy quitable.
 fn is_installed(exe: &str) -> bool {
     exe == "/Applications/Shift.app/Contents/MacOS/shift"
 }
@@ -236,7 +151,7 @@ fn command_path(_pid: u32) -> Option<String> {
     None
 }
 
-/// Ask other copies to quit so this one can own the hotkeys. Returns how many accepted.
+/// Ask the other copies to quit so this one can own the hotkeys.
 #[tauri::command]
 pub fn quit_other_instances() -> usize {
     let mut stopped = 0;
@@ -254,12 +169,8 @@ pub fn quit_other_instances() -> usize {
 }
 
 #[tauri::command]
-pub fn hotkey_status(app: AppHandle) -> HotkeyStatus {
-    let mut current = status();
-    if take_duplicate_attempt(&app) {
-        current.recent_duplicate = true;
-    }
-    current
+pub fn hotkey_status() -> HotkeyStatus {
+    status()
 }
 
 #[cfg(test)]
@@ -284,11 +195,22 @@ mod tests {
     }
 
     #[test]
-    fn registration_failures_are_reachable_from_the_ui() {
-        note_registration_failed();
-        let status = status();
-        assert!(!status.live);
-        assert_eq!(status.hotkeys, vec!["Alt+Shift+2", "Alt+Shift+3", "Alt+Shift+4"]);
-        assert!(!status.recent_duplicate);
+    fn a_dead_hotkey_state_reaches_the_ui() {
+        refresh_live(false);
+        let reported = status();
+        assert!(!reported.live);
+        assert_eq!(
+            reported.hotkeys,
+            vec!["Alt+Shift+2", "Alt+Shift+3", "Alt+Shift+4"]
+        );
+    }
+
+    #[test]
+    fn registering_cannot_make_a_non_owner_live() {
+        // A duplicate copy sees registration "succeed" yet never receives the
+        // hotkeys, so ownership - not the Ok(..) result - decides liveness.
+        assert!(!is_owner());
+        refresh_live(true);
+        assert!(!status().live);
     }
 }
