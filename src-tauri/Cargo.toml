@@ -1,0 +1,50 @@
+[package]
+name = "shift"
+version = "0.1.0"
+description = "A radial file utility with screenshot, recording and OCR."
+authors = ["Shift Contributors"]
+edition = "2021"
+
+[lib]
+name = "shift_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2.11", features = ["tray-icon", "image-png", "macos-private-api", "protocol-asset", "unstable"] }
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+image = { version = "0.25.8", default-features = false, features = ["png", "jpeg", "webp", "tiff", "bmp", "gif"] }
+lopdf = { version = "0.45", default-features = false }
+printpdf = { version = "0.12.8", default-features = false, features = ["images", "png", "jpeg", "webp", "tiff", "bmp", "gif"] }
+calamine = "0.36.1"
+quick-xml = "0.42"
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["clock"] }
+uuid = { version = "1", features = ["v4"] }
+which = "7"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_System_Console",
+  "Win32_System_Threading",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.dev]
+debug = 1
+
+[profile.dev.package."*"]
+debug = false

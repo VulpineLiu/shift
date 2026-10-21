@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Shift captures the area you select for screenshots and screen recordings.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Shift can include microphone audio in screen recordings when you enable it.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Shift saves processed files to the folder you choose, including folders on your Desktop.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>Shift saves processed files to the folder you choose, including folders in Documents.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Shift saves processed files to the folder you choose, including Downloads.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>Shift can process and save files on removable volumes you select.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>Shift can process and save files on network volumes you select.</string>
+</dict>
+</plist>

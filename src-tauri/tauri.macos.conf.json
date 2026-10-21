@@ -1,0 +1,5 @@
+{
+  "bundle": {
+    "externalBin": ["binaries/drag-bridge", "binaries/pdf-render", "binaries/doc-render"]
+  }
+}
