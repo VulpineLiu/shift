@@ -81,6 +81,8 @@ export interface HotkeyStatus {
   hotkeys: string[];
   /** Pids of other running Shift processes. */
   others: number[];
+  /** A second copy tried to start in the last ten minutes. */
+  recentDuplicate: boolean;
 }
 
 export interface WriteCheck {

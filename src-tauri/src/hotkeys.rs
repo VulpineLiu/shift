@@ -29,6 +29,8 @@ pub struct HotkeyStatus {
     pub hotkeys: Vec<String>,
     /// Other running Shift processes.
     pub others: Vec<u32>,
+    /// True when a second copy tried to start in the last ten minutes.
+    pub recent_duplicate: bool,
 }
 
 /// True when this process may continue; false when another Shift already holds the lock.
@@ -70,12 +72,119 @@ pub fn set_live(live: bool) {
     }
 }
 
+/// `recent_duplicate` stays false here; the command layer fills it in because
+/// only a command has access to the app's config directory.
 pub fn status() -> HotkeyStatus {
     HotkeyStatus {
+        recent_duplicate: false,
         live: *HOTKEYS_LIVE.lock().unwrap_or_else(|error| error.into_inner()),
         hotkeys: HOTKEYS.iter().map(|hotkey| hotkey.to_string()).collect(),
         others: other_pids(),
     }
+}
+
+/// Leave a trace so the running copy can explain why a launch "did nothing".
+pub fn mark_duplicate_attempt(app: &AppHandle) {
+    if let Ok(path) = attempt_path(app) {
+        let exe = std::env::current_exe()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let line = format!("{}\t{}\n", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_secs())
+            .unwrap_or_default(), exe);
+        let _ = std::fs::write(path, line);
+    }
+}
+
+/// Seconds since a second copy last tried to start, if any.
+fn duplicate_attempt_age(app: &AppHandle) -> Option<u64> {
+    let text = std::fs::read_to_string(attempt_path(app).ok()?).ok()?;
+    let seconds: u64 = text.split('\t').next()?.parse().ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    now.checked_sub(seconds)
+}
+
+/// Report a duplicate launch attempt when it is recent, then clear it so the
+/// notice is shown once.
+pub fn take_duplicate_attempt(app: &AppHandle) -> bool {
+    match duplicate_attempt_age(app) {
+        Some(age) if age < 600 => {
+            if let Ok(path) = attempt_path(app) {
+                let _ = std::fs::remove_file(path);
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn attempt_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    Ok(app
+        .path()
+        .app_config_dir()
+        .map_err(|error| error.to_string())?
+        .join("shift-duplicate-attempt"))
+}
+
+/// Ask the process that holds the instance lock to show itself.
+#[cfg(unix)]
+pub fn wake_running_copy(app: &AppHandle) -> bool {
+    use std::{io::Write, os::unix::net::UnixStream};
+
+    match socket_path(app) {
+        Ok(path) => match UnixStream::connect(path) {
+            Ok(mut stream) => {
+                stream.write_all(b"show\n").is_ok()
+            }
+            Err(_) => false,
+        },
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(unix))]
+pub fn wake_running_copy(_app: &AppHandle) -> bool {
+    false
+}
+
+/// Accept wake-ups for as long as this process owns the instance lock.
+#[cfg(unix)]
+pub fn spawn_watcher(app: AppHandle) {
+    use std::os::unix::net::UnixListener;
+
+    let Ok(path) = socket_path(&app) else {
+        return;
+    };
+    // A socket left behind by a crashed copy would block the bind forever.
+    let _ = std::fs::remove_file(&path);
+    let Ok(listener) = UnixListener::bind(&path) else {
+        return;
+    };
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            if stream.is_ok() {
+                crate::show_main(&app);
+            }
+        }
+    });
+}
+
+#[cfg(not(unix))]
+pub fn spawn_watcher(_app: AppHandle) {}
+
+#[cfg(unix)]
+fn socket_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let directory = app.path().app_config_dir().map_err(|error| error.to_string())?;
+    let path = directory.join("shift.sock");
+    // Unix socket paths are capped at ~104 bytes; fall back to the temp dir.
+    if path.as_os_str().len() > 90 {
+        return Ok(std::env::temp_dir().join(format!("shift-{}.sock", unsafe { libc::getuid() })));
+    }
+    Ok(path)
 }
 
 /// Pids of other Shift processes, excluding this one.
@@ -145,8 +254,12 @@ pub fn quit_other_instances() -> usize {
 }
 
 #[tauri::command]
-pub fn hotkey_status() -> HotkeyStatus {
-    status()
+pub fn hotkey_status(app: AppHandle) -> HotkeyStatus {
+    let mut current = status();
+    if take_duplicate_attempt(&app) {
+        current.recent_duplicate = true;
+    }
+    current
 }
 
 #[cfg(test)]
@@ -173,7 +286,9 @@ mod tests {
     #[test]
     fn registration_failures_are_reachable_from_the_ui() {
         note_registration_failed();
-        assert!(!hotkey_status().live);
-        assert_eq!(hotkey_status().hotkeys, vec!["Alt+Shift+2", "Alt+Shift+3", "Alt+Shift+4"]);
+        let status = status();
+        assert!(!status.live);
+        assert_eq!(status.hotkeys, vec!["Alt+Shift+2", "Alt+Shift+3", "Alt+Shift+4"]);
+        assert!(!status.recent_duplicate);
     }
 }

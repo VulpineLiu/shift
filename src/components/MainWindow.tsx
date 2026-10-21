@@ -205,6 +205,7 @@ export function MainWindow() {
   const [dropAction, setDropAction] = useState<DropAction | null>(null);
   const [hotkeys, setHotkeys] = useState<HotkeyStatus | null>(null);
   const dropTargets = useRef<Partial<Record<DropAction, HTMLElement | null>>>({});
+  const windowOrigin = useRef<{ x: number; y: number } | null>(null);
 
   function flash(message: string, duration = 2600) {
     if (toastTimer.current) window.clearTimeout(toastTimer.current);
@@ -255,12 +256,32 @@ export function MainWindow() {
     }, 450);
   }
 
-  // Drag positions arrive in physical pixels relative to the webview, while the
-  // buttons are measured in CSS pixels, so both sides need the same scale.
-  function actionAt(position: { x: number; y: number }): DropAction | null {
+  // wry reports drag positions two different ways: AppKit passes draggingLocation,
+  // i.e. points relative to the webview and therefore 1:1 with CSS pixels, while
+  // the Windows drag controller forwards OLE screen coordinates in physical
+  // pixels. Only the second reading needs the window origin and scale removed.
+  function localPoint(position: { x: number; y: number }): { x: number; y: number } | null {
+    if (IS_MAC) return position;
+    const origin = windowOrigin.current;
+    if (!origin) return null;
     const scale = window.devicePixelRatio || 1;
-    const x = position.x / scale;
-    const y = position.y / scale;
+    return { x: (position.x - origin.x) / scale, y: (position.y - origin.y) / scale };
+  }
+
+  async function readWindowOrigin() {
+    if (IS_MAC) return;
+    try {
+      const position = await getCurrentWebview().position();
+      windowOrigin.current = { x: position.x, y: position.y };
+    } catch {
+      windowOrigin.current = null;
+    }
+  }
+
+  function actionAt(position: { x: number; y: number }): DropAction | null {
+    const point = localPoint(position);
+    if (!point) return null;
+    const { x, y } = point;
     const entries: Array<[DropAction, HTMLElement | null | undefined]> = [
       ["formats", dropTargets.current.formats],
       ["tools", dropTargets.current.tools],
@@ -384,6 +405,12 @@ export function MainWindow() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Reading the status also consumes a "second copy tried to start" marker.
+  useEffect(() => {
+    if (settingsOpen && isTauri()) void refreshHotkeys();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settingsOpen]);
+
   useEffect(() => {
     const unlisteners: Array<() => void> = [];
     if (isTauri()) {
@@ -391,7 +418,9 @@ export function MainWindow() {
         .onDragDropEvent((event) => {
           if (event.payload.type === "enter") {
             setDragging(true);
-            setDropAction(actionAt(event.payload.position));
+            const position = event.payload.position;
+            // Cache the origin once per drag: it cannot move while dragging.
+            void readWindowOrigin().then(() => setDropAction(actionAt(position)));
           }
           if (event.payload.type === "over") {
             setDropAction(actionAt(event.payload.position));
@@ -777,6 +806,11 @@ export function MainWindow() {
             <Keyboard size={15} />
             {t("hotkeys")}
           </div>
+          {hotkeys && hotkeys.live && hotkeys.others.length === 0 ? (
+            <p className="home-settings-hint">
+              {hotkeys.recentDuplicate ? t("hotkeysDuplicate") : t("hotkeysOk")}
+            </p>
+          ) : null}
           {hotkeys && (!hotkeys.live || hotkeys.others.length > 0) ? (
             <div className="home-hotkeys is-warn">
               <p className="home-settings-hint">
@@ -789,9 +823,7 @@ export function MainWindow() {
                 {t("hotkeysFix")}
               </button>
             </div>
-          ) : (
-            <p className="home-settings-hint">{t("hotkeysOk")}</p>
-          )}
+          ) : null}
           <div className="home-hotkey-list">
             {(hotkeys?.hotkeys.length
               ? hotkeys.hotkeys

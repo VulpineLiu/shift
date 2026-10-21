@@ -3020,6 +3020,41 @@ kbd {
   transform: translateX(14px);
 }
 
+/* Hotkey ownership panel: duplicate copies silently lose the global shortcuts. */
+.home-hotkeys.is-warn {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 10px 11px;
+  border: 1px solid rgba(217, 79, 31, 0.2);
+  border-radius: 12px;
+  background: rgba(255, 241, 232, 0.78);
+}
+
+.home-hotkeys.is-warn .home-settings-hint {
+  margin: 0;
+  color: #7a3a20;
+}
+
+.home-hotkey-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.home-hotkey-list span {
+  padding: 4px 9px;
+  border: 1px solid rgba(104, 68, 47, 0.12);
+  border-radius: 8px;
+  color: #7c5d4d;
+  background: rgba(255, 255, 255, 0.75);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+
 .home-checks {
   display: flex;
   flex-direction: column;

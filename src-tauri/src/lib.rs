@@ -167,48 +167,14 @@ fn reclaim_hotkeys(app: AppHandle) -> hotkeys::HotkeyStatus {
 }
 
 
-/// Explains the duplicate-instance problem, then quits this copy.
-///
-/// The dialog must be driven from a worker thread: the main thread owns the
-/// event loop that renders it.
-fn warn_about_duplicate_instance(app: AppHandle, zh: bool) {
-    std::thread::spawn(move || {
-        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-        let (title, body, confirm) = if zh {
-            (
-                "Shift 已在运行",
-                "检测到另一个 Shift 进程。macOS 只把全局快捷键交给最先注册的实例，\
-                 因此后启动的副本按键盘不会有任何反应。\n\n\
-                 点“确定”退出这个副本；另一个 Shift 会正常工作（设置面板里也可以一键退出其他副本）。",
-                "退出此副本",
-            )
-        } else {
-            (
-                "Shift is already running",
-                "Another Shift process is already running. macOS delivers a global hotkey to only the \
-                 copy that registered it first, so the keyboard shortcuts of this copy do nothing.\n\n\
-                 Press OK to quit this copy; the other Shift keeps working. Settings can also quit \
-                 the other copies for you.",
-                "Quit this copy",
-            )
-        };
-        std::thread::sleep(std::time::Duration::from_millis(400));
-        app.dialog()
-            .message(body)
-            .kind(MessageDialogKind::Warning)
-            .title(title)
-            .buttons(MessageDialogButtons::OkCustom(confirm.to_string()))
-            .blocking_show();
-        app.exit(0);
-    });
-}
-
-/// Best-effort UI language for the very early duplicate-instance dialog.
-fn sys_locale_is_zh() -> bool {
-    std::env::var("APPLELOCALE_ID")
-        .or_else(|_| std::env::var("LANG"))
-        .unwrap_or_default()
-        .starts_with("zh")
+/// A second copy can never own the hotkeys, so it defers to the running one:
+/// mark the attempt (Settings will explain it), raise the copy that owns the
+/// shortcuts, and exit. A modal is useless here — an Accessory app has no
+/// activated UI to host it.
+fn defer_to_running_copy(app: &AppHandle) {
+    hotkeys::mark_duplicate_attempt(app);
+    hotkeys::wake_running_copy(app);
+    std::thread::sleep(std::time::Duration::from_millis(120));
 }
 
 fn shortcut_action(shortcut: &Shortcut) -> Option<&'static str> {
@@ -320,10 +286,24 @@ pub fn run() {
                         let _ = window.hide();
                     }
                 }
-                warn_about_duplicate_instance(app.handle().clone(), sys_locale_is_zh());
-                return Ok(());
+                defer_to_running_copy(app.handle());
+                std::process::exit(0);
             }
 
+            // Restore the persisted switch before the drag monitors start.
+            let persisted = settings::load(app.handle());
+            if let Some(state) = app.try_state::<AppState>() {
+                state
+                    .drag_enabled
+                    .store(persisted.drag_enabled, Ordering::Relaxed);
+            }
+            if persisted.autostart != autostart::is_enabled() {
+                if let Err(error) = autostart::set_enabled(persisted.autostart) {
+                    eprintln!("Could not sync launch at login: {error}");
+                }
+            }
+
+            hotkeys::spawn_watcher(app.handle().clone());
             setup_tray(app.handle())?;
             register_shortcuts(app.handle())?;
             drag_bridge::spawn(app.handle());
