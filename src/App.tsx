@@ -4,6 +4,7 @@ import { MainWindow } from "./components/MainWindow";
 import { PinnedImage } from "./components/PinnedImage";
 import { RadialMenu } from "./components/RadialMenu";
 import { RecorderHud } from "./components/RecorderHud";
+import { ResultCard } from "./components/ResultCard";
 import { ShareNotice } from "./components/ShareNotice";
 import type { View } from "./types";
 
@@ -15,6 +16,7 @@ function resolveView(): View {
     value === "recorder" ||
     value === "editor" ||
     value === "pin" ||
+    value === "result-card" ||
     value === "share-notice"
   ) {
     return value;
@@ -37,6 +39,8 @@ export default function App() {
       return <Editor />;
     case "pin":
       return <PinnedImage />;
+    case "result-card":
+      return <ResultCard />;
     case "share-notice":
       return <ShareNotice />;
     default:

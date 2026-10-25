@@ -3,6 +3,7 @@ mod capture;
 mod drag_bridge;
 mod editor;
 mod files;
+mod history;
 mod hotkeys;
 mod locale;
 mod markdown;
@@ -11,9 +12,11 @@ mod office;
 mod pdf;
 mod process;
 mod recording;
+mod result_card;
 mod runtime;
 mod settings;
 mod share;
+mod update;
 
 use std::{
     process::Child,
@@ -172,18 +175,20 @@ fn tray_menu(app: &AppHandle, language: &str) -> tauri::Result<Menu<tauri::Wry>>
     let ocr = MenuItem::with_id(app, "ocr", titles.ocr, true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", titles.quit, true, Some("CmdOrCtrl+Q"))?;
-    let menu = Menu::with_items(
-        app,
-        &[
-            &open,
-            &capture,
-            &fullscreen,
-            &record,
-            &ocr,
-            &separator,
-            &quit,
-        ],
-    )?;
+    let mut items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
+        vec![&open, &capture, &fullscreen, &record, &ocr];
+    // A known newer release gets its own row, so the update is reachable without
+    // opening a window. It disappears again once the check reports "current".
+    let update = match update::tray_title(app) {
+        Some(title) => Some(MenuItem::with_id(app, "update", title, true, None::<&str>)?),
+        None => None,
+    };
+    if let Some(update) = &update {
+        items.push(update);
+    }
+    items.push(&separator);
+    items.push(&quit);
+    let menu = Menu::with_items(app, &items)?;
     Ok(menu)
 }
 
@@ -219,6 +224,10 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             "ocr" => {
                 show_main(app);
                 let _ = app.emit("app://open-ocr", ());
+            }
+            "update" => {
+                show_main(app);
+                let _ = app.emit("app://open-updates", ());
             }
             "quit" => app.exit(0),
             _ => {}
@@ -364,6 +373,8 @@ pub fn run() {
         .plugin(shortcut_plugin)
         .manage(AppState::default())
         .manage(share::ShareState::default())
+        .manage(history::HistoryState::default())
+        .manage(update::UpdateState::default())
         .invoke_handler(tauri::generate_handler![
             files::inspect_files,
             files::perform_file_action,
@@ -376,6 +387,11 @@ pub fn run() {
             files::render_pdf_pages,
             files::cleanup_pdf_pages,
             files::save_text_near,
+            history::history_list,
+            history::history_record,
+            history::history_set_pinned,
+            history::history_remove,
+            history::history_clear,
             settings::get_app_settings,
             settings::set_output_directory,
             settings::set_file_output_mode,
@@ -385,7 +401,17 @@ pub fn run() {
             settings::set_autostart,
             settings::check_output_access,
             settings::set_language,
+            settings::set_capture_after,
+            settings::set_update_check_enabled,
+            settings::set_setup_reviewed,
+            settings::get_wedge_orders,
+            settings::set_wedge_order,
             settings::reveal_output_directory,
+            update::update_check,
+            update::update_status,
+            update::update_download,
+            update::update_install,
+            update::update_clear,
             settings::open_files_permission_settings,
             runtime::machine_info,
             runtime::install_runtime_component,
@@ -397,6 +423,7 @@ pub fn run() {
             capture::capture_fullscreen,
             capture::copy_file_to,
             capture::open_screen_recording_settings,
+            recording::recording_capabilities,
             recording::start_recording,
             recording::stop_recording,
             recording::recording_status,
@@ -457,6 +484,7 @@ pub fn run() {
             register_shortcuts(app.handle())?;
             drag_bridge::spawn(app.handle());
             share::spawn(app.handle());
+            update::spawn_startup_check(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -530,12 +558,15 @@ mod tests {
             ("drag_bridge.rs", include_str!("drag_bridge.rs")),
             ("editor.rs", include_str!("editor.rs")),
             ("files.rs", include_str!("files.rs")),
+            ("history.rs", include_str!("history.rs")),
             ("hotkeys.rs", include_str!("hotkeys.rs")),
             ("pdf.rs", include_str!("pdf.rs")),
             ("recording.rs", include_str!("recording.rs")),
+            ("result_card.rs", include_str!("result_card.rs")),
             ("runtime.rs", include_str!("runtime.rs")),
             ("settings.rs", include_str!("settings.rs")),
             ("share.rs", include_str!("share.rs")),
+            ("update.rs", include_str!("update.rs")),
         ];
         for (name, source) in sources {
             // Tests may spawn freely; only shipped code needs the helper.

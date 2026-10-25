@@ -79,18 +79,36 @@ pub struct EditorInfo {
     pub kind: String,
 }
 
+/// What the capture overlay asks for when a recording starts.
+///
+/// The two switches are honest: `recording_capabilities` says which of them the
+/// current platform honours, and the overlay hides the rest, so a choice the backend
+/// would ignore can never be presented as applied.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct RecordingOptions {
+    /// Record audio alongside video.
     pub audio: bool,
-    pub fps: u32,
+    /// Requested frame rate, where the backend accepts one. `None` leaves the choice
+    /// to the capture tool instead of inventing a number.
+    pub fps: Option<u32>,
 }
 
 impl Default for RecordingOptions {
     fn default() -> Self {
         Self {
             audio: false,
-            fps: 30,
+            fps: None,
         }
     }
+}
+
+/// Which recording switches this platform actually implements.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingCapabilities {
+    /// Whether audio is captured with the video.
+    pub audio: bool,
+    /// Whether a frame-rate request is passed to the capture tool.
+    pub fps: bool,
 }

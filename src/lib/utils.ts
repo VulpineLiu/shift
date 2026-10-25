@@ -1,6 +1,3 @@
-import { isTauri } from "@tauri-apps/api/core";
-import { emit } from "@tauri-apps/api/event";
-
 export function basename(path: string): string {
   return path.split(/[\\/]/).pop() || path;
 }
@@ -101,34 +98,44 @@ export interface RecentItem {
   path: string;
   kind: "image" | "video" | "text" | "file";
   at: number;
+  /** Pinned rows survive the capacity limit, a missing file, and Clear. */
+  pinned: boolean;
 }
 
+/**
+ * The history library lives in Rust, next to the other app data, and Rust writes
+ * it the moment a result exists. Nothing here keeps a second copy: these helpers
+ * cover the plain-webview preview, where there is no backend to ask, and let a
+ * window tell its own listeners that the list moved.
+ */
 const RECENT_KEY = "shift.recent";
 const RECENT_EVENT = "shift:recent";
 
-export function getRecentItems(): RecentItem[] {
+/** Browser-only stand-in for the Rust library, used when there is no backend. */
+export function getLocalRecentItems(): RecentItem[] {
   try {
     const parsed = JSON.parse(localStorage.getItem(RECENT_KEY) || "[]");
-    return Array.isArray(parsed) ? parsed.slice(0, 8) : [];
+    return Array.isArray(parsed)
+      ? parsed
+          .map((entry: RecentItem) => ({ ...entry, pinned: entry.pinned ?? false }))
+          .slice(0, 8)
+      : [];
   } catch {
     return [];
   }
 }
 
-export function rememberRecent(item: RecentItem) {
-  const current = getRecentItems().filter((entry) => entry.path !== item.path);
-  localStorage.setItem(RECENT_KEY, JSON.stringify([item, ...current].slice(0, 8)));
-  window.dispatchEvent(new Event(RECENT_EVENT));
-  // Radial and editor windows record results too; tell the main window to re-read.
-  if (isTauri()) void emit("app://recent-changed", item.path).catch(() => undefined);
-}
-
-export function setRecentItems(items: RecentItem[]) {
+export function setLocalRecentItems(items: RecentItem[]) {
   localStorage.setItem(RECENT_KEY, JSON.stringify(items.slice(0, 8)));
+  announceRecentChange();
+}
+
+/** Notify listeners in this window; other windows hear the Rust broadcast. */
+export function announceRecentChange() {
   window.dispatchEvent(new Event(RECENT_EVENT));
 }
 
-/** Subscribe to recent-list changes from this window or any other Shift window. */
+/** Subscribe to history changes, whether they came from this window or Rust. */
 export function subscribeRecent(listener: () => void) {
   window.addEventListener(RECENT_EVENT, listener);
   window.addEventListener("storage", listener);

@@ -1,0 +1,13 @@
+# The Linux image builds its own toolchain and dependency tree; copying the host
+# artefacts in would be both enormous and the wrong architecture.
+node_modules
+src-tauri/target
+src-tauri/binaries
+artifacts
+dist
+public/tesseract
+.github
+docs
+codesign0
+.git
+.DS_Store

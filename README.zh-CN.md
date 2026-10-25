@@ -17,11 +17,14 @@ Shift 把文件格式转换、截图、录屏、标注、中英双语 OCR 全部
 - [工具](#工具)
 - [压缩、命名与取消](#压缩命名与取消)
 - [截图与标注](#截图与标注)
+- [截图历史库](#截图历史库)
 - [OCR](#ocr)
 - [发送到设备](#发送到设备)
+- [自定义圆环顺序](#自定义圆环顺序)
 - [快捷键](#快捷键)
 - [菜单栏菜单](#菜单栏菜单)
 - [输出位置](#输出位置)
+- [软件更新](#软件更新)
 - [外部依赖](#外部依赖)
 - [平台支持情况](#平台支持情况)
 - [从源码构建](#从源码构建)
@@ -43,7 +46,9 @@ Shift 把文件格式转换、截图、录屏、标注、中英双语 OCR 全部
 
 **默认批量处理。** 选中十个文件、一次拖拽，就产出十个结果。结果保存在源文件旁边并附带描述性后缀（`report (compressed).pdf`、`photo (rotated).png`），永不覆盖——重名时自动追加序号。也可在设置中改为统一收集到一个文件夹。
 
-**截图能力内置。** 冻结画面的区域截图、全屏截图，以及带悬浮计时器的区域录屏；一律对准光标所在的显示器，而非固定主屏。截图完成后直接进入标注画布，并可钉成常驻置顶的参考窗口。
+**截图能力内置。** 冻结画面的区域截图、全屏截图，以及带悬浮计时器的区域录屏；一律对准光标所在的显示器，而非固定主屏。一次截图完成后会弹出一张浮动结果卡片——复制、钉住、发送、在文件夹中显示、编辑，各一键完成，稍候自行退场；也可在设置里改成直接进入标注画布。截图与录屏选项只给出当前平台真正支持的开关：macOS 提供麦克风，FFmpeg 后端提供帧率。
+
+**圆环顺序由你决定。** 已保存的顺序会按文件类型、按环重新排列扇区，最常用的转换不再压在扇区环的最下面。（调整顺序的设置标签页已移除，顺序改由 `settings.json` 提供，应用内暂无修改入口。）
 
 **OCR 在本机运行。** 英文与简体中文，使用随应用打包的 Tesseract WASM 引擎与语言模型。OCR 全流程不发生任何网络请求。
 
@@ -71,6 +76,8 @@ Shift 常驻菜单栏（macOS）与通知区域（Windows），同时也有普�
 
 **一次处理多个文件。** 用 `⌘`/`Ctrl` 点选多个文件后一起拖动，每个文件都会被处理。选中 2 张以上图片或 2 个以上 PDF 时，会出现「合并」扇区，把它们合成一个 PDF。
 
+**首次运行。** Shift 会弹出一张检查卡片，包含四项：屏幕录制权限、三个输出目录是否可写、当前实例是否持有全局快捷键、缺少哪些可选工具。每一项都会说明查到了什么并给出修复入口——打开隐私设置、退出其他实例——直接关掉卡片不会改动任何设置。每个安装只会弹一次——升级后的首次启动也算一次，因为旧设置文件里没有这个字段；删掉 `settings.json` 里的 `setupReviewed` 就能再看一次。
+
 **macOS 首次运行。** 需要授予「屏幕录制」（截图与录屏），以及你所选输出目录的「文件与文件夹」访问权限。截图前会先检查权限，因此被拒绝时给出的是可操作的提示，而不是一张全黑截图。
 
 ## 支持的文件
@@ -90,7 +97,7 @@ Shift 常驻菜单栏（macOS）与通知区域（Windows），同时也有普�
 
 解码与编码能力并不对称，应用也不会假装对称：
 
-- **图片解码**由 Rust `image` 原生完成，支持 PNG、JPEG、WebP、TIFF、BMP 与 GIF。HEIC/HEIF/AVIF 先走系统解码器——macOS 用 `sips`，其他系统用 ImageMagick——随后可转换为圆环提供的任意图片格式（包括 WEBP），也可生成 PDF。像素类工具仍需要可原生读取的输入，因此旋转、翻转、黑白、50%、压缩前请先转一次。
+- **图片解码**由 Rust `image` 原生完成，支持 PNG、JPEG、WebP、TIFF、BMP 与 GIF。HEIC/HEIF/AVIF 先走系统解码器——macOS 用 `sips`，其他系统用 ImageMagick——随后可转换为圆环提供的任意图片格式（包括 WEBP），也可生成 PDF。像素类工具走同一条解码路径，因此手机截图可以直接旋转或缩小；由于这条路径无法写出 HEIC，结果会以 PNG 保存。
 - **图片编码**中的 PNG、JPG、WebP、TIFF、BMP、GIF 为原生实现。HEIC 导出在 macOS 走 `sips`，在 Windows/Linux 需要 ImageMagick。AVIF 可作为输入，但暂未提供为导出目标。
 - **音视频**的解码与编码范围取决于你的 FFmpeg 构建；菜单为视频提供 MP4、MOV、GIF、M4A，为音频提供 M4A、WAV、MP3。
 - **Office 文件**以纯 Rust 解析（表格用 `calamine`，PPTX 用 `zip` + `quick-xml`），因此无需安装 Office。
@@ -130,11 +137,13 @@ Shift 常驻菜单栏（macOS）与通知区域（Windows），同时也有普�
 
 工具环（拖拽时按 `Option + Shift`）。这些是一次手势完成的操作，不属于格式转换。
 
+「同类型」指输出沿用输入的文件容器，只有一个例外：HEIC 与 AVIF 在本机能读不能写，因此对它们执行像素类工具时会输出 PNG，文件名也会如实标注。
+
 | 工具 | 适用对象 | 输出 | 具体行为 |
 | --- | --- | --- | --- |
 | 压缩 | 图片、视频、音频、PDF | `.jpg`/`.png`、`.mp4`、`.m4a`、`.pdf` | 图片按 q68 重编码（含透明通道则保留 PNG）；视频 CRF 28；音频转 128k AAC；PDF 先把内嵌图片降采样到 ≤1440 px 的 q60 JPEG，再清理对象 |
-| 元数据 | 图片、PDF | 同类型，` (clean)` | 重写图片并去除 EXIF；移除 PDF 的 `/Info` 与 `/Metadata` |
-| 旋转 | 图片、PDF | 同类型，` (rotated)` | 顺时针 90°，按各格式的原生方式处理 |
+| 移除元数据 | 图片、PDF | 同类型，` (clean)` | 重写图片并去除 EXIF；移除 PDF 的 `/Info` 与 `/Metadata`。只负责移除并另存副本，不展示文件携带了什么 |
+| 旋转 | 图片、PDF | 同类型，` (rotated)` | 顺时针 90°，按各格式的原生方式处理；HEIC/AVIF 输入在本机没有对应编码器，因此结果转为 PNG |
 | 翻转 | 图片 | 同类型，` (flipped)` | 水平镜像 |
 | 黑白 | 图片 | 同类型，` (bw)` | 转灰度 |
 | 50% | 图片 | 同类型，` (50%)` | 宽高各减半，Lanczos3 |
@@ -178,7 +187,11 @@ PDF 转图片与 PDF 拆分会新建 `名称 pages` 文件夹，内含 `Page 001
 
 ## 截图与标注
 
-**截图。** 区域截图会先铺一层冻结画面，你框选的像素就是最终得到的像素；全屏截图则完全跳过遮罩层。录屏在 macOS 通过 `screencapture -v` 保存为 MOV，其他系统通过 FFmpeg 保存为 MP4，配有悬浮计时器与停止按钮。Linux 截图优先使用 `grim`，回退到 `gnome-screenshot`。
+**截图。** 区域截图会先铺一层冻结画面，你框选的像素就是最终得到的像素；全屏截图则完全跳过遮罩层。录屏在 macOS 通过 `screencapture -v` 保存为 MOV，其他系统保存为 MP4，配有悬浮计时器与停止按钮。Linux 截图优先使用 `grim`，回退到 `gnome-screenshot`；Wayland 下录屏改用 `wf-recorder`，因为 ffmpeg 的 `x11grab` 在那里没有可抓取的根窗口。
+
+**录屏选项是诚实的。** `src-tauri/src/recording.rs` 中的 `capabilities()` 报告当前后端真正实现的能力，截图工具条只渲染这些开关。macOS 有麦克风开关（`screencapture -g`）而没有帧率选项，因为 `screencapture -v` 根本不支持帧率；Windows 与 Linux 提供 15 / 24 / 30 三档帧率，它会成为 ffmpeg 的 `-framerate`，但没有麦克风开关，因为抓屏尚未接入音频输入。界面上不存在“按了却被编码器默默忽略”的选项。
+
+**结果卡片。** 截图或录屏完成后，右下角出现一张卡片，提供**复制**、**钉住**、**发送**、**在文件夹中显示**、**编辑**。鼠标悬停时卡片停留，否则自行退场。设置 → 截图 可选择这一刻的行为是**结果卡片**还是**在编辑器中打开**；当卡片窗口无法创建时会自动回退到编辑器。
 
 **标注。** 编辑器画布按原始分辨率工作，并写出新的 PNG，因此源文件永远不会被修改。
 
@@ -187,6 +200,8 @@ PDF 转图片与 PDF 拆分会新建 `名称 pages` 文件夹，内含 `Page 001
 | 矩形、箭头、高亮、文字 | 自由绘制，每条标注可单独设置颜色与粗细 |
 | 打码 | 实心黑色遮挡条，直接烧入输出图像——不是覆盖层 |
 | 马赛克 | 对下方区域做真实采样降采样，不是半透明填充 |
+| 模糊 | 对区域做真正的高斯模糊，并按绘制形状裁切 |
+| 图章 | 对勾、叉、星三种矢量图章，点一下即可落下 |
 | 序号 | 自动递增的序号标记 |
 | 裁剪 | 交互式裁剪，带明确的「应用裁剪」步骤 |
 | 加背景 | 圆角留白加渐变底，适合社交配图与幻灯片插图 |
@@ -196,6 +211,16 @@ PDF 转图片与 PDF 拆分会新建 `名称 pages` 文件夹，内含 `Page 001
 | 钉在屏幕上 | 将图片浮为置顶窗口，带复制与关闭按钮 |
 
 **编辑器。** 图片打开标注画布；视频打开播放器；`txt` `md` `csv` `tsv` `html` `htm` 以可编辑文本打开。每个编辑器都提供复制、另存为、打开、在文件夹中显示、文字识别与复制文字。
+
+## 截图历史库
+
+每一次截图、每一个转换结果、每一个收到的文件，都由 Rust 写入应用数据目录中的同一个历史库（`history.json`，上限 300 条），因此所有窗口共用一份列表，清理 Webview 缓存也不会丢失。主窗口的「最近使用」卡片就是这个历史库：
+
+- 列表超过几行后出现**搜索**框，按文件名过滤。
+- **收藏**某一行，即可在容量上限、文件被删除、以及「清空」之后仍然保留。
+- **移除**单行，或**清空**整个库——收藏项会保留。
+- **把某一行拖出去**即可交给访达、邮件撰写窗口或聊天软件：该行携带 `file://` 链接，因此接收方拿到的是文件本身而不是一段路径文本；同时附带纯文本路径与 Shift 内部类型，供编辑器与圆环使用。
+- 单击某一行在编辑器中打开；行内其余按钮负责发送、在文件夹中显示、以及钉在屏幕上。
 
 ## OCR
 
@@ -221,6 +246,12 @@ Shift 会持续维护局域网内其他 Shift 实例的列表，并据此提供 
 
 整个过程只涉及本地网络——不会有任何数据走到互联网。接收端监听全部网卡，因此 macOS 首次分享时会弹出防火墙授权提示，允许后双向均可用。
 
+## 自定义圆环顺序
+
+已保存的顺序会为某种文件类型、某个环重新排列扇区。**调整顺序的界面已不在设置中**——该标签页已移除，因此顺序仍从 `settings.json` 的 `wedgeOrders` 读取并生效，但当前界面不再提供修改入口。已有的顺序照常工作，只是暂时无法在应用内更改。
+
+决定“存在哪些操作”的是目录而不是预设。`src/lib/radialOrder.ts` 保存每种文件类型、每个环的扇区列表，保存的顺序只能对目录为该类型提供的 id 重新排列：日后被移除的 id 会自动从圆环消失，新增的 id 会插入默认位置，而**发送**永远排在最后。改完下一个手势即生效——不需要重启，也不可能把某个操作藏到你找不到。
+
 ## 快捷键
 
 | 操作 | macOS | Windows / Linux |
@@ -244,6 +275,7 @@ Shift 会持续维护局域网内其他 Shift 实例的列表，并据此提供 
 | Capture full screen | `Alt+Shift+4` | 截取光标所在显示器 |
 | Record area | `Alt+Shift+3` | 开始或停止区域录屏 |
 | OCR an image… | — | 选择图片并在本机识别文字 |
+| Update available *x.y.z* | — | 仅在有可用更新时出现；打开设置 → 软件更新 |
 | Quit Shift | `Cmd/Ctrl+Q` | 退出；若有正在进行的录屏会先收尾保存 |
 
 菜单项文案会跟随应用语言；macOS 系统权限弹窗仍为英文。
@@ -260,13 +292,20 @@ Shift 会持续维护局域网内其他 Shift 实例的列表，并据此提供 
 
 三者都可在设置中修改。文件操作另外提供「统一收集到一个文件夹」模式，替代默认的就近保存。设置面板会列出所有解析后的实际路径、检测该路径是否可写、在文件管理器中显示它，并在缺少权限时直接跳转到 macOS 的「屏幕录制」与「文件与文件夹」隐私面板。
 
+## 软件更新
+
+更新通道就是这个仓库：一条 `releases` 分支保存安装包以及 `shift-update.json` 清单，清单写明每个安装包的名称、体积与 SHA256。更新源地址在构建时由 git 远端推导——已适配 Gitea、GitHub、GitLab 三种形式，也可用 `SHIFT_UPDATE_URL` 覆盖——因此无需额外部署任何更新服务。
+
+Shift 每天启动时检查一次（也可在设置 → **软件更新** 中手动检查），读取清单、按含预发布规则的 semver 比较版本，然后提供下载。下载完成的安装包在安装前要通过两道校验：字节数完全一致，以及重新计算的 SHA256 与清单一致。任一不符即删除文件并明确报错，因此半成品永远不会被启动。发布只需一条命令 `scripts/publish-release.sh`；`docs/RELEASE.md` 说明清单格式、参数，以及可选的 ed25519 清单签名——签名用来证明清单的来源，而不只是下载内容与清单一致。
+
 ## 外部依赖
 
 核心转换、环形菜单、截图与 OCR 在零外部依赖的情况下即可工作。以下工具用于扩展能力边界：
 
 | 工具 | 用于 | macOS | Windows | Linux |
 | --- | --- | --- | --- | --- |
-| FFmpeg | 音视频转换/压缩、720p、静音、截帧、单声道；非 macOS 的录屏 | 可选 | 录屏**必需** | **必需** |
+| FFmpeg | 音视频转换/压缩、720p、静音、截帧、单声道；非 macOS 的录屏 | 可选 | 录屏**必需** | **必需**（音视频与 X11 录屏） |
+| `wf-recorder` | Wayland 下的区域录屏 | 不需要 | 不需要 | Wayland 下需要 |
 | Pandoc | 文档 ↔ DOCX/RTF/HTML/TXT/MD（仅支持 ODT 输入） | 可选 | 需要 | 需要 |
 | Typst | Pandoc 文档转 PDF 引擎 | 不需要（AppKit） | 需要 | 需要 |
 | Poppler `pdftoppm` | PDF 转图片、PDF 转 Word、扫描件 OCR | 不需要（PDFKit） | 需要 | 需要 |
@@ -281,9 +320,12 @@ Shift 会在设置 →「运行组件」中显示当前机器实际找到的工�
 | --- | --- | --- | --- |
 | 环形菜单、编辑器、托盘、多语言 | 支持 | 支持 | 支持 |
 | 拖拽唤起圆环 | AppKit 全局拖拽桥 | Win32 拖拽状态轮询 + 原生拖放 | 暂不支持——仅能用主窗口选择文件 |
-| 区域 / 全屏截图 | `screencapture` | PowerShell | `grim` / `gnome-screenshot` |
+| 区域 / 全屏截图 | `screencapture` | Win32 GDI `BitBlt` | `grim` / `gnome-screenshot` |
 | 跟随光标所在显示器 | 支持 | 支持 | `grim` 输出选择 |
-| 区域录屏 | `screencapture -v` | FFmpeg | 计划中 |
+| 区域录屏 | `screencapture -v`，`-g` 录麦克风 | FFmpeg `x11grab` | Wayland 用 `wf-recorder`，X11 用 FFmpeg `x11grab` |
+| 录屏帧率控制 | 不提供（`screencapture` 不支持） | 15 / 24 / 30 | 15 / 24 / 30（`-r` / `-framerate`） |
+| 截图历史库、把某一行拖出 | 支持 | 支持 | 支持 |
+| 基于 git 的更新：SHA256 校验，清单可选签名 | 支持 | 发布的是 x64 安装包；ARM 机器经由 `windows` 回退拿到同一份 | 可检查并下载；Linux 没有发布产物，因此结果是「没有对应产物」 |
 | 图片转换与编辑 | 支持 | 支持 | 支持 |
 | HEIC / AVIF 编码 | `sips` | ImageMagick | ImageMagick |
 | PDF 文字、合并、拆分、旋转、压缩 | 支持 | 支持 | 支持 |
@@ -308,7 +350,7 @@ pnpm tauri dev
 
 ```bash
 pnpm check          # TypeScript 类型检查，不产出文件
-pnpm test           # 转换矩阵与拖拽命中测试
+pnpm test           # 转换矩阵、圆环目录与顺序、拖拽载荷、投放命中测试
 pnpm build          # tsc + vite
 cargo test --lib    # Rust 单元测试，在 src-tauri/ 目录下执行
 pnpm tauri build    # 发布构建
@@ -324,19 +366,21 @@ PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH" \
   pnpm tauri build --target universal-apple-darwin --bundles app,dmg
 ```
 
-产物是单个通用 Mach-O，内含通用版的拖拽、PDF 渲染与文档渲染伴生进程。若要在 macOS 上同时生成 Windows 安装版与便携版，运行 `scripts/build-windows-release.sh`；完整步骤见 `docs/BUILD_WINDOWS.md`。
+产物是单个通用 Mach-O，内含通用版的拖拽、PDF 渲染与文档渲染伴生进程。若要在 macOS 上生成 Windows 安装版与便携版（x64 与 ARM64 两种架构都会产出），运行 `scripts/build-windows-release.sh`；完整步骤见 `docs/BUILD_WINDOWS.md`。
 
 **权限（macOS）。** 截图与录屏需要「屏幕录制」，输出目录需要「文件与文件夹」授权，带声音录屏需要「麦克风」。Shift 会在打开截图遮罩前先检查屏幕录制权限，因此被拒绝时给出的是可操作的提示，而不是一张全黑的截图。使用本地证书签名的开发构建，可以在反复重编译后保持这些授权稳定；对外分发则需要 Developer ID 证书与公证。
 
 ## 架构
 
 ```text
-React UI                     单一 webview，六种视图
-  ├─ main        拖放目标、快捷键、最近输出、语言、设置
+React UI                     单一 webview，八类视图
+  ├─ main        拖放目标、快捷键、截图历史库、设置、首次运行检查
   ├─ radial      透明置顶圆环，按极角扇区命中判定
   ├─ capture     冻结画面 + 区域框选
   ├─ recorder    悬浮计时器与停止按钮
   ├─ editor      标注画布、文本、视频、OCR
+  ├─ result-*    截图后的浮动结果卡片，每次截图一个窗口
+  ├─ share-*     收到文件时的确认卡片
   └─ pin         置顶图片参考窗
 
 Tauri 命令层                  src-tauri/src/
@@ -344,16 +388,19 @@ Tauri 命令层                  src-tauri/src/
   ├─ pdf.rs        合并、拆分、旋转、文字、渲染、图片转 PDF、压缩
   ├─ office.rs     PPTX 与电子表格转 Markdown，纯 Rust
   ├─ capture.rs    全屏截图、区域裁剪、交给编辑器
-  ├─ recording.rs  screencapture / FFmpeg，以中断方式收尾
+  ├─ recording.rs  screencapture / FFmpeg / wf-recorder，以信号方式收尾
   ├─ drag_bridge.rs  全局拖拽检测、圆环模式、环形菜单定位
-  ├─ settings.rs   输出目录、可写检测、隐私面板深链
+  ├─ settings.rs   输出目录、可写检测、圆环顺序、隐私面板深链、首次检查标记
+  ├─ history.rs    共享的截图/结果历史库、收藏与容量上限
+  ├─ result_card.rs  浮动结果卡片，自带自动关闭保险
+  ├─ update.rs     清单拉取、签名校验、semver 比较、SHA256 校验
   ├─ share.rs      局域网广播、设备列表、AirDrop 式文件传输
   └─ editor.rs     编辑器与钉图窗口状态
 
 平台适配器
   ├─ macOS    AppKit 拖拽桥 · PDFKit 渲染器 · AppKit 文档渲染器 · screencapture
-  ├─ Windows  Win32 拖拽状态 · PowerShell 截图 · FFmpeg · Poppler
-  └─ Linux    grim / gnome-screenshot · FFmpeg · Poppler
+  ├─ Windows  Win32 拖拽状态 · GDI BitBlt 截图 · FFmpeg · Poppler
+  └─ Linux    grim / gnome-screenshot · wf-recorder（Wayland）· FFmpeg · Poppler
 
 OCR：Tesseract.js WASM + 内置 eng/chi_sim，进程内运行，完全离线
 ```
@@ -364,36 +411,41 @@ OCR：Tesseract.js WASM + 内置 eng/chi_sim，进程内运行，完全离线
 
 ```text
 src/                 React 界面、多语言（en/zh）、Tauri API 绑定
-src/lib/             纯函数与 Node 测试，包括格式转换矩阵
+src/lib/             纯函数与 Node 测试：转换矩阵、圆环目录与顺序、拖拽载荷、
+                     投放命中判定
 src-tauri/src/       Rust 命令层与平台适配器
 native/macos/        Swift 伴生进程：拖拽桥、PDF 渲染器、文档渲染器
                      由 pnpm mac:drag-bridge 编译进 src-tauri/binaries/
-scripts/             OCR 资源准备、macOS 伴生进程、Windows 安装器与发布构建
+scripts/             OCR 资源准备、macOS 伴生进程、Windows 安装器、发布构建、
+                     清单发布与清单签名
 public/tesseract/    WASM 内核与语言模型，构建生成，不提交
 assets/              应用图标源文件
 src-tauri/icons/     各平台生成的应用图标
-docs/                Windows 构建指南、路线图
-.github/workflows/   macOS 与 Windows CI
+docs/                Windows 构建指南、发布与更新通道、路线图、移动端规划
+scripts/linux/       在 CI 之外构建 Linux deb/AppImage 的 Dockerfile
+.github/workflows/   macOS、Windows、Linux 的 CI 定义（见「参与贡献」）
 FileFlipper/         独立姊妹项目，拥有自己的仓库
 ```
 
 ## 隐私
 
-Shift 不发起任何互联网请求。文件在本地读取、转换、写回；OCR 在进程内基于内置模型运行；最近输出只是本地列表。既不上传，也不收集。
+Shift 对文件做的任何处理都不会发起互联网请求。文件在本地读取、转换、写回；OCR 在进程内基于内置模型运行；截图历史库只是一个本地文件。既不上传，也不收集。
 
-唯一的例外取决于你是否使用：**发送到设备** 只与本地网络通信——`239.255.77.88:47888` 上的 UDP 广播，加上两台电脑之间的直连 TCP，其中携带机器名称以便双方互相标注。在你打开该面板、或有另一台 Shift 向你发送文件之前，它不会有任何动作。
+只有两条路径会接触网络，且默认都不携带文件内容：**更新检查**每天最多通过 HTTPS 拉取一次清单（只有你按下按钮时才下载安装包）；而**发送到设备** 只与本地网络通信——`239.255.77.88:47888` 上的 UDP 广播，加上两台电脑之间的直连 TCP，其中携带机器名称以便双方互相标注。在你打开该面板、或有另一台 Shift 向你发送文件之前，它不会有任何动作。
 
 ## 已知限制
 
 - Windows/Linux 上的文档转 PDF 仍需 Pandoc 加上可用的 PDF 引擎；内置的 AppKit 渲染器仅限 macOS。
 - PPTX 与电子表格转 PDF 是文字与表格摘要，不是版面精确还原。
 - `.doc`、`.pages`、`.ppt`、`.key`、`.numbers` 可识别但不解析——请先导出为 DOCX/PPTX/XLSX。
-- HEIC/HEIF/AVIF 通过系统解码器转换，但像素类工具需要 PNG/JPEG/WebP/TIFF/BMP/GIF 输入；AVIF 暂未提供为导出目标。
+- HEIC/HEIF/AVIF 可由系统解码器读取，格式转换与像素类工具都能直接使用。只是这两种格式无法经由该路径写出，因此对它们执行像素类工具时会输出 PNG；AVIF 仍不提供为导出目标。
 - PDF 压缩会把内嵌图片降采样到最长边 1440 px、q60 JPEG。凡是不能确认可安全往返的内容都会原样保留——蒙版、索引色/CMYK、JPX/JBIG2/CCITT——因此部分特殊扫描件仍难以压缩。
-- Windows 的录屏与音视频转换要求 `PATH` 中存在 `ffmpeg`。
+- Windows 的录屏与音视频转换要求 `PATH` 中存在 `ffmpeg`。Linux 的音视频转换同样需要它，区域录屏在 Wayland 下需要 `wf-recorder`、在 X11 下需要 `ffmpeg`；本仓库所在的代码托管平台不会执行这些路径，因此 Linux 的截图能力只能算「可编译」而非「已验证」。
+- Linux 是「可构建」而非「已发布」：不提供 deb 或 AppImage，更新通道里也没有 `linux` 键，因此 Linux 构建检查更新时会得到「没有对应产物」。想要自己动手的人，可照 `scripts/linux/Dockerfile` 或 CI 里的 `linux` 任务来做。
+- 把历史库的某一行拖出去依赖 Webview 对 file URL 拖拽的支持。载荷使用标准的 `text/uri-list`（内含 `file://` 条目）并附带纯文本路径，仍需在每个平台上做手势级验证；在此之前，**发送**、**在文件夹中显示**以及行内按钮是交付文件的确定路径。
 - 局域网分享依赖允许点对点流量的网络。部分访客网络与企业 Wi-Fi 会丢弃组播；这些网络仍可经由广播与单播回退路径工作，但若路由器隔离了客户端，两个实例便无法相遇。
 - Windows 上每台电脑只有一个 Shift 实例能占用发现端口，因此额外实例不会出现在设备列表中。
-- Windows 代码路径可编译并通过 CI，但手势层面的验证仍需真实 Windows 设备。
+- Windows 与 Linux 代码路径在本机通过编译验证，而托管本仓库的平台并不运行 Actions，因此 CI 不会替你构建任何东西；手势层面的验证仍需真实 Windows 与 Linux 设备。
 - macOS 上签名身份变化后，可能需要重新授予「屏幕录制」与「辅助功能」权限。
 
 路线图见 `docs/ROADMAP.md`。
@@ -420,6 +472,12 @@ Shift 不发起任何互联网请求。文件在本地读取、转换、写回�
 **❓ 支持哪些语言？**
 英文与简体中文，可在主窗口的设置中切换；首次启动时跟随系统语言。托盘菜单会跟随所选语言；macOS 系统权限弹窗仍为英文。
 
+**❓ Shift 怎么获取更新？**
+就来自本仓库。`releases` 分支保存安装包，以及记录每个文件 SHA256 的清单；设置 → **软件更新** 会显示当前构建读取的更新源，每天检查一次，并在你点击后才下载。只有下载结果的字节数与重新计算的 SHA256 同时与清单一致，才允许安装。发布流程见 `docs/RELEASE.md` 与 `scripts/publish-release.sh`。
+
+**❓ 能调整扇区的先后顺序吗？**
+顺序会被照常执行，但目前没有修改它的界面：设置中已不再有该标签页。写在 `settings.json` 里 `wedgeOrders` 的顺序仍然生效；顺序只能排列这种文件真正支持的操作，不能增删，并且**发送**始终排在最后。
+
 **❓ 能先标注、不保存原图吗？**
 可以。标注工作在画布副本上，只有「保存副本」或「复制」才会写盘，源文件永不被修改。也可以「钉在屏幕上」，把它作为浮动参考图。
 
@@ -428,7 +486,9 @@ Shift 不发起任何互联网请求。文件在本地读取、转换、写回�
 
 ## 参与贡献
 
-新增一种格式 = 在 `src/lib/conversionFormats.ts` 的 `conversionFormats` 中加一项、补充对应矩阵测试，并在 `src-tauri/src/files.rs` 的 `perform_action` 中加对应处理；新增一个工具 = 在 `toolWedges` 加一项加一个 match 分支。推送前请运行 `pnpm check`、`pnpm test`、`pnpm build` 与 `cargo test --lib`。CI 会在 macOS 与 Windows 上产出 debug 包。
+新增一种格式 = 在 `src/lib/conversionFormats.ts` 的 `conversionFormats` 中加一项、补充对应矩阵测试，并在 `src-tauri/src/files.rs` 的 `perform_action` 中加对应处理；新增一个工具 = 在 `src/lib/radialOrder.ts` 的对应列表中加入 id、补上文案、在 `WEDGE_ICONS` 中加入图标，再在 `executeAction` 中加一个分支——圆环渲染的就是同一份目录，因此无需别处注册即可出现。推送前请运行 `pnpm check`、`pnpm test`、`pnpm build` 与 `cargo test --lib`。
+
+`.github/workflows/ci.yml` 内含 macOS、Windows、Linux 三个任务，但**本仓库所在的托管平台没有 Actions 执行器**，因此这些任务目前只是定义、而非实时保障：只有镜像到 GitHub、接入 Forgejo Actions，或由贡献者本地执行时才会真正构建。CI 会执行的就是上面这四条命令，外加各平台的 `pnpm tauri build`；Linux 安装包可在普通 Docker 主机上用 `scripts/linux/Dockerfile` 构建。
 
 **欢迎二次开发。** 你可以免费使用、修改、再发布本代码，也可用于商业项目，只需保留原版权声明与 LICENSE 文件。
 

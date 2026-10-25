@@ -18,7 +18,8 @@ import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import { api } from "../lib/api";
 import { recognizeImage } from "../lib/ocr";
-import { basename, dirname, extensionOf, IS_MAC, rememberRecent } from "../lib/utils";
+import { basename, dirname, extensionOf, IS_MAC } from "../lib/utils";
+import { history } from "../lib/history";
 import type { EditorInfo } from "../types";
 import { ImageAnnotator } from "./ImageAnnotator";
 
@@ -45,11 +46,9 @@ export function Editor() {
     setOcrProgress(0);
     setOcrStatus("");
     setTextContent("");
-    rememberRecent({
-      path: next.path,
-      kind: next.kind,
-      at: Date.now(),
-    });
+    // Anything opened for editing belongs in the library. Rust assigns the kind
+    // and timestamp, so the editor does not classify the file a second time.
+    void history.record([next.path]).catch(() => undefined);
   }
 
   useEffect(() => {

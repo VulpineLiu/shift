@@ -103,6 +103,11 @@ pub fn preferred(stored: Option<&str>) -> &'static str {
     from_setting(stored).unwrap_or_else(system_language)
 }
 
+/// The tray row that advertises a newer release, e.g. "Update available 0.2.0".
+pub fn update_available(language: &str, version: &str) -> String {
+    format!("{}{}", tray_titles(language).update, version)
+}
+
 /// Tray titles. Kept here rather than in the webview bundle because the tray has
 /// to be right before the first window has loaded.
 pub struct TrayTitles {
@@ -111,6 +116,8 @@ pub struct TrayTitles {
     pub fullscreen: &'static str,
     pub record: &'static str,
     pub ocr: &'static str,
+    /// Suffix for the update row, which the caller formats with a version number.
+    pub update: &'static str,
     pub quit: &'static str,
 }
 
@@ -122,6 +129,7 @@ pub fn tray_titles(language: &str) -> TrayTitles {
             fullscreen: "全屏截图",
             record: "区域录屏",
             ocr: "识别图片文字…",
+            update: "发现新版本 ",
             quit: "退出 Shift",
         }
     } else {
@@ -131,6 +139,7 @@ pub fn tray_titles(language: &str) -> TrayTitles {
             fullscreen: "Capture full screen",
             record: "Record area",
             ocr: "OCR an image…",
+            update: "Update available ",
             quit: "Quit Shift",
         }
     }
@@ -139,6 +148,12 @@ pub fn tray_titles(language: &str) -> TrayTitles {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_update_row_carries_the_version() {
+        assert_eq!(update_available(CHINESE, "0.2.0"), "发现新版本 0.2.0");
+        assert_eq!(update_available(ENGLISH, "0.2.0"), "Update available 0.2.0");
+    }
 
     #[test]
     fn chinese_variants_all_select_chinese() {

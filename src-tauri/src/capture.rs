@@ -11,7 +11,7 @@ use crate::{
     editor,
     files::app_cache_dir,
     models::{ActionOutcome, CaptureSessionInfo, CaptureSource, NormalizedRect},
-    settings, AppState,
+    result_card, settings, AppState,
 };
 
 #[cfg(target_os = "macos")]
@@ -425,15 +425,31 @@ fn finish_capture(
         }
     }
     dismiss_capture(app);
-    editor::show_editor(app, &output)?;
-    let _ = app.emit(
-        "app://file-result",
+    hand_off(app, &output);
+    crate::history::publish_result(
+        app,
         ActionOutcome {
             outputs: vec![output.to_string_lossy().to_string()],
             message: "Screenshot saved.".into(),
         },
     );
     Ok(output.to_string_lossy().to_string())
+}
+
+/// Route a finished capture per the Capture-after setting. The card is allowed to
+/// fail silently: a screenshot that saved is more important than an overlay that
+/// could not be built, and the file is already on disk and copied by then.
+fn hand_off(app: &AppHandle, output: &Path) {
+    match settings::load(app).capture_after {
+        settings::CaptureAfter::Editor => {
+            let _ = editor::show_editor(app, output);
+        }
+        settings::CaptureAfter::Card => {
+            if result_card::show(app, output).is_err() {
+                let _ = editor::show_editor(app, output);
+            }
+        }
+    }
 }
 
 pub fn capture_fullscreen_core(app: &AppHandle, state: &AppState) -> Result<String, String> {

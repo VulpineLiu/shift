@@ -40,14 +40,23 @@ Windows artefacts without a Windows host:
 
 ```bash
 brew install makensis
-scripts/build-windows-release.sh              # add --skip-build to reuse the EXE
+scripts/build-windows-release.sh              # both architectures
+scripts/build-windows-release.sh --arch arm64 # one of them
+scripts/build-windows-release.sh --skip-build # repackage the EXEs already built
 ```
 
-It writes `artifacts/Shift-Setup-<version>-win-x64.exe` (NSIS, per-user, no
-administrator rights), `artifacts/Shift-Portable-<version>-win-x64.zip` and
-refreshes `artifacts/SHA256SUMS.txt`. `scripts/windows-installer.nsi` installs
-into `%LOCALAPPDATA%\Programs\Shift`, and its uninstaller only removes what the
-installer wrote.
+For each architecture asked for it writes
+`artifacts/Shift-Setup-<version>-win-<arch>.exe` (NSIS, per-user, no administrator
+rights) and `artifacts/Shift-Portable-<version>-win-<arch>.zip`, then refreshes
+`artifacts/SHA256SUMS.txt`. Before packaging an EXE the script checks its PE machine
+field — `0x8664` for x64, `0xAA64` for ARM64 — so a binary built for the wrong target
+cannot end up in the wrong package, and each installer refuses a machine of the other
+architecture. `scripts/windows-installer.nsi` installs into
+`%LOCALAPPDATA%\Programs\Shift`, and its uninstaller only removes what the installer
+wrote.
+
+The ARM64 build is cross-compiled and packaged from macOS, but it has not been run on
+Windows-on-ARM hardware, so treat it as unverified on the device.
 
 ## Runtime behavior
 

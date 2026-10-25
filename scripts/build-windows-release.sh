@@ -1,11 +1,13 @@
 #!/bin/bash
 # Build the Windows release artefacts from current source.
 #
-#   scripts/build-windows-release.sh [--skip-build]
+#   scripts/build-windows-release.sh [--skip-build] [--arch x64|arm64]...
 #
-# Produces an NSIS per-user installer plus a portable ZIP in artifacts/, then
-# refreshes artifacts/SHA256SUMS.txt. Cross-compiled on macOS with cargo-xwin;
-# makensis is the Homebrew formula of the same name.
+# For every architecture asked for (both by default) this produces an NSIS
+# per-user installer plus a portable ZIP in artifacts/, then refreshes
+# artifacts/SHA256SUMS.txt. Cross-compiled on macOS with cargo-xwin; makensis is
+# the Homebrew formula of the same name. publish-release.sh maps the installers
+# onto the "windows" and "windows-arm64" keys of the update manifest.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -14,35 +16,90 @@ export RUSTUP_TOOLCHAIN=stable-aarch64-apple-darwin
 export RUSTC="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc"
 
 ROOT="$PWD"
-EXE=src-tauri/target/x86_64-pc-windows-msvc/release/shift.exe
 VERSION=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
-INSTALLER="artifacts/Shift-Setup-$VERSION-win-x64.exe"
-PORTABLE="artifacts/Shift-Portable-$VERSION-win-x64.zip"
 
-if [ "${1:-}" != "--skip-build" ]; then
-  echo "== frontend (Windows target: chrome105) =="
-  TAURI_ENV_PLATFORM=windows pnpm build
+ARCHES=""
+SKIP_BUILD=0
+usage() { echo "usage: $0 [--skip-build] [--arch x64|arm64]..." >&2 && exit 2; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --skip-build) SKIP_BUILD=1 ;;
+    --arch)
+      shift
+      case "${1:-}" in
+        x64|arm64) ARCHES="$ARCHES $1" ;;
+        *) usage ;;
+      esac
+      ;;
+    *) usage ;;
+  esac
+  shift
+done
+[ -n "$ARCHES" ] || ARCHES="x64 arm64"
 
-  echo "== rust cross build =="
-  # --features tauri/custom-protocol is mandatory: without it Tauri derives
-  # cfg(dev) and every window loads build.devUrl instead of the bundled assets.
-  CROSS_LOG=$(mktemp /tmp/shift-win-build.XXXXXX)
-  if ! (
-    cd src-tauri
-    cargo xwin build --target x86_64-pc-windows-msvc --release \
-      --features tauri/custom-protocol >"$CROSS_LOG" 2>&1
-  ); then
-    sed -n '1,240p' "$CROSS_LOG"
-    exit 1
-  fi
-  grep -Ev "^warning:|^\s+\||^\s+=|LNK4099|failed to load|^$|^\s+-->|^note:" \
-    "$CROSS_LOG" || true
+# A build can only verify a signed channel if the release key is compiled in. Derive
+# it from the signing key when the caller gave us one, and never do this quietly: the
+# alternative is two installers with the same version number and different trust.
+if [ -z "${SHIFT_UPDATE_PUBKEY:-}" ] && [ -n "${SHIFT_RELEASE_KEY:-}" ]; then
+  SHIFT_UPDATE_PUBKEY=$(python3 scripts/release-key.py pubkey "${SHIFT_RELEASE_KEY%.ed25519}.pub")
+  export SHIFT_UPDATE_PUBKEY
+fi
+if [ -n "${SHIFT_UPDATE_PUBKEY:-}" ]; then
+  echo "== release key baked in: ${SHIFT_UPDATE_PUBKEY:0:12}… =="
+else
+  echo "== no release key: this build will report the feed as unsigned =="
 fi
 
-test -f "$EXE"
+if [ "$SKIP_BUILD" != "1" ]; then
+  echo "== frontend (Windows target: chrome105) =="
+  TAURI_ENV_PLATFORM=windows pnpm build
+fi
 
-echo "== verify the frontend is embedded =="
-python3 - "$EXE" <<'PY'
+# One target triple, one expected PE machine and one release-note label per
+# architecture. The PE check is what stops an x64 binary shipping inside an
+# arm64 package because a build was pointed at the wrong target.
+for ARCH in $ARCHES; do
+  case "$ARCH" in
+    x64)   TARGET=x86_64-pc-windows-msvc;   PE_MACHINE=8664; MACHINE="64 位" ;;
+    arm64) TARGET=aarch64-pc-windows-msvc;  PE_MACHINE=aa64; MACHINE=ARM64 ;;
+  esac
+  EXE="src-tauri/target/$TARGET/release/shift.exe"
+  INSTALLER="artifacts/Shift-Setup-$VERSION-win-$ARCH.exe"
+  PORTABLE="artifacts/Shift-Portable-$VERSION-win-$ARCH.zip"
+  NOTES="artifacts/README-Windows-$ARCH.txt"
+
+  if [ "$SKIP_BUILD" != "1" ]; then
+    echo "== rust cross build ($ARCH: $TARGET) =="
+    # --features tauri/custom-protocol is mandatory: without it Tauri derives
+    # cfg(dev) and every window loads build.devUrl instead of the bundled assets.
+    CROSS_LOG=$(mktemp /tmp/shift-win-build.XXXXXX)
+    if ! (
+      cd src-tauri
+      cargo xwin build --target "$TARGET" --release \
+        --features tauri/custom-protocol >"$CROSS_LOG" 2>&1
+    ); then
+      sed -n '1,240p' "$CROSS_LOG"
+      exit 1
+    fi
+    grep -Ev "^warning:|^\s+\||^\s+=|LNK4099|failed to load|^$|^\s+-->|^note:" \
+      "$CROSS_LOG" || true
+  fi
+
+  test -f "$EXE"
+
+  echo "== PE machine check ($ARCH) =="
+  python3 - "$EXE" "$PE_MACHINE" <<PE
+import pathlib, struct, sys
+exe = pathlib.Path(sys.argv[1]).read_bytes()
+machine = struct.unpack_from("<H", exe, struct.unpack_from("<I", exe, 0x3C)[0] + 4)[0]
+expected = int(sys.argv[2], 16)
+if machine != expected:
+    sys.exit(f"{sys.argv[1]} is PE machine 0x{machine:04x}, expected 0x{expected:04x}")
+print(f"pe machine ok: 0x{machine:04x}")
+PE
+
+  echo "== verify the frontend is embedded =="
+  python3 - "$EXE" <<PY
 import pathlib, sys
 exe = pathlib.Path(sys.argv[1]).read_bytes()
 missing = [p.name for p in pathlib.Path("dist/assets").iterdir() if p.name.encode() not in exe]
@@ -68,17 +125,18 @@ if missing:
 print(f"embedded ok: {len(exe):,} byte exe carries the current dist/assets")
 PY
 
-echo "== windows notes =="
-STAGE=$(mktemp -d /tmp/shift-windows-release.XXXXXX)
-mkdir -p "$STAGE/portable/Shift-$VERSION-Windows-x64"
-python3 - "$STAGE" "$VERSION" <<'PY'
+  echo "== windows notes ($ARCH) =="
+  STAGE=$(mktemp -d /tmp/shift-windows-release.XXXXXX)
+  mkdir -p "$STAGE/portable/Shift-$VERSION-Windows-$ARCH"
+  python3 - "$STAGE" "$VERSION" "$ARCH" "$MACHINE" <<PY
 import pathlib, sys
-stage, version = pathlib.Path(sys.argv[1]), sys.argv[2]
-text = f"""Shift {version} - Windows x64
+stage = pathlib.Path(sys.argv[1])
+version, arch, machine = sys.argv[2:5]
+text = f"""Shift {version} - Windows {arch}
 
 系统要求
 --------
-- Windows 10 或 Windows 11（64 位）。
+- Windows 10 或 Windows 11（{machine}）。
 - Microsoft Edge WebView2 Runtime。当前 Windows 10/11 通常已内置；如果 Shift
   启动后窗口空白或无法打开，请从微软官方页面安装：
   https://developer.microsoft.com/microsoft-edge/webview2/
@@ -87,7 +145,7 @@ text = f"""Shift {version} - Windows x64
 
 安装
 ----
-1. 运行 Shift-Setup-{version}-win-x64.exe，默认安装到
+1. 运行 Shift-Setup-{version}-win-{arch}.exe，默认安装到
    %LOCALAPPDATA%\\Programs\\Shift，并创建开始菜单与桌面快捷方式。
 2. 这是未签名构建。若 SmartScreen 显示“Windows 已保护你的电脑”，请选择
    “更多信息” > “仍要运行”。
@@ -95,7 +153,7 @@ text = f"""Shift {version} - Windows x64
 
 便携版
 ------
-不想安装时，解压 Shift-Portable-{version}-win-x64.zip，直接运行其中的
+不想安装时，解压 Shift-Portable-{version}-win-{arch}.zip，直接运行其中的
 shift.exe。请先完整解压，不要在压缩包的预览窗口里运行。
 
 运行组件
@@ -120,49 +178,63 @@ WinGet 包映射：
 校验
 ----
 PowerShell：
-  Get-FileHash .\\Shift-Setup-{version}-win-x64.exe -Algorithm SHA256
+  Get-FileHash .\\Shift-Setup-{version}-win-{arch}.exe -Algorithm SHA256
 """
 (stage / "README-Windows.txt").write_bytes(text.replace("\n", "\r\n").encode("utf-8"))
 PY
 
-echo "== NSIS installer =="
-mkdir -p artifacts
-SIZE_KB=$(( ($(stat -f%z "$EXE" 2>/dev/null || stat -c%s "$EXE") + 1023) / 1024 ))
-makensis -V2 \
-  -DSHIFT_EXE="$PWD/$EXE" \
-  -DLICENSE_FILE="$PWD/LICENSE" \
-  -DNOTICES_FILE="$PWD/THIRD_PARTY_NOTICES.md" \
-  -DREADME_FILE="$STAGE/README-Windows.txt" \
-  -DICONS_DIR="$PWD/src-tauri/icons" \
-  -DOUT_FILE="$PWD/$INSTALLER" \
-  -DVERSION="$VERSION" \
-  -DEST_SIZE_KB="$SIZE_KB" \
-  scripts/windows-installer.nsi
+  echo "== NSIS installer ($ARCH) =="
+  mkdir -p artifacts
+  SIZE_KB=$(( ($(stat -f%z "$EXE" 2>/dev/null || stat -c%s "$EXE") + 1023) / 1024 ))
+  makensis -V2 \
+    -DSHIFT_EXE="$PWD/$EXE" \
+    -DLICENSE_FILE="$PWD/LICENSE" \
+    -DNOTICES_FILE="$PWD/THIRD_PARTY_NOTICES.md" \
+    -DREADME_FILE="$STAGE/README-Windows.txt" \
+    -DICONS_DIR="$PWD/src-tauri/icons" \
+    -DOUT_FILE="$PWD/$INSTALLER" \
+    -DVERSION="$VERSION" \
+    -DARCH="$ARCH" \
+    -DEST_SIZE_KB="$SIZE_KB" \
+    scripts/windows-installer.nsi
 
-echo "== portable ZIP =="
-cp "$EXE" "$STAGE/portable/Shift-$VERSION-Windows-x64/shift.exe"
-cp LICENSE "$STAGE/portable/Shift-$VERSION-Windows-x64/LICENSE.txt"
-cp THIRD_PARTY_NOTICES.md "$STAGE/portable/Shift-$VERSION-Windows-x64/THIRD_PARTY_NOTICES.txt"
-cp "$STAGE/README-Windows.txt" "$STAGE/portable/Shift-$VERSION-Windows-x64/README-Windows.txt"
-(cd "$STAGE/portable" && zip -q -r -X -9 "$ROOT/$PORTABLE" "Shift-$VERSION-Windows-x64")
-mv "$STAGE/README-Windows.txt" "artifacts/README-Windows.txt"
+  echo "== portable ZIP ($ARCH) =="
+  cp "$EXE" "$STAGE/portable/Shift-$VERSION-Windows-$ARCH/shift.exe"
+  cp LICENSE "$STAGE/portable/Shift-$VERSION-Windows-$ARCH/LICENSE.txt"
+  cp THIRD_PARTY_NOTICES.md "$STAGE/portable/Shift-$VERSION-Windows-$ARCH/THIRD_PARTY_NOTICES.txt"
+  cp "$STAGE/README-Windows.txt" "$STAGE/portable/Shift-$VERSION-Windows-$ARCH/README-Windows.txt"
+  (cd "$STAGE/portable" && zip -q -r -X -9 "$ROOT/$PORTABLE" "Shift-$VERSION-Windows-$ARCH")
+  mv "$STAGE/README-Windows.txt" "$NOTES"
+done
 
 echo "== checksums =="
-python3 - "$INSTALLER" "$PORTABLE" <<'PY'
+python3 - "$VERSION" <<PY
 import hashlib, pathlib, sys
+version = sys.argv[1]
 artifacts = pathlib.Path("artifacts")
-names = ["Shift-macOS-universal.dmg", "Shift-macOS-universal.zip"]
-names += [pathlib.Path(arg).name for arg in sys.argv[1:]]
-names.append("README-Windows.txt")
-lines = []
-for name in names:
-    path = artifacts / name
-    lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {name}")
+preferred = [
+    "Shift-macOS-universal.dmg",
+    "Shift-macOS-universal.zip",
+    f"Shift-Setup-{version}-win-x64.exe",
+    f"Shift-Setup-{version}-win-arm64.exe",
+    f"Shift-Portable-{version}-win-x64.zip",
+    f"Shift-Portable-{version}-win-arm64.zip",
+    "README-Windows-x64.txt",
+    "README-Windows-arm64.txt",
+]
+names = [name for name in preferred if (artifacts / name).is_file()]
+names += sorted(
+    path.name
+    for path in artifacts.iterdir()
+    if path.is_file()
+    and path.name not in names
+    and path.name != "SHA256SUMS.txt"
+    and not path.name.startswith(".")
+)
+lines = [f"{hashlib.sha256((artifacts / name).read_bytes()).hexdigest()}  {name}" for name in names]
 (artifacts / "SHA256SUMS.txt").write_text("".join(line + "\n" for line in lines), encoding="utf-8")
 print("\n".join(lines))
 PY
 
 echo "== result =="
-ls -lh "$INSTALLER" "$PORTABLE"
-printf 'installer sha256: %s\n' "$(shasum -a 256 "$INSTALLER" | cut -d' ' -f1)"
-printf 'exe       sha256: %s\n' "$(shasum -a 256 "$EXE" | cut -d' ' -f1)"
+ls -lh artifacts/

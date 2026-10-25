@@ -3,8 +3,11 @@ import { isTauri } from "@tauri-apps/api/core";
 import {
   ArrowUpRight,
   Check,
+  CircleCheck,
+  CircleX,
   Copy,
   Crop,
+  Droplets,
   EyeOff,
   Grid3X3,
   Highlighter,
@@ -14,6 +17,7 @@ import {
   Save,
   Scissors,
   Square,
+  Star,
   Type,
   Undo2,
 } from "lucide-react";
@@ -26,10 +30,15 @@ type Tool =
   | "arrow"
   | "highlight"
   | "redact"
+  | "blur"
   | "pixelate"
   | "number"
   | "crop"
-  | "text";
+  | "text"
+  | "stamp";
+
+/// Stamps are vector glyphs so they stay sharp at any canvas resolution.
+export type Stamp = "check" | "cross" | "star";
 
 interface Annotation {
   tool: Tool;
@@ -39,6 +48,7 @@ interface Annotation {
   y2: number;
   text?: string;
   number?: number;
+  stamp?: Stamp;
 }
 
 interface Point {
@@ -54,6 +64,96 @@ interface ImageSnapshot {
 interface Props {
   path: string;
   onSaved: (path: string) => void;
+}
+
+/// Soften a region by downscaling it and painting it back blurred. Unlike
+/// pixelate, which is deliberately blocky, this keeps the shapes readable while
+/// removing detail, and it is baked into the output rather than a translucent
+/// overlay, so a blurred area cannot be recovered from the saved PNG.
+export function drawBlur(
+  context: CanvasRenderingContext2D,
+  left: number,
+  top: number,
+  boxWidth: number,
+  boxHeight: number,
+) {
+  const source = document.createElement("canvas");
+  source.width = Math.max(1, Math.round(boxWidth));
+  source.height = Math.max(1, Math.round(boxHeight));
+  const sourceContext = source.getContext("2d");
+  if (!sourceContext) return;
+  sourceContext.drawImage(context.canvas, left, top, boxWidth, boxHeight, 0, 0, source.width, source.height);
+
+  const factor = 10;
+  const small = document.createElement("canvas");
+  small.width = Math.max(1, Math.round(source.width / factor));
+  small.height = Math.max(1, Math.round(source.height / factor));
+  const smallContext = small.getContext("2d");
+  if (!smallContext) return;
+  smallContext.imageSmoothingEnabled = true;
+  smallContext.drawImage(source, 0, 0, small.width, small.height);
+
+  context.save();
+  context.beginPath();
+  context.rect(left, top, boxWidth, boxHeight);
+  context.clip();
+  context.imageSmoothingEnabled = true;
+  // The filter widens the soft edge the downscale alone leaves behind.
+  context.filter = `blur(${Math.max(2, Math.round(Math.min(boxWidth, boxHeight) / 24))}px)`;
+  context.drawImage(small, 0, 0, small.width, small.height, left, top, boxWidth, boxHeight);
+  context.restore();
+}
+
+function stampPath(context: CanvasRenderingContext2D, stamp: Stamp, radius: number) {
+  context.beginPath();
+  if (stamp === "check") {
+    context.lineWidth = Math.max(4, radius * 0.34);
+    context.moveTo(-radius * 0.46, radius * 0.04);
+    context.lineTo(-radius * 0.12, radius * 0.42);
+    context.lineTo(radius * 0.5, -radius * 0.4);
+    context.stroke();
+    return;
+  }
+  if (stamp === "cross") {
+    context.lineWidth = Math.max(4, radius * 0.3);
+    const arm = radius * 0.42;
+    context.moveTo(-arm, -arm);
+    context.lineTo(arm, arm);
+    context.moveTo(arm, -arm);
+    context.lineTo(-arm, arm);
+    context.stroke();
+    return;
+  }
+  const points = 5;
+  for (let index = 0; index < points * 2; index += 1) {
+    const outer = index % 2 === 0 ? radius * 0.62 : radius * 0.26;
+    const angle = (Math.PI / points) * index - Math.PI / 2;
+    const x = Math.cos(angle) * outer;
+    const y = Math.sin(angle) * outer;
+    if (index === 0) context.moveTo(x, y);
+    else context.lineTo(x, y);
+  }
+  context.closePath();
+  context.fill();
+}
+
+/// A filled disc plus a glyph, centred on the tap and sized from the canvas so a
+/// stamp stays proportional on a 4K screenshot and a small crop alike.
+function drawStamp(context: CanvasRenderingContext2D, annotation: Annotation, width: number) {
+  const stamp = annotation.stamp ?? "check";
+  const radius = Math.max(18, Math.round(width / 22));
+  context.save();
+  context.translate(annotation.x1, annotation.y1);
+  context.fillStyle = stamp === "cross" ? "#e0342b" : stamp === "star" ? "#f5a623" : "#1aa260";
+  context.beginPath();
+  context.arc(0, 0, radius, 0, Math.PI * 2);
+  context.fill();
+  context.strokeStyle = "rgba(255,255,255,0.94)";
+  context.fillStyle = "#fffdf9";
+  context.lineCap = "round";
+  context.lineJoin = "round";
+  stampPath(context, stamp, radius);
+  context.restore();
 }
 
 function drawAnnotation(
@@ -79,6 +179,10 @@ function drawAnnotation(
   } else if (annotation.tool === "redact") {
     context.fillStyle = "#111111";
     context.fillRect(left, top, boxWidth, boxHeight);
+  } else if (annotation.tool === "blur" && boxWidth > 0 && boxHeight > 0) {
+    drawBlur(context, left, top, boxWidth, boxHeight);
+  } else if (annotation.tool === "stamp" && annotation.stamp) {
+    drawStamp(context, annotation, width);
   } else if (annotation.tool === "pixelate" && boxWidth > 0 && boxHeight > 0) {
     const sampleWidth = Math.max(1, Math.round(boxWidth / 12));
     const sampleHeight = Math.max(1, Math.round(boxHeight / 12));
@@ -166,6 +270,7 @@ export function ImageAnnotator({ path, onSaved }: Props) {
   const [busy, setBusy] = useState(false);
   const [copying, setCopying] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [stamp, setStamp] = useState<Stamp>("check");
   const [textPoint, setTextPoint] = useState<Point | null>(null);
   const [textDraft, setTextDraft] = useState("");
   const [imageHistory, setImageHistory] = useState<ImageSnapshot[]>([]);
@@ -442,9 +547,17 @@ export function ImageAnnotator({ path, onSaved }: Props) {
     { id: "highlight" as const, icon: Highlighter, label: t("highlight") },
     { id: "redact" as const, icon: EyeOff, label: t("redact") },
     { id: "pixelate" as const, icon: Grid3X3, label: t("pixelate") },
+    { id: "blur" as const, icon: Droplets, label: t("blur") },
     { id: "number" as const, icon: ListOrdered, label: t("number") },
+    { id: "stamp" as const, icon: CircleCheck, label: t("stamp") },
     { id: "crop" as const, icon: Crop, label: t("crop") },
     { id: "text" as const, icon: Type, label: t("textAnnotation") },
+  ];
+
+  const stamps: { id: Stamp; icon: typeof CircleCheck; label: string }[] = [
+    { id: "check", icon: CircleCheck, label: t("stampCheck") },
+    { id: "cross", icon: CircleX, label: t("stampCross") },
+    { id: "star", icon: Star, label: t("stampStar") },
   ];
 
   return (
@@ -461,6 +574,19 @@ export function ImageAnnotator({ path, onSaved }: Props) {
             <span>{label}</span>
           </button>
         ))}
+        <span className="annotator-separator" />
+        {tool === "stamp"
+          ? stamps.map(({ id, icon: Icon, label }) => (
+              <button
+                key={id}
+                className={`annotator-tool annotator-stamp ${stamp === id ? "is-active" : ""}`}
+                title={label}
+                onClick={() => setStamp(id)}
+              >
+                <Icon size={15} />
+              </button>
+            ))
+          : null}
         <span className="annotator-separator" />
         {cropRect ? (
           <button className="annotator-tool is-primary" onClick={applyCrop}>
@@ -501,6 +627,13 @@ export function ImageAnnotator({ path, onSaved }: Props) {
             if (tool === "text") {
               setTextPoint(point);
               setTextDraft("");
+              return;
+            }
+            if (tool === "stamp") {
+              setAnnotations((current) => [
+                ...current,
+                { tool: "stamp", stamp, x1: point.x, y1: point.y, x2: point.x, y2: point.y },
+              ]);
               return;
             }
             if (tool === "number") {

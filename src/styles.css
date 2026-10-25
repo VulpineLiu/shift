@@ -40,6 +40,7 @@ body[data-view="radial"],
 body[data-view="capture"],
 body[data-view="recorder"],
 body[data-view="pin"],
+body[data-view="result-card"],
 body[data-view="share-notice"] {
   background: transparent;
 }
@@ -2348,6 +2349,55 @@ kbd {
   background: #fff;
 }
 
+/* Host row in the Updates tab: which machine this is, and which artifact the
+   feed will therefore serve. */
+.update-system {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 10px;
+  color: #6b4f42;
+  font-size: 11.5px;
+}
+
+.update-system-label {
+  color: #9c7e6d;
+  font-weight: 600;
+}
+
+.update-system-host {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.update-system-host strong {
+  color: #3f2a20;
+  font-weight: 660;
+}
+
+.update-system-host small,
+.update-system-pending {
+  color: #9c7e6d;
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.update-system-key {
+  padding: 2px 7px;
+  border-radius: 999px;
+  color: #12703f;
+  background: rgba(26, 162, 96, 0.1);
+  font-size: 10.5px;
+  font-weight: 620;
+}
+
+.update-system-key.is-unknown {
+  color: #a3401b;
+  background: rgba(242, 106, 51, 0.12);
+}
+
 .home-main {
   position: relative;
   z-index: 2;
@@ -2980,13 +3030,21 @@ kbd {
   text-overflow: ellipsis;
 }
 
+/* Four tabs have to share a 390 px drawer, so the strip scrolls instead of
+   wrapping onto a second row. */
 .home-settings-tabs {
   display: flex;
   flex: none;
-  gap: 22px;
-  padding: 0 20px;
+  gap: 12px;
+  padding: 0 16px;
   border-bottom: 1px solid rgba(91, 55, 35, 0.08);
   background: #fffaf5;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.home-settings-tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .home-settings-tab {
@@ -2996,7 +3054,7 @@ kbd {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  min-width: 94px;
+  min-width: 76px;
   height: 43px;
   padding: 0 4px;
   border: 0;
@@ -4369,4 +4427,658 @@ kbd {
 body[data-view="radial"] .share-backdrop {
   background: rgba(40, 25, 18, 0.16);
   backdrop-filter: none;
+}
+
+/* Updates: git release branch, hash-verified download. */
+.update-feed {
+  display: grid;
+  gap: 4px;
+  margin: 10px 0 14px;
+}
+
+.update-feed-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(91, 55, 35, 0.55);
+}
+
+.update-feed code {
+  font-size: 11px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(240, 79, 36, 0.06);
+  color: rgba(60, 34, 20, 0.8);
+  word-break: break-all;
+}
+
+.update-trust {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: rgba(91, 55, 35, 0.62);
+}
+
+.update-trust.is-signed {
+  color: rgba(28, 110, 74, 0.86);
+}
+
+.update-status-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.update-status-row > strong {
+  font-size: 15px;
+}
+
+.update-arrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: rgba(91, 55, 35, 0.62);
+}
+
+.update-new {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(26, 162, 96, 0.12);
+  color: #14794a;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.update-arrow small {
+  font-size: 11px;
+}
+
+.update-state {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(91, 55, 35, 0.6);
+}
+
+.update-state.is-available,
+.update-state.is-ready {
+  color: #14794a;
+}
+
+.update-state.is-error,
+.update-state.is-unavailable {
+  color: #b4342a;
+}
+
+.update-notes {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: rgba(60, 34, 20, 0.74);
+  white-space: pre-wrap;
+}
+
+.update-artifact {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 12px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(91, 55, 35, 0.1);
+  font-size: 12px;
+}
+
+.update-artifact-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.update-artifact-size {
+  color: rgba(91, 55, 35, 0.6);
+  font-variant-numeric: tabular-nums;
+}
+
+.update-progress {
+  position: relative;
+  height: 22px;
+  margin-top: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(91, 55, 35, 0.08);
+}
+
+.update-progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: linear-gradient(90deg, rgba(240, 79, 36, 0.75), rgba(26, 162, 96, 0.75));
+  transition: width 0.25s ease;
+}
+
+.update-progress span {
+  position: relative;
+  display: block;
+  text-align: center;
+  font-size: 11px;
+  line-height: 22px;
+  font-variant-numeric: tabular-nums;
+}
+
+.update-hash {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 10px;
+  font-size: 11px;
+  color: rgba(60, 34, 20, 0.66);
+  word-break: break-all;
+}
+
+.runtime-error.is-ok {
+  border-color: rgba(26, 162, 96, 0.4);
+  background: rgba(26, 162, 96, 0.08);
+  color: #12603c;
+}
+
+.update-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+/* Capture result card: the four things a screenshot raises, one click each. */
+.home-segment-after {
+  margin-top: 12px;
+}
+
+.result-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: 46px 1fr auto;
+  align-items: center;
+  gap: 12px;
+  width: calc(100% - 2px);
+  height: calc(100% - 2px);
+  margin: 1px;
+  padding: 12px 14px 14px;
+  border-radius: 16px;
+  overflow: hidden;
+  background: rgba(255, 250, 245, 0.96);
+  border: 1px solid rgba(91, 55, 35, 0.14);
+  box-shadow: 0 18px 44px rgba(48, 26, 14, 0.24);
+  color: #2b1d16;
+  animation: result-card-in 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes result-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.97);
+  }
+}
+
+.result-card-thumb {
+  width: 46px;
+  height: 46px;
+  display: grid;
+  place-items: center;
+  border-radius: 11px;
+  overflow: hidden;
+  color: #d15f31;
+  background: #ffeadc;
+}
+
+.result-card-thumb.video {
+  color: #c94d5c;
+  background: #ffe5e9;
+}
+
+.result-card-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.result-card-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.result-card-copy strong {
+  font-size: 13px;
+}
+
+.result-card-copy span,
+.result-card-copy em {
+  font-size: 11.5px;
+  font-style: normal;
+  color: rgba(91, 55, 35, 0.68);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.result-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.result-card-actions button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 9px;
+  background: rgba(91, 55, 35, 0.06);
+  color: #4a2b1b;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    transform 0.15s ease;
+}
+
+.result-card-actions button:hover {
+  background: #f04f24;
+  color: #fffdf9;
+  transform: translateY(-1px);
+}
+
+.result-card-actions .result-card-open {
+  width: auto;
+  padding: 0 11px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.result-card-fuse {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #f04f24, #ffb27a);
+  transition: width 0.1s linear;
+}
+
+/* History library: pinned rows, and the list is a real list now. */
+.home-recent-list {
+  list-style: none;
+  padding-left: 0;
+  margin-left: 0;
+}
+
+.home-recent.is-pinned .home-recent-icon {
+  box-shadow: inset 0 0 0 1.5px rgba(240, 79, 36, 0.55);
+}
+
+.home-card-clear {
+  flex: none;
+  margin-left: -4px;
+}
+
+.home-recent-search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  margin-top: 10px;
+  padding: 6px 9px;
+  border-radius: 10px;
+  background: rgba(91, 55, 35, 0.05);
+  color: rgba(91, 55, 35, 0.55);
+}
+
+.home-recent-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: #3a251b;
+  font-size: 12px;
+  outline: none;
+}
+
+.home-recent-search button {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(91, 55, 35, 0.1);
+  color: #4a2b1b;
+  cursor: pointer;
+}
+
+.home-recent-search button:hover {
+  background: #f04f24;
+  color: #fffdf9;
+}
+
+/* Radial ring presets: reorder the wedges this file type actually offers. */
+.radial-kind-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.radial-kind-grid button {
+  position: relative;
+  height: 30px;
+  border: 1px solid rgba(99, 61, 39, 0.1);
+  border-radius: 9px;
+  color: #86645a;
+  background: rgba(255, 255, 255, 0.62);
+  font-size: 9px;
+  font-weight: 620;
+  cursor: pointer;
+}
+
+.radial-kind-grid button.is-active {
+  color: #4b2c1d;
+  border-color: rgba(196, 91, 48, 0.36);
+  background: #fff;
+  box-shadow: 0 2px 7px rgba(74, 43, 27, 0.09);
+}
+
+.radial-kind-dot {
+  position: absolute;
+  top: 4px;
+  right: 5px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #c45b30;
+}
+
+.radial-order-list {
+  display: grid;
+  gap: 5px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: wedge;
+}
+
+.radial-order-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border: 1px solid rgba(100, 61, 39, 0.08);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.radial-order-index {
+  flex: none;
+  width: 18px;
+  color: #a08578;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.radial-order-label {
+  flex: 1;
+  color: #43291d;
+  font-size: 10.5px;
+  font-weight: 620;
+}
+
+.radial-order-buttons {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.radial-order-buttons button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid rgba(99, 61, 39, 0.12);
+  border-radius: 7px;
+  color: #7a584a;
+  background: #fff;
+  cursor: pointer;
+}
+
+.radial-order-buttons button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.radial-order-save {
+  width: 100%;
+  margin-top: 12px;
+}
+
+.radial-order-save:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* Guided first-run checks: a modal card over the main window, using the same warm
+   palette and type scale as the settings drawer it reports on. */
+.setup-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(48, 26, 14, 0.32);
+  backdrop-filter: blur(6px);
+  animation: setup-fade 220ms ease-out;
+}
+
+.setup-card {
+  width: min(560px, 100%);
+  display: grid;
+  gap: 14px;
+  padding: 20px 22px 16px;
+  border: 1px solid rgba(190, 83, 42, 0.16);
+  border-radius: 16px;
+  background: #fffaf6;
+  box-shadow: 0 26px 60px rgba(70, 32, 14, 0.24);
+  animation: setup-rise 260ms cubic-bezier(0.22, 0.8, 0.3, 1);
+}
+
+.setup-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.setup-head h2 {
+  margin: 0;
+  color: #3c2214;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.setup-head p {
+  margin: 5px 0 0;
+  max-width: 46ch;
+  color: rgba(91, 55, 35, 0.66);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.setup-refresh {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid rgba(190, 83, 42, 0.2);
+  border-radius: 8px;
+  color: #a84c29;
+  background: #fff1e7;
+  font-size: 9px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.setup-list {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.setup-row {
+  display: grid;
+  grid-template-columns: 26px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid rgba(120, 70, 40, 0.12);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.7);
+  transition: border-color 160ms ease;
+}
+
+.setup-row.is-problem {
+  border-color: rgba(217, 79, 31, 0.32);
+  background: rgba(255, 241, 232, 0.8);
+}
+
+.setup-row.is-ok {
+  border-color: rgba(28, 110, 74, 0.2);
+}
+
+.setup-row-icon {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  color: #a84c29;
+  background: rgba(240, 79, 36, 0.09);
+}
+
+.setup-row.is-ok .setup-row-icon {
+  color: #1c6e4a;
+  background: rgba(28, 110, 74, 0.1);
+}
+
+.setup-row-body {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.setup-row-body strong {
+  color: #3c2214;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.setup-row-body small {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: rgba(91, 55, 35, 0.7);
+  font-size: 9.5px;
+  line-height: 1.45;
+}
+
+.setup-row-body .settings-link {
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #a84c29;
+  font-size: 9.5px;
+  font-weight: 700;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.setup-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: rgba(91, 55, 35, 0.55);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.setup-state.is-ok {
+  color: #1c6e4a;
+}
+
+.setup-state.is-problem {
+  color: #c24615;
+}
+
+.setup-paths {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.setup-paths code {
+  padding: 3px 7px;
+  border-radius: 7px;
+  background: rgba(240, 79, 36, 0.06);
+  color: rgba(60, 34, 20, 0.72);
+  font-size: 9px;
+}
+
+.setup-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(120, 70, 40, 0.1);
+}
+
+.setup-foot span {
+  color: rgba(91, 55, 35, 0.6);
+  font-size: 9.5px;
+  line-height: 1.4;
+}
+
+.setup-foot .runtime-install {
+  margin-top: 0;
+}
+
+@keyframes setup-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes setup-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
 }

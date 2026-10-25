@@ -1,4 +1,12 @@
-export type View = "main" | "radial" | "capture" | "recorder" | "editor" | "pin" | "share-notice";
+export type View =
+  | "main"
+  | "radial"
+  | "capture"
+  | "recorder"
+  | "editor"
+  | "pin"
+  | "result-card"
+  | "share-notice";
 
 export interface FileInfo {
   path: string;
@@ -57,7 +65,14 @@ export interface NormalizedRect {
 
 export interface RecordingOptions {
   audio: boolean;
-  fps: number;
+  /** Omitted when the platform's capture tool decides the frame rate itself. */
+  fps?: number;
+}
+
+/** Which recording switches the current platform actually honours. */
+export interface RecordingCapabilities {
+  audio: boolean;
+  fps: boolean;
 }
 
 export type FileOutputMode = "alongside" | "custom";
@@ -73,6 +88,16 @@ export interface AppSettings {
   autostart: boolean;
   /** "" until the user picks a language; the tray follows whatever is stored. */
   language: string;
+  /** Show the floating result card, or open the editor, after a capture. */
+  captureAfter: "card" | "editor";
+  /** Ask the git release branch for a newer build once a day. */
+  updateCheckEnabled: boolean;
+  /** Raw URL of the release manifest this build reads; "" when unconfigured. */
+  updateFeedUrl: string;
+  /** Custom wedge order per kind and ring, keyed "<kind>/<ring>". */
+  wedgeOrders: Record<string, string[]>;
+  /** False until the guided first-run checks have been shown or dismissed. */
+  setupReviewed: boolean;
   defaultFileOutputDir: string;
   defaultScreenshotDir: string;
   defaultRecordingDir: string;
@@ -149,4 +174,41 @@ export interface ShareTransfer {
   total: number;
   state: "sending" | "received" | "error";
   path?: string | null;
+}
+
+/** Result of the git-backed update check, mirroring `update::UpdateStatus`. */
+export interface UpdateStatus {
+  state: "current" | "available" | "ready" | "unavailable" | "error";
+  currentVersion: string;
+  availableVersion: string;
+  fileName: string;
+  size: number;
+  sha256: string;
+  notes: string;
+  date: string;
+  /** Absolute path once the installer has been downloaded and hash-verified. */
+  path: string | null;
+  message: string;
+  feedUrl: string;
+  /** True when the manifest was signature-verified against a key baked into this
+   * build. False means the feed is trusted through HTTPS alone. */
+  signed: boolean;
+  /** The manifest key this build resolved its artifact under, reported by Rust
+   * rather than inferred, or "" when the release names nothing for it. */
+  artifactKey: string;
+}
+
+export interface UpdateProgress {
+  downloaded: number;
+  total: number;
+  state: "downloading" | "verifying";
+}
+
+/** One saved capture, handed to the result-card window. */
+export interface CaptureResult {
+  path: string;
+  name: string;
+  kind: "image" | "video";
+  /** Milliseconds before the card hides itself. */
+  ttlMs: number;
 }

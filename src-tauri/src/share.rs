@@ -960,7 +960,8 @@ fn receive_file(app: &AppHandle, mut stream: TcpStream) -> Result<(), String> {
             path: Some(path.clone()),
         },
     );
-    // Reuse the existing result pipeline so received files land in "Recent".
+    // Reuse the result pipeline so received files land in the history library.
+    crate::history::record(app, &[path.clone()]);
     let _ = app.emit(
         "app://file-result",
         serde_json::json!({ "outputs": [path], "message": name }),

@@ -1,6 +1,6 @@
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, Stdio},
     thread,
     time::{Duration, Instant},
@@ -14,7 +14,9 @@ use tauri::{AppHandle, Emitter, LogicalPosition, Manager, State};
 
 use crate::{
     capture, editor,
-    models::{ActionOutcome, NormalizedRect, RecordingInfo, RecordingOptions},
+    models::{
+        ActionOutcome, NormalizedRect, RecordingCapabilities, RecordingInfo, RecordingOptions,
+    },
     settings, AppState,
 };
 
@@ -23,6 +25,9 @@ pub struct RecordingSession {
     pub stdin: Option<ChildStdin>,
     pub output: PathBuf,
     pub started_at: i64,
+    /// ffmpeg quits and finalizes the file when it is asked to on stdin; a Wayland
+    /// recorder has no such console, so it only finalizes on a signal.
+    pub stops_with_signal: bool,
 }
 
 struct Region {
@@ -30,6 +35,19 @@ struct Region {
     y: f64,
     width: f64,
     height: f64,
+}
+
+/// Region as an X11 geometry string, which is what `wf-recorder -g` expects.
+/// Only the Linux recorder calls it; the rest of the tree keeps it alive for the test.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn x11_geometry(region: &Region) -> String {
+    format!(
+        "{}x{}+{}+{}",
+        region.width.round() as u32,
+        region.height.round() as u32,
+        region.x.round() as i64,
+        region.y.round() as i64,
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -79,6 +97,24 @@ fn physical_region(
     })
 }
 
+/// Which recording switches this build actually honours.
+///
+/// `screencapture -v` has no frame-rate option, so macOS reports audio only. The
+/// ffmpeg backends take `-framerate` but have no audio input wired up, so Windows and
+/// Linux report frame rate only. The overlay reads this and hides whatever is a lie.
+pub fn capabilities() -> RecordingCapabilities {
+    #[cfg(target_os = "macos")]
+    return RecordingCapabilities {
+        audio: true,
+        fps: false,
+    };
+    #[cfg(not(target_os = "macos"))]
+    return RecordingCapabilities {
+        audio: false,
+        fps: true,
+    };
+}
+
 fn recording_directory(app: &AppHandle) -> Result<PathBuf, String> {
     settings::recording_dir(app)
 }
@@ -96,9 +132,10 @@ fn start_process(
     state: &AppState,
     rect: &NormalizedRect,
     options: &RecordingOptions,
-) -> Result<(Child, Option<ChildStdin>, PathBuf), String> {
+) -> Result<(Child, Option<ChildStdin>, PathBuf, bool), String> {
     #[cfg(target_os = "macos")]
     {
+        // `screencapture -v` picks its own frame rate; there is nothing to pass.
         let _ = options.fps;
         let region = logical_region(app, state, rect)?;
         let output = output_path(app, "mov")?;
@@ -127,57 +164,80 @@ fn start_process(
             .map_err(|error| format!("Could not start screen recording: {error}"))?;
         let mut child = child;
         let stdin = child.stdin.take();
-        Ok((child, stdin, output))
+        Ok((child, stdin, output, true))
     }
 
     #[cfg(not(target_os = "macos"))]
     {
+        // No audio input is wired into the ffmpeg grab yet; see `capabilities`.
         let _ = options.audio;
+        #[cfg(target_os = "linux")]
+        {
+            // Under Wayland there is no root window to grab, so ffmpeg's x11grab would
+            // record a black frame. wf-recorder talks to the same wlroots/PipeWire
+            // compositor grim takes stills from, and finalizes on SIGINT.
+            if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+                if let Some(recorder) = crate::files::resolve_tool("wf-recorder") {
+                    let geometry = x11_geometry(&region);
+                    let mut wayland = crate::process::command(recorder);
+                    wayland.args(["-f", &output, "-g", &geometry]);
+                    if let Some(fps) = options.fps {
+                        wayland.args(["-r", &fps.to_string()]);
+                    }
+                    let child = wayland
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                        .map_err(|error| format!("Could not start wf-recorder: {error}"))?;
+                    return Ok((child, None, output, true));
+                }
+            }
+        }
         let ffmpeg = crate::files::resolve_tool("ffmpeg")
             .ok_or_else(|| "Screen recording needs ffmpeg on Windows and Linux.".to_string())?;
         let region = physical_region(app, state, rect)?;
         let output = output_path(app, "mp4")?;
         let mut command = crate::process::command(ffmpeg);
+        let size = format!(
+            "{}x{}",
+            region.width.round() as u32,
+            region.height.round() as u32
+        );
+        // `-framerate` is an input option for both grabbers, so it is part of the
+        // input argument list rather than a separate flag after `-i`.
+        let framerate = options
+            .fps
+            .map(|fps| vec!["-framerate".to_string(), fps.to_string()])
+            .unwrap_or_default();
         #[cfg(target_os = "windows")]
-        command.args([
-            "-y",
-            "-f",
-            "gdigrab",
-            "-framerate",
-            &options.fps.to_string(),
-            "-offset_x",
-            &(region.x.round() as i64).to_string(),
-            "-offset_y",
-            &(region.y.round() as i64).to_string(),
-            "-video_size",
-            &format!(
-                "{}x{}",
-                region.width.round() as u32,
-                region.height.round() as u32
-            ),
-            "-i",
-            "desktop",
-        ]);
+        {
+            let source = region.x.round() as i64;
+            let top = region.y.round() as i64;
+            command.args(["-y", "-f", "gdigrab"]);
+            command.args(&framerate);
+            command.args([
+                "-offset_x",
+                &source.to_string(),
+                "-offset_y",
+                &top.to_string(),
+                "-video_size",
+                &size,
+                "-i",
+                "desktop",
+            ]);
+        }
         #[cfg(target_os = "linux")]
-        command.args([
-            "-y",
-            "-f",
-            "x11grab",
-            "-framerate",
-            &options.fps.to_string(),
-            "-video_size",
-            &format!(
-                "{}x{}",
-                region.width.round() as u32,
-                region.height.round() as u32
-            ),
-            "-i",
-            &format!(
+        {
+            let origin = format!(
                 ":0.0+{},{}",
                 region.x.round() as i64,
                 region.y.round() as i64
-            ),
-        ]);
+            );
+            command.args(["-y", "-f", "x11grab"]);
+            command.args(&framerate);
+            command.args(["-video_size", &size, "-i", &origin]);
+        }
         command.args([
             "-c:v",
             "libx264",
@@ -194,7 +254,7 @@ fn start_process(
             .spawn()
             .map_err(|error| format!("Could not start ffmpeg: {error}"))?;
         let stdin = child.stdin.take();
-        return Ok((child, stdin, output));
+        return Ok((child, stdin, output, false));
     }
 }
 
@@ -226,7 +286,7 @@ pub fn start(
     {
         return Err("A recording is already in progress.".into());
     }
-    let (mut child, stdin, output) = start_process(app, state, rect, &options)?;
+    let (mut child, stdin, output, stops_with_signal) = start_process(app, state, rect, &options)?;
     ensure_capture_started(&mut child, &output)?;
     let started_at = chrono::Utc::now().timestamp_millis();
     let info = RecordingInfo {
@@ -238,6 +298,7 @@ pub fn start(
         stdin,
         output: output.clone(),
         started_at,
+        stops_with_signal,
     });
     capture::dismiss_capture(app);
 
@@ -263,6 +324,14 @@ fn stop_process(session: &mut RecordingSession) -> Result<(), String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
+        #[cfg(target_os = "linux")]
+        if session.stops_with_signal {
+            let _ = unsafe { libc::kill(session.child.id() as libc::pid_t, libc::SIGINT) };
+        } else if let Some(stdin) = session.stdin.as_mut() {
+            let _ = stdin.write_all(b"q\n");
+            let _ = stdin.flush();
+        }
+        #[cfg(not(target_os = "linux"))]
         if let Some(stdin) = session.stdin.as_mut() {
             let _ = stdin.write_all(b"q\n");
             let _ = stdin.flush();
@@ -324,9 +393,18 @@ pub fn stop(app: &AppHandle, state: &AppState) -> Result<Option<RecordingInfo>, 
     if let Some(window) = app.get_webview_window("recorder") {
         let _ = window.hide();
     }
-    editor::show_recording_editor(app, &info)?;
-    let _ = app.emit(
-        "app://file-result",
+    match crate::settings::load(app).capture_after {
+        crate::settings::CaptureAfter::Editor => {
+            editor::show_recording_editor(app, &info)?;
+        }
+        crate::settings::CaptureAfter::Card => {
+            if crate::result_card::show(app, Path::new(&info.output)).is_err() {
+                editor::show_recording_editor(app, &info)?;
+            }
+        }
+    }
+    crate::history::publish_result(
+        app,
         ActionOutcome {
             outputs: vec![info.output.clone()],
             message: "Recording saved.".into(),
@@ -347,6 +425,12 @@ pub fn stop_on_exit(app: &AppHandle, state: &AppState) {
 /// Starting a recording spawns a capture process and stopping one waits for the
 /// encoder to finalize the file (up to three seconds), so neither belongs on the
 /// main thread.
+/// The recording switches the overlay is allowed to offer on this platform.
+#[tauri::command]
+pub fn recording_capabilities() -> RecordingCapabilities {
+    capabilities()
+}
+
 #[tauri::command]
 pub async fn start_recording(
     app: AppHandle,
@@ -390,6 +474,17 @@ mod tests {
     use std::process::Command;
 
     #[test]
+    fn wayland_geometry_uses_the_x11_shape() {
+        let region = Region {
+            x: 12.6,
+            y: 30.4,
+            width: 800.5,
+            height: 600.2,
+        };
+        assert_eq!(x11_geometry(&region), "801x600+13+30");
+    }
+
+    #[test]
     fn stops_recording_process_cleanly() {
         let child = Command::new("sleep")
             .arg("30")
@@ -403,6 +498,7 @@ mod tests {
             stdin: None,
             output: std::env::temp_dir().join("shift-recording-test.mov"),
             started_at: 0,
+            stops_with_signal: false,
         };
         let started = Instant::now();
         stop_process(&mut session).unwrap();
@@ -435,6 +531,7 @@ mod tests {
             stdin,
             output: output.clone(),
             started_at: 0,
+            stops_with_signal: true,
         };
         stop_process(&mut session).unwrap();
         let metadata = fs::metadata(&output).unwrap();

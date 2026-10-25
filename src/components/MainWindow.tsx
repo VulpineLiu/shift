@@ -27,31 +27,35 @@ import {
   RefreshCw,
   ScanLine,
   ScanText,
+  Search,
   Send,
   Settings2,
   ShieldAlert,
   ShieldCheck,
+  Sparkle,
+  Star,
   Wrench,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { getInitialLang, publishLang, useI18n } from "../i18n";
 import { api } from "../lib/api";
 import { hitTestDropTarget, toWindowPoint } from "../lib/dropTargets";
+import { SetupPanel } from "./SetupPanel";
 import { SharePanel } from "./SharePanel";
+import { UpdatePanel } from "./UpdatePanel";
 import {
   basename,
   dirname,
   extensionOf,
-  getRecentItems,
+  getLocalRecentItems,
   IS_MAC,
-  recentKind,
-  rememberRecent,
   type RecentItem,
-  setRecentItems,
   subscribeRecent,
   timeAgo,
 } from "../lib/utils";
+import { dragOutPayload } from "../lib/dragOut";
+import { history } from "../lib/history";
 import type {
   AppSettings,
   HotkeyStatus,
@@ -62,6 +66,7 @@ import type {
   SwitchUpdate,
   WriteCheck,
 } from "../types";
+import type { FileKind, RadialRing } from "../lib/radialOrder";
 
 const FALLBACK_SETTINGS: AppSettings = {
   fileOutputMode: "alongside",
@@ -72,11 +77,18 @@ const FALLBACK_SETTINGS: AppSettings = {
   dragEnabled: true,
   shareEnabled: true,
   autostart: false,
+  captureAfter: "card",
   defaultFileOutputDir: "~/Downloads/Shift",
   defaultScreenshotDir: "~/Pictures/Shift",
   defaultRecordingDir: "~/Movies/Shift",
   language: "",
+  updateCheckEnabled: true,
+  updateFeedUrl: "",
+  wedgeOrders: {},
+  setupReviewed: false,
 };
+
+type SettingsTab = "system" | "runtime" | "updates";
 
 const DROP_ICONS = [
   { icon: FileType, tone: "pdf" },
@@ -213,8 +225,9 @@ export function MainWindow() {
   // Every switch uses this snapshot until the real settings arrive. Starting
   // empty made the first click wait for a disk read before it could change.
   const [settings, setSettings] = useState<AppSettings | null>(FALLBACK_SETTINGS);
+  const [setupOpen, setSetupOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<"system" | "runtime">("system");
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("system");
   const [screenAccess, setScreenAccess] = useState<boolean | null>(null);
   const [checks, setChecks] = useState<WriteCheck[] | null>(null);
   const [checking, setChecking] = useState(false);
@@ -225,7 +238,9 @@ export function MainWindow() {
   const [runtimeInstallHelp, setRuntimeInstallHelp] = useState<
     "homebrew" | "winget" | null
   >(null);
-  const [recent, setRecent] = useState<RecentItem[]>(getRecentItems);
+  const [recent, setRecent] = useState<RecentItem[]>(getLocalRecentItems);
+  /** Filter text for the history library, matched against the file name. */
+  const [historyQuery, setHistoryQuery] = useState("");
   const [sharePaths, setSharePaths] = useState<string[] | null>(null);
   const toastTimer = useRef<number | null>(null);
   const [, setNowTick] = useState(0);
@@ -234,7 +249,24 @@ export function MainWindow() {
   const dropTargets = useRef<Partial<Record<DropAction, HTMLElement | null>>>({});
   const runtimeCheckStarted = useRef(false);
 
-  function flash(message: string, duration = 2600) {
+  async function finishSetup() {
+    setSetupOpen(false);
+    try {
+      await api.setSetupReviewed(true);
+    } catch {
+      // A failed write only means the flow may appear again next launch; the
+      // checks it reported are all re-runnable from Settings.
+    }
+  }
+
+  /** Leave the guided flow and land on the panel that can install what it found. */
+  function openRuntimeFromSetup() {
+    void finishSetup();
+    setSettingsTab("runtime");
+    setSettingsOpen(true);
+  }
+
+  async function flash(message: string, duration = 2600) {
     if (toastTimer.current) window.clearTimeout(toastTimer.current);
     setToast(message);
     toastTimer.current = window.setTimeout(() => setToast(null), duration);
@@ -489,6 +521,7 @@ export function MainWindow() {
         // The tray menu is native, so it can only show the language the backend
         // knows about. Adopt the stored choice, or hand it ours on a first run;
         // the backend only writes when the value actually changed.
+        if (!loaded.setupReviewed) setSetupOpen(true);
         const stored = loaded.language;
         const effective = stored === "en" || stored === "zh" ? stored : getInitialLang();
         if (effective !== stored) publishLang(effective);
@@ -505,18 +538,9 @@ export function MainWindow() {
       .hotkeyStatus()
       .then(setHotkeys)
       .catch(() => setHotkeys(null));
-    const items = getRecentItems();
-    void api
-      .existingFiles(items.map((item) => item.path))
-      .then((existing) => {
-        const keep = new Set(existing);
-        const pruned = items.filter((item) => keep.has(item.path));
-        if (pruned.length !== items.length) {
-          setRecentItems(pruned);
-          setRecent(pruned);
-        }
-      })
-      .catch(() => undefined);
+    // Rust prunes entries whose file is gone as it reads the library, so there is
+    // no separate sweep to run here.
+    void history.list().then(setRecent).catch(() => undefined);
     // Settings are loaded once when the main window starts.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -593,17 +617,21 @@ export function MainWindow() {
       void listen("app://open-ocr", () => void chooseOcr()).then((unlisten) =>
         unlisteners.push(unlisten),
       );
-      void listen("app://recent-changed", () => setRecent(getRecentItems())).then((unlisten) =>
-        unlisteners.push(unlisten),
-      );
-      void listen<{ outputs: string[]; message: string }>("app://file-result", (event) => {
-        const output = event.payload.outputs[0];
-        if (!output) return;
-        rememberRecent({ path: output, kind: recentKind(output), at: Date.now() });
-        setRecent(getRecentItems());
+      // The tray's update row lands here: open Settings on the Updates tab so the
+      // download and its SHA256 are the next thing the user sees.
+      void listen("app://open-updates", () => {
+        setSettingsTab("updates");
+        setSettingsOpen(true);
       }).then((unlisten) => unlisteners.push(unlisten));
+      // A capture card's Send button: this window owns the peer list, so the card
+      // asks here rather than duplicating the discovery UI.
+      void listen<{ paths: string[] }>("app://send-files", (event) =>
+        setSharePaths(event.payload.paths),
+      ).then((unlisten) => unlisteners.push(unlisten));
     }
-    const unsubscribeRecent = subscribeRecent(() => setRecent(getRecentItems()));
+    const unsubscribeRecent = subscribeRecent(() => void history.list().then(setRecent));
+    // Rust owns the library, so its broadcast is the only cross-window signal needed.
+    const unsubscribeHistory = history.onChanged(setRecent);
     // Keeps the relative timestamps honest without re-reading storage constantly.
     // The same slow tick keeps relative timestamps and the hotkey-ownership
     // notice honest, so a copy that quits clears the warning without a restart.
@@ -614,12 +642,21 @@ export function MainWindow() {
     return () => {
       unlisteners.forEach((unlisten) => unlisten());
       unsubscribeRecent();
+      unsubscribeHistory();
       window.clearInterval(clockTimer);
       if (toastTimer.current) window.clearTimeout(toastTimer.current);
     };
     // Handlers only use stable setters and imported APIs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // The library holds hundreds of rows, so the filter runs where the list is
+  // rendered rather than as a second request to Rust.
+  const visibleRecent = useMemo(() => {
+    const needle = historyQuery.trim().toLowerCase();
+    if (!needle) return recent;
+    return recent.filter((item) => basename(item.path).toLowerCase().includes(needle));
+  }, [recent, historyQuery]);
 
   const outputLabel = (kind: WriteCheck["kind"]) =>
     kind === "screenshot" ? t("screenshots") : kind === "recording" ? t("recordings") : t("fileResults");
@@ -691,6 +728,13 @@ export function MainWindow() {
           </button>
         </div>
       </header>
+
+      {setupOpen ? (
+        <SetupPanel
+          onDone={() => void finishSetup()}
+          onOpenRuntime={openRuntimeFromSetup}
+        />
+      ) : null}
 
       <main className="home-main">
         <section className={`home-drop ${dragging ? "is-dragging" : ""}`}>
@@ -783,9 +827,40 @@ export function MainWindow() {
               <Clock3 size={16} />
               <h1>{t("recent")}</h1>
               <span className="home-card-count">
-                {recent.length > 0 ? t("itemCount", { count: recent.length }) : t("nothingYet")}
+                {recent.length > 0
+                  ? t("itemCount", {
+                      count: historyQuery.trim() ? visibleRecent.length : recent.length,
+                    })
+                  : t("nothingYet")}
               </span>
+              {recent.length > 0 ? (
+                <button
+                  className="settings-link home-card-clear"
+                  onClick={() => void history.clear().catch(() => undefined)}
+                >
+                  {t("clearHistory")}
+                </button>
+              ) : null}
             </header>
+            {recent.length > 3 ? (
+              <label className="home-recent-search">
+                <Search size={13} />
+                <input
+                  value={historyQuery}
+                  placeholder={t("searchHistory")}
+                  onChange={(event) => setHistoryQuery(event.target.value)}
+                />
+                {historyQuery ? (
+                  <button
+                    onClick={() => setHistoryQuery("")}
+                    title={t("clearHistory")}
+                    aria-label={t("clearHistory")}
+                  >
+                    <X size={12} />
+                  </button>
+                ) : null}
+              </label>
+            ) : null}
             {recent.length === 0 ? (
               <div className="home-empty">
                 <span className="home-empty-glyph" aria-hidden="true">
@@ -793,13 +868,32 @@ export function MainWindow() {
                 </span>
                 <p>{t("recentEmpty")}</p>
               </div>
+            ) : visibleRecent.length === 0 ? (
+              <div className="home-empty">
+                <p>{t("historyNoMatches", { query: historyQuery.trim() })}</p>
+              </div>
             ) : (
-              <div className="home-recent-list">
-                {recent.map((item) => (
-                  <div key={item.path} className="home-recent" title={item.path}>
+              <ul className="home-recent-list">
+                {visibleRecent.map((item) => (
+                  <li
+                    key={item.path}
+                    className={`home-recent ${item.pinned ? "is-pinned" : ""}`}
+                    title={item.path}
+                    draggable
+                    onDragStart={(event) => {
+                      // A row leaves Shift as the file itself: WebKit turns the file URL
+                      // in text/uri-list into a real file drop for Finder and friends,
+                      // while the plain path keeps editors and our own drop zones happy.
+                      event.dataTransfer.effectAllowed = "copy";
+                      for (const [type, value] of Object.entries(dragOutPayload(item.path))) {
+                        event.dataTransfer.setData(type, value);
+                      }
+                    }}
+                  >
                     <button
                       className="home-recent-main"
                       onClick={() => void api.openInEditor(item.path)}
+                      title={t("dragOutHint")}
                     >
                       <RecentThumb item={item} />
                       <span>
@@ -810,6 +904,15 @@ export function MainWindow() {
                       </span>
                     </button>
                     <span className="home-recent-actions">
+                      <button
+                        title={item.pinned ? t("unpinFromRecent") : t("pinToRecent")}
+                        aria-pressed={item.pinned}
+                        onClick={() =>
+                          void history.setPinned(item.path, !item.pinned).catch(() => undefined)
+                        }
+                      >
+                        <Star size={13} />
+                      </button>
                       <button title={t("sendTo")} onClick={() => setSharePaths([item.path])}>
                         <Send size={13} />
                       </button>
@@ -821,10 +924,16 @@ export function MainWindow() {
                           <Pin size={13} />
                         </button>
                       ) : null}
+                      <button
+                        title={t("forget")}
+                        onClick={() => void history.remove(item.path).catch(() => undefined)}
+                      >
+                        <X size={13} />
+                      </button>
                     </span>
-                  </div>
+                  </li>
                 ))}
-              </div>
+              </ul>
             )}
           </section>
 
@@ -846,7 +955,13 @@ export function MainWindow() {
             <X size={17} />
           </button>
           <div className="home-settings-heading">
-            <h2>{settingsTab === "system" ? t("systemSettings") : t("runtimeComponents")}</h2>
+            <h2>
+              {settingsTab === "system"
+                ? t("systemSettings")
+                : settingsTab === "runtime"
+                  ? t("runtimeComponents")
+                  : t("updates")}
+            </h2>
           </div>
         </header>
 
@@ -873,10 +988,47 @@ export function MainWindow() {
             <Cpu size={14} />
             {t("runtimeComponents")}
           </button>
+          <button
+            id="settings-tab-updates"
+            className={`home-settings-tab ${settingsTab === "updates" ? "is-active" : ""}`}
+            role="tab"
+            aria-selected={settingsTab === "updates"}
+            aria-controls="settings-panel-updates"
+            onClick={() => setSettingsTab("updates")}
+          >
+            <Sparkle size={14} />
+            {t("updates")}
+          </button>
         </div>
 
         <div className="home-settings-body">
-          {settingsTab === "system" ? (
+          {settingsTab === "updates" ? (
+            <div
+              className="home-settings-panel"
+              id="settings-panel-updates"
+              role="tabpanel"
+              aria-labelledby="settings-tab-updates"
+            >
+              <UpdatePanel
+                feedUrl={settings?.updateFeedUrl ?? ""}
+                autoCheck={settings?.updateCheckEnabled ?? true}
+                onAutoCheckChange={(enabled) =>
+                  void applyToggle({ updateCheckEnabled: enabled }, () =>
+                    api.setUpdateCheckEnabled(enabled),
+                  )
+                }
+                system={
+                  runtimeInfo
+                    ? {
+                        platform: runtimeInfo.platform,
+                        osVersion: runtimeInfo.osVersion,
+                        architecture: runtimeInfo.architecture,
+                      }
+                    : null
+                }
+              />
+            </div>
+          ) : settingsTab === "system" ? (
             <div
               className="home-settings-panel"
               id="settings-panel-system"
@@ -931,6 +1083,21 @@ export function MainWindow() {
                   onReveal={() => void api.revealOutputDirectory("screenshot")}
                   onReset={() => void resetFolder("screenshot")}
                 />
+                <div className="home-segment home-segment-after">
+                  <button
+                    className={(settings?.captureAfter ?? "card") !== "editor" ? "is-active" : ""}
+                    onClick={() => void applySettings(() => api.setCaptureAfter("card"))}
+                  >
+                    {t("captureAfterCard")}
+                  </button>
+                  <button
+                    className={settings?.captureAfter === "editor" ? "is-active" : ""}
+                    onClick={() => void applySettings(() => api.setCaptureAfter("editor"))}
+                  >
+                    {t("captureAfterEditor")}
+                  </button>
+                </div>
+                <p className="runtime-summary">{t("captureAfterBody")}</p>
               </section>
 
               <section className="home-settings-section">

@@ -41,8 +41,16 @@ import { useEffect, useRef, useState } from "react";
 import type { ComponentType } from "react";
 import { api } from "../lib/api";
 import { conversionFormats } from "../lib/conversionFormats";
+import {
+  WEDGE_ACTION_IDS,
+  defaultWedgeIds,
+  orderWedgeIds,
+  savedOrderFor,
+  wedgeLabelKey,
+  type WedgeOrders,
+} from "../lib/radialOrder";
 import { recognizeImage } from "../lib/ocr";
-import { basename, formatBytes, recentKind, rememberRecent } from "../lib/utils";
+import { basename, formatBytes } from "../lib/utils";
 import type { FileInfo, RadialContext } from "../types";
 import { useI18n } from "../i18n";
 import { SharePanel } from "./SharePanel";
@@ -112,6 +120,48 @@ function sectorAt(x: number, y: number, count: number): number | null {
   return Math.floor(offset / step);
 }
 
+/**
+ * Icon for every wedge the rings can show. Labels come from `wedgeLabelKey` in
+ * `src/lib/radialOrder.ts`, which is where the wedge catalogue and the reorder screen
+ * in Settings agree on wording.
+ */
+const WEDGE_ICONS: Record<string, IconType> = {
+  addBackground: ImagePlus,
+  annotate: PenLine,
+  compress: Minimize2,
+  convert: FileOutput,
+  crop: Crop,
+  cutout: Scissors,
+  edit: SlidersHorizontal,
+  extractAudio: Music,
+  flip: FlipHorizontal,
+  frame: Camera,
+  grayscale: Contrast,
+  hd720: Video,
+  merge: Merge,
+  metadata: Tags,
+  mono: Volume1,
+  mute: VolumeX,
+  ocr: ScanText,
+  open: ExternalLink,
+  pdfOcr: ScanText,
+  plain: FileText,
+  redact: EyeOff,
+  resizeHalf: Scaling,
+  reveal: FolderOpen,
+  rotate: RotateCw,
+  send: Send,
+  split: Scissors,
+  text: FileText,
+};
+
+// A wedge whose icon was forgotten renders the generic file glyph, which is easy to add
+// by accident and hard to notice, so name it on the console. Empty in a healthy build.
+const wedgesWithoutIcons = WEDGE_ACTION_IDS.filter((id) => !WEDGE_ICONS[id]);
+if (wedgesWithoutIcons.length > 0) {
+  console.warn("radial wedges without an icon:", wedgesWithoutIcons);
+}
+
 function formatIcon(format: string): IconType {
   if (format === "PDF" || format === "TXT" || format === "MD" || format === "DOCX") {
     return FileText;
@@ -149,6 +199,23 @@ function actionWedge(
   return { id, label, icon, format };
 }
 
+/**
+ * Turn one wedge id from the catalogue into what the ring renders. An id that names
+ * one of the source's convert targets is a format wedge; everything else is an action
+ * whose label and icon come from the shared wedge tables.
+ */
+function buildWedge(
+  id: string,
+  formats: string[],
+  t: (key: string) => string,
+): Wedge {
+  const target = formats.find((format) => format.toLowerCase() === id);
+  if (target) {
+    return actionWedge(id, target, formatIcon(target), target);
+  }
+  return actionWedge(id, t(wedgeLabelKey(id)), WEDGE_ICONS[id] ?? File);
+}
+
 function messageOf(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   return message.replace(/^Error:\s*/, "") || "Unknown error";
@@ -175,6 +242,8 @@ export function RadialMenu() {
   const [error, setError] = useState<string | null>(null);
   // Files waiting for a peer to be picked; the ring stays open behind the panel.
   const [sharePaths, setSharePaths] = useState<string[] | null>(null);
+  // Custom wedge order per kind and ring, as saved in Settings.
+  const [orders, setOrders] = useState<WedgeOrders>({});
   const sharePathsRef = useRef<string[] | null>(null);
   // True once the send panel has reported an outcome; the ring then stays open
   // just long enough to show the message.
@@ -203,116 +272,14 @@ export function RadialMenu() {
 
   const kind = context?.fileInfo[0]?.kind ?? "other";
   const formats = conversionFormats(kind, context?.fileInfo[0]?.extension ?? "");
-
-  const actions: Wedge[] =
-    kind === "image"
-      ? [
-          actionWedge("compress", t("compress"), Minimize2),
-          actionWedge("metadata", t("metadata"), Tags),
-          actionWedge("edit", t("edit"), SlidersHorizontal),
-          actionWedge("annotate", t("annotate"), PenLine),
-          actionWedge("addBackground", t("addBackground"), ImagePlus),
-          actionWedge("crop", t("crop"), Crop),
-          actionWedge("redact", t("redact"), EyeOff),
-          actionWedge("ocr", t("ocr"), ScanText),
-          actionWedge("convert", t("convert"), FileOutput),
-          ...(context && context.fileInfo.length > 1
-            ? [actionWedge("merge", t("merge"), Merge)]
-            : []),
-        ]
-      : kind === "video" || kind === "audio"
-        ? [
-            actionWedge("convert", t("convert"), FileOutput),
-            actionWedge("compress", t("compress"), Minimize2),
-            actionWedge("edit", t("edit"), SlidersHorizontal),
-            actionWedge("reveal", t("reveal"), FolderOpen),
-          ]
-        : kind === "pdf"
-          ? [
-              actionWedge("convert", t("convert"), FileOutput),
-              actionWedge("compress", t("compress"), Minimize2),
-              actionWedge("pdfOcr", t("ocr"), ScanText),
-              actionWedge("text", t("extractText"), FileText),
-              actionWedge("split", t("split"), Scissors),
-              actionWedge("rotate", t("rotate"), RotateCw),
-              actionWedge("metadata", t("metadata"), Tags),
-              actionWedge("reveal", t("reveal"), FolderOpen),
-              ...(context && context.fileInfo.length > 1
-                ? [actionWedge("merge", t("merge"), Merge)]
-                : []),
-            ]
-          : kind === "presentation" || kind === "spreadsheet" || kind === "document"
-            ? [
-                ...(formats.length > 0
-                  ? [actionWedge("convert", t("convert"), FileOutput)]
-                  : []),
-                actionWedge("edit", t("edit"), SlidersHorizontal),
-                actionWedge("open", t("open"), ExternalLink),
-                actionWedge("reveal", t("reveal"), FolderOpen),
-              ]
-              : [
-                  actionWedge("open", t("open"), ExternalLink),
-                  actionWedge("reveal", t("reveal"), FolderOpen),
-                ];
-
-  const formatWedges: Wedge[] = formats.map((format) =>
-    actionWedge(format.toLowerCase(), format, formatIcon(format), format),
+  const multi = (context?.fileInfo.length ?? 0) > 1;
+  // The catalogue decides which wedges exist, the saved order where each appears.
+  const ids = defaultWedgeIds(ring, kind, formats, multi);
+  const wedges = orderWedgeIds(ids, savedOrderFor(orders, kind, ring)).map((id) =>
+    buildWedge(id, formats, t),
   );
-  const toolWedges: Wedge[] =
-    kind === "image"
-      ? [
-          actionWedge("rotate", t("rotate"), RotateCw),
-          actionWedge("flip", t("flip"), FlipHorizontal),
-          actionWedge("grayscale", t("blackWhite"), Contrast),
-          actionWedge("resizeHalf", t("halfSize"), Scaling),
-          actionWedge("compress", t("compress"), Minimize2),
-          actionWedge("metadata", t("metadata"), Tags),
-          actionWedge("crop", t("crop"), Crop),
-          actionWedge("cutout", t("cutout"), Scissors),
-          ...(context && context.fileInfo.length > 1
-            ? [actionWedge("merge", t("merge"), Merge)]
-            : []),
-        ]
-      : kind === "video"
-        ? [
-            actionWedge("compress", t("compress"), Minimize2),
-            actionWedge("hd720", t("hd720"), Video),
-            actionWedge("mute", t("mute"), VolumeX),
-            actionWedge("extractAudio", t("extractAudio"), Music),
-            actionWedge("frame", t("frame"), Camera),
-            actionWedge("reveal", t("reveal"), FolderOpen),
-          ]
-        : kind === "audio"
-          ? [
-              actionWedge("compress", t("compress"), Minimize2),
-              actionWedge("mono", t("mono"), Volume1),
-              actionWedge("reveal", t("reveal"), FolderOpen),
-            ]
-          : kind === "pdf"
-            ? [
-                actionWedge("compress", t("compress"), Minimize2),
-                actionWedge("metadata", t("metadata"), Tags),
-                actionWedge("rotate", t("rotate"), RotateCw),
-                actionWedge("split", t("split"), Scissors),
-                actionWedge("text", t("extractText"), FileText),
-                actionWedge("reveal", t("reveal"), FolderOpen),
-                ...(context && context.fileInfo.length > 1
-                  ? [actionWedge("merge", t("merge"), Merge)]
-                  : []),
-              ]
-            : kind === "document"
-              ? [
-                  actionWedge("plain", t("plain"), FileText),
-                  actionWedge("reveal", t("reveal"), FolderOpen),
-                ]
-              : [
-                  actionWedge("open", t("open"), ExternalLink),
-                  actionWedge("reveal", t("reveal"), FolderOpen),
-              ];
   // Sending works for any file, so the wedge joins every type's tool ring.
-  toolWedges.push(actionWedge("send", t("sendShort"), Send));
-  const wedges =
-    ring === "formats" ? formatWedges : ring === "tools" ? toolWedges : actions;
+  if (ring === "tools") wedges.push(actionWedge("send", t("sendShort"), Send));
   wedgesRef.current = wedges;
   const wedgeCount = Math.max(wedges.length, 1);
   const hoveredWedge = hovered !== null ? wedges[hovered] : undefined;
@@ -384,6 +351,14 @@ export function RadialMenu() {
       });
       return;
     }
+    // Saved wedge orders arrive with the context and again whenever Settings edits
+    // one, so a reorder takes effect on the very next gesture.
+    void api.getWedgeOrders().then((next) => {
+      if (!disposed) setOrders(next);
+    });
+    void listen<WedgeOrders>("settings://wedge-orders", (event) => {
+      setOrders(event.payload);
+    }).then((unlisten) => unlisteners.push(unlisten));
     void api.getRadialContext().then((next) => {
       if (!disposed) applyContext(next);
     });
@@ -598,9 +573,6 @@ export function RadialMenu() {
           );
         },
       );
-      for (const output of outcome.outputs) {
-        rememberRecent({ path: output, kind: recentKind(output), at: Date.now() });
-      }
       flash(outcome.message || t("saved"), 900);
       window.setTimeout(() => void api.hideRadial(), 850);
     } catch (error) {
@@ -661,7 +633,6 @@ export function RadialMenu() {
           void api.cleanupPdfPages(pages).catch(() => undefined);
         }
         const output = await api.saveTextNear(current.files[0], chunks.join("\n\n"), " (OCR)");
-        rememberRecent({ path: output, kind: "text", at: Date.now() });
         await api.openInEditor(output);
         void api.hideRadial();
       } catch (error) {
@@ -694,9 +665,6 @@ export function RadialMenu() {
           current.files,
           id === "extractAudio" ? "m4a" : "txt",
         );
-        for (const output of outcome.outputs) {
-          rememberRecent({ path: output, kind: recentKind(output), at: Date.now() });
-        }
         flash(outcome.message || t("saved"), 900);
         window.setTimeout(() => void api.hideRadial(), 850);
       } catch (error) {
@@ -734,9 +702,6 @@ export function RadialMenu() {
     await waitForPaint();
     try {
       const outcome = await api.performFileAction(action, current.files);
-      for (const output of outcome.outputs) {
-        rememberRecent({ path: output, kind: recentKind(output), at: Date.now() });
-      }
       flash(outcome.message || t("saved"), 900);
       window.setTimeout(() => void api.hideRadial(), 850);
     } catch (error) {

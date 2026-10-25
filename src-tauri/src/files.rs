@@ -310,6 +310,30 @@ pub(crate) fn system_convert(input: &Path, output: &Path, target: &str) -> Resul
     }
 }
 
+/// Open an image for the pixel tools.
+///
+/// HEIC, HEIF and AVIF are readable only through the system codec, so every pixel
+/// tool used to reject a phone screenshot that the convert wedge could read without
+/// trouble. Decoding through the same path the convert wedge already uses keeps the
+/// rejection for files no decoder can read at all.
+fn open_for_pixels(input: &Path) -> Result<DynamicImage, String> {
+    if let Ok(image) = image::open(input) {
+        return Ok(image);
+    }
+    let intermediate =
+        std::env::temp_dir().join(format!("shift-decode-{}.png", uuid::Uuid::new_v4()));
+    let decoded = system_convert(input, &intermediate, "png")
+        .ok()
+        .and_then(|()| image::open(&intermediate).ok());
+    let _ = fs::remove_file(&intermediate);
+    decoded.ok_or_else(|| {
+        format!(
+            "Could not read {}: an unsupported or corrupted image.",
+            input.display()
+        )
+    })
+}
+
 fn convert_file(input: &Path, target: &str, output_dir: Option<&Path>) -> Result<PathBuf, String> {
     let (ext, format) = normalized_target(target);
     let output = unique_output_in(input, output_dir, "", ext)?;
@@ -1181,7 +1205,7 @@ fn convert_document(
 }
 
 fn compress_file(input: &Path, output_dir: Option<&Path>) -> Result<PathBuf, String> {
-    let image = image::open(input).map_err(|error| format!("Could not read image: {error}"))?;
+    let image = open_for_pixels(input)?;
     let has_alpha = image.color().has_alpha();
     let (ext, format) = if has_alpha {
         ("png", ImageFormat::Png)
@@ -1194,7 +1218,7 @@ fn compress_file(input: &Path, output_dir: Option<&Path>) -> Result<PathBuf, Str
 }
 
 fn strip_metadata(input: &Path, output_dir: Option<&Path>) -> Result<PathBuf, String> {
-    let image = image::open(input).map_err(|error| format!("Could not read image: {error}"))?;
+    let image = open_for_pixels(input)?;
     let ext = extension_of(input);
     let (ext, format) = normalized_target(&ext);
     let output = unique_output_in(input, output_dir, " (clean)", ext)?;
@@ -1203,7 +1227,7 @@ fn strip_metadata(input: &Path, output_dir: Option<&Path>) -> Result<PathBuf, St
 }
 
 fn resize_file(input: &Path, scale: f64, output_dir: Option<&Path>) -> Result<PathBuf, String> {
-    let image = image::open(input).map_err(|error| format!("Could not read image: {error}"))?;
+    let image = open_for_pixels(input)?;
     let (width, height) = image.dimensions();
     let target_width = ((width as f64 * scale).round() as u32).max(1);
     let target_height = ((height as f64 * scale).round() as u32).max(1);
@@ -1225,7 +1249,7 @@ fn resize_file(input: &Path, scale: f64, output_dir: Option<&Path>) -> Result<Pa
 }
 
 fn rotate_file(input: &Path, output_dir: Option<&Path>) -> Result<PathBuf, String> {
-    let image = image::open(input).map_err(|error| format!("Could not read image: {error}"))?;
+    let image = open_for_pixels(input)?;
     let rotated = image.rotate90();
     let ext = extension_of(input);
     let (ext, format) = normalized_target(&ext);
@@ -1235,7 +1259,7 @@ fn rotate_file(input: &Path, output_dir: Option<&Path>) -> Result<PathBuf, Strin
 }
 
 fn flip_file(input: &Path, output_dir: Option<&Path>) -> Result<PathBuf, String> {
-    let image = image::open(input).map_err(|error| format!("Could not read image: {error}"))?;
+    let image = open_for_pixels(input)?;
     let flipped = image.fliph();
     let ext = extension_of(input);
     let (ext, format) = normalized_target(&ext);
@@ -1245,7 +1269,7 @@ fn flip_file(input: &Path, output_dir: Option<&Path>) -> Result<PathBuf, String>
 }
 
 fn grayscale_file(input: &Path, output_dir: Option<&Path>) -> Result<PathBuf, String> {
-    let image = image::open(input).map_err(|error| format!("Could not read image: {error}"))?;
+    let image = open_for_pixels(input)?;
     let grayscale = image.grayscale();
     let ext = extension_of(input);
     let (ext, format) = normalized_target(&ext);
@@ -1333,7 +1357,7 @@ fn crop_file(
     rect: &crate::models::NormalizedRect,
     output_dir: Option<&Path>,
 ) -> Result<PathBuf, String> {
-    let image = image::open(input).map_err(|error| format!("Could not read image: {error}"))?;
+    let image = open_for_pixels(input)?;
     let (width, height) = image.dimensions();
     let x = (rect.x.clamp(0.0, 1.0) * width as f64).round() as u32;
     let y = (rect.y.clamp(0.0, 1.0) * height as f64).round() as u32;
@@ -1828,7 +1852,7 @@ pub fn perform_file_action(
 
             match result {
                 Ok(outcome) => {
-                    let _ = worker.emit("app://file-result", outcome.clone());
+                    crate::history::publish_result(&worker, outcome.clone());
                     let _ = worker.emit(
                         "app://file-action-finished",
                         ActionResultEvent {
@@ -1921,7 +1945,12 @@ pub async fn save_image_data(
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let output_dir = settings::files_output_dir(&app)?;
-        save_image_data_in(&source, &data_url, suffix.as_deref(), output_dir.as_deref())
+        let output =
+            save_image_data_in(&source, &data_url, suffix.as_deref(), output_dir.as_deref())?;
+        // Annotations saved from the editor are a result like any other, and this
+        // path does not run through the action pipeline, so it records itself.
+        crate::history::record(&app, &[output.clone()]);
+        Ok(output)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2004,7 +2033,9 @@ pub async fn save_text_near(
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let output_dir = settings::files_output_dir(&app)?;
-        save_text_near_in(&source, &text, suffix.as_deref(), output_dir.as_deref())
+        let output = save_text_near_in(&source, &text, suffix.as_deref(), output_dir.as_deref())?;
+        crate::history::record(&app, &[output.clone()]);
+        Ok(output)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2082,6 +2113,32 @@ mod tests {
             Some("webp")
         );
         assert!(image::open(&output).is_ok());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pixel_tools_read_system_only_image_formats() {
+        let dir = scratch_dir();
+        let input = dir.join("sample.png");
+        sample_image(&input);
+        let heic = dir.join("phone.heic");
+        if system_convert(&input, &heic, "heic").is_err() {
+            fs::remove_dir_all(dir).unwrap();
+            return;
+        }
+
+        // The pixel tools used to fail here because the Rust decoder cannot read
+        // HEIC. The result is a PNG, which is what its name now says it is.
+        let rotated = rotate_file(&heic, None).unwrap();
+        assert_eq!(
+            rotated.extension().and_then(|value| value.to_str()),
+            Some("png")
+        );
+        assert!(image::open(&rotated).is_ok());
+        let half = resize_file(&heic, 0.5, None).unwrap();
+        assert!(image::open(&half).is_ok());
+        assert!(image::open(&half).unwrap().width() <= 16);
         fs::remove_dir_all(dir).unwrap();
     }
 

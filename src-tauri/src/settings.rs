@@ -1,11 +1,12 @@
 use std::{
+    collections::HashMap,
     fs,
     path::PathBuf,
     sync::{Mutex, MutexGuard, OnceLock},
 };
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// The switches only need their own value back. Rebuilding the full settings
 /// snapshot probes the login item and creates three folders, which can block on
@@ -22,6 +23,16 @@ pub struct SwitchUpdate {
     pub state: SwitchState,
     /// The platform is the source of truth for launch-at-login.
     pub autostart: Option<bool>,
+}
+
+/// What happens the instant a capture is saved. The card keeps the shot out of the
+/// way but one click from Copy / Pin / Edit / Send; the editor opens it directly.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CaptureAfter {
+    #[default]
+    Card,
+    Editor,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -48,6 +59,19 @@ pub struct AppSettings {
     pub autostart: bool,
     /// UI language, "" until the user picks one. Unset follows the system.
     pub language: String,
+    /// Card or editor, chosen right after a screenshot or recording is written.
+    pub capture_after: CaptureAfter,
+    /// Ask the git release branch for a newer build once a day.
+    pub update_check_enabled: bool,
+    /// Last startup probe as a unix day, so the daily check survives restarts.
+    pub last_update_check_day: i64,
+    /// Custom wedge order per file kind and ring, keyed `"<kind>/<ring>"`. The ring
+    /// only ever rearranges the wedges it already offers, so this map can never
+    /// invent an action; see `src/lib/radialOrder.ts`.
+    pub wedge_orders: HashMap<String, Vec<String>>,
+    /// True once the guided first-run checks have been shown or dismissed. Stored
+    /// with the other settings so a second copy on the same account does not nag.
+    pub setup_reviewed: bool,
 }
 
 impl Default for AppSettings {
@@ -62,6 +86,11 @@ impl Default for AppSettings {
             share_enabled: true,
             autostart: false,
             language: String::new(),
+            capture_after: CaptureAfter::default(),
+            update_check_enabled: true,
+            last_update_check_day: 0,
+            wedge_orders: HashMap::new(),
+            setup_reviewed: false,
         }
     }
 }
@@ -78,6 +107,11 @@ pub struct SettingsSnapshot {
     pub share_enabled: bool,
     pub autostart: bool,
     pub language: String,
+    pub capture_after: CaptureAfter,
+    pub update_check_enabled: bool,
+    pub update_feed_url: String,
+    pub wedge_orders: HashMap<String, Vec<String>>,
+    pub setup_reviewed: bool,
     pub default_file_output_dir: String,
     pub default_screenshot_dir: String,
     pub default_recording_dir: String,
@@ -265,6 +299,11 @@ pub fn snapshot(app: &AppHandle) -> Result<SettingsSnapshot, String> {
         // Report what the OS actually has registered, not what we last wrote.
         autostart: crate::autostart::is_enabled(),
         language: settings.language.clone(),
+        capture_after: settings.capture_after,
+        update_check_enabled: settings.update_check_enabled,
+        update_feed_url: crate::update::manifest_url(),
+        wedge_orders: settings.wedge_orders.clone(),
+        setup_reviewed: settings.setup_reviewed,
         default_file_output_dir: default_directory(app, "files")?
             .to_string_lossy()
             .to_string(),
@@ -325,6 +364,154 @@ pub fn test_output_access(app: &AppHandle) -> Result<Vec<WriteCheck>, String> {
             }
         })
         .collect())
+}
+
+fn unix_day() -> i64 {
+    chrono::Utc::now().timestamp() / 86_400
+}
+
+/// File kinds and rings a saved wedge order may name. Mirrors `ORDERABLE_KINDS`
+/// and `RadialRing` in `src/lib/radialOrder.ts`; anything else is rejected so a
+/// stale or hand-edited settings.json cannot grow entries the UI never reads.
+const WEDGE_ORDER_KINDS: [&str; 8] = [
+    "image",
+    "video",
+    "audio",
+    "pdf",
+    "document",
+    "presentation",
+    "spreadsheet",
+    "other",
+];
+const WEDGE_ORDER_RINGS: [&str; 2] = ["actions", "tools"];
+
+/// Whether `"<kind>/<ring>"` names a ring the reorder screen offers. The format
+/// ring is catalogue-driven rather than a fixed list, so it has no preset.
+fn is_wedge_order_key(key: &str) -> bool {
+    match key.split_once('/') {
+        Some((kind, ring)) => {
+            WEDGE_ORDER_KINDS.contains(&kind) && WEDGE_ORDER_RINGS.contains(&ring)
+        }
+        None => false,
+    }
+}
+
+/// Drop blank and repeated ids, keeping first appearance. The ring ignores ids it
+/// does not offer, so no further validation is needed.
+fn normalize_wedge_order(order: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    order
+        .iter()
+        .map(|id| id.trim())
+        .filter(|id| !id.is_empty())
+        .filter(|id| seen.insert((*id).to_string()))
+        .map(|id| id.to_string())
+        .collect()
+}
+
+/// Whether the daily startup probe may run. The day counter is stored rather than
+/// an instant so a restart cannot spend the day's check again.
+pub fn update_check_due(app: &AppHandle, interval: std::time::Duration) -> bool {
+    let settings = load(app);
+    let elapsed_days = unix_day().saturating_sub(settings.last_update_check_day);
+    elapsed_days >= (interval.as_secs() / 86_400).max(1) as i64
+}
+
+#[tauri::command]
+pub async fn set_capture_after(
+    app: AppHandle,
+    after: CaptureAfter,
+) -> Result<SettingsSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        update_settings(&app, |settings| {
+            settings.capture_after = after;
+            Ok(())
+        })?;
+        snapshot(&app)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Close the guided first-run flow. The checks themselves are re-runnable from
+/// Settings, so dismissing the flow loses nothing.
+#[tauri::command]
+pub async fn set_setup_reviewed(app: AppHandle, reviewed: bool) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        update_settings(&app, |settings| {
+            settings.setup_reviewed = reviewed;
+            Ok(())
+        })?;
+        Ok(reviewed)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn set_update_check_enabled(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<SwitchState, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        update_settings(&app, |settings| {
+            settings.update_check_enabled = enabled;
+            Ok(())
+        })?;
+        Ok(SwitchState { enabled })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// The saved orders on their own. The radial window reads this on startup instead
+/// of a full snapshot, which would probe the output folders on every launch.
+#[tauri::command]
+pub async fn get_wedge_orders(app: AppHandle) -> Result<HashMap<String, Vec<String>>, String> {
+    tauri::async_runtime::spawn_blocking(move || Ok(load(&app).wedge_orders))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+/// Store the wedge order for one ring of one file kind. An empty list restores the
+/// built-in order, so "reset" needs no separate flag. The radial window listens for
+/// the broadcast so a change shows up in the next gesture without a restart.
+#[tauri::command]
+pub async fn set_wedge_order(
+    app: AppHandle,
+    kind: String,
+    ring: String,
+    order: Vec<String>,
+) -> Result<SettingsSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let key = format!("{kind}/{ring}");
+        if !is_wedge_order_key(&key) {
+            return Err(format!("Unknown radial ring: {key}"));
+        }
+        let cleaned = normalize_wedge_order(&order);
+        update_settings(&app, |settings| {
+            if cleaned.is_empty() {
+                settings.wedge_orders.remove(&key);
+            } else {
+                settings.wedge_orders.insert(key, cleaned);
+            }
+            Ok(())
+        })?;
+        let orders = load(&app).wedge_orders;
+        let _ = app.emit("settings://wedge-orders", orders);
+        snapshot(&app)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Stamp the daily probe so the next launch waits for the interval instead of
+/// reaching the network again.
+pub fn note_update_check(app: &AppHandle) {
+    let _ = update_settings(app, |settings| {
+        settings.last_update_check_day = unix_day();
+        Ok(())
+    });
 }
 
 // These commands run off the main thread: every one of them touches the disk
@@ -530,6 +717,18 @@ mod tests {
     }
 
     #[test]
+    fn the_setup_review_flag_starts_unsettled() {
+        // A settings file written before the guided flow existed has no field, and
+        // `#[serde(default)]` means it reads as "not reviewed yet" — so the checks
+        // are shown once after an upgrade rather than silently skipped.
+        let older = r#"{"fileOutputMode":"alongside","autoReveal":true,"language":"en"}"#;
+        let restored: AppSettings = serde_json::from_str(older).unwrap();
+        assert!(!restored.setup_reviewed);
+        assert!(restored.auto_reveal);
+        assert!(!AppSettings::default().setup_reviewed);
+    }
+
+    #[test]
     fn output_mode_serializes_for_frontend() {
         assert_eq!(
             serde_json::to_string(&FileOutputMode::Custom).unwrap(),
@@ -558,5 +757,23 @@ mod tests {
         assert_eq!(resolved, directory);
         assert!(directory.is_dir());
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn wedge_orders_are_limited_to_the_rings_the_ui_offers() {
+        assert!(is_wedge_order_key("image/tools"));
+        assert!(is_wedge_order_key("spreadsheet/actions"));
+        assert!(is_wedge_order_key("other/tools"));
+        // The format ring follows the catalogue, and an unknown kind is a typo.
+        assert!(!is_wedge_order_key("image/formats"));
+        assert!(!is_wedge_order_key("archive/tools"));
+        assert!(!is_wedge_order_key("image"));
+    }
+
+    #[test]
+    fn wedge_orders_drop_blanks_and_duplicates_in_order() {
+        let cleaned =
+            normalize_wedge_order(&[" crop ".into(), "crop".into(), String::new(), "ocr".into()]);
+        assert_eq!(cleaned, vec!["crop".to_string(), "ocr".to_string()]);
     }
 }

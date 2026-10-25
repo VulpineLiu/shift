@@ -47,3 +47,35 @@ jobs:
       - run: cargo check
         working-directory: src-tauri
       - run: pnpm tauri build --debug --no-bundle
+
+  # The Linux paths (grim, wf-recorder, x11grab, Poppler) are the only ones with no
+  # build or test job today, so nothing in the repository has ever compiled them.
+  # Ubuntu's desktop runner carries the GTK and WebKit packages Tauri needs, which a
+  # macOS machine cannot provide; `scripts/linux/Dockerfile` is the same dependency set
+  # for building the packages off CI.
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libxdo-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm build
+      - run: cargo test --lib
+        working-directory: src-tauri
+      # Bundles deb and AppImage, so this is also the Linux release artifact that
+      # publish-release.sh can push onto the update channel.
+      - run: pnpm tauri build --debug --bundles deb,appimage

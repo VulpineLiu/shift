@@ -17,11 +17,14 @@ Built on Tauri 2, Rust, React and TypeScript. Native capture and drag behaviour 
 - [Tools](#tools)
 - [Compression, naming, cancellation](#compression-naming-cancellation)
 - [Capture & annotation](#capture--annotation)
+- [Capture history library](#capture-history-library)
 - [OCR](#ocr)
 - [Send to a device](#send-to-a-device)
+- [Custom ring order](#custom-ring-order)
 - [Shortcuts](#shortcuts)
 - [Tray menu](#tray-menu)
 - [Output locations](#output-locations)
+- [Updates](#updates)
 - [External dependencies](#external-dependencies)
 - [Platform status](#platform-status)
 - [Build from source](#build-from-source)
@@ -43,7 +46,9 @@ Built on Tauri 2, Rust, React and TypeScript. Native capture and drag behaviour 
 
 **Batch by default.** Select ten files, drag, and one gesture produces ten outputs. Results land next to each source with a descriptive suffix (`report (compressed).pdf`, `photo (rotated).png`) and never overwrite — a numeric suffix is appended on collision. Settings can collect every result into one folder instead.
 
-**Capture is built in.** Frozen-screen area capture, full-screen capture, and area recording with a floating timer, all aimed at the monitor under the pointer rather than always the primary display. Screenshots open straight into the annotation canvas and can be pinned as always-on-top reference windows.
+**Capture is built in.** Frozen-screen area capture, full-screen capture, and area recording with a floating timer, all aimed at the monitor under the pointer rather than always the primary display. A finished capture hands you a floating result card - Copy, Pin, Send, Reveal, Edit, one click each, and it steps aside on its own - or opens the annotation canvas straight away, whichever you choose in Settings. Recording options only ever offer what your platform actually does: microphone on macOS, frame rate on the FFmpeg backends.
+
+**The rings are yours to arrange.** A saved order rearranges the wedges for each file type and each ring, so the convert you use hourly sits at the top of an image's action ring rather than the bottom. (The Settings screen that edited those orders was removed, so orders are applied from `settings.json` rather than changed in the app.)
 
 **OCR runs on-device.** English and Simplified Chinese, via a bundled Tesseract WASM engine with the traineddata shipped inside the app. No network access at any point in the OCR path.
 
@@ -71,6 +76,8 @@ Shift lives in the menu bar (macOS) and the notification area (Windows), and it 
 
 **Several files at once.** Multi-select with `⌘`/`Ctrl`-click, then drag. Every file is processed. With 2+ images or 2+ PDFs selected, a **Merge** wedge appears that combines them into a single PDF.
 
+**First run.** Shift shows one card with four checks: Screen Recording, whether the three output folders are writable, whether this copy owns the global shortcuts, and which optional tools are missing. Each one says what it found and offers the fix — open the privacy pane, quit the other copies — and dismissing the card changes nothing. It appears once per install — including the first launch after an upgrade, since older settings files have no such flag — and removing `setupReviewed` from `settings.json` shows it again.
+
 **First run on macOS.** Grant Screen Recording for screenshots and recording, and Files & Folders access for the output locations you choose. Capture checks permission before showing the overlay, so a denial produces an actionable error rather than a black screenshot.
 
 ## Supported files
@@ -90,7 +97,7 @@ Recognition is by extension, against four tables in `src-tauri/src/files.rs`. Th
 
 Decoding and encoding are not symmetric, and the app does not pretend otherwise:
 
-- **Image decode** is native (Rust `image`) for PNG, JPEG, WebP, TIFF, BMP and GIF. HEIC/HEIF/AVIF first decode through the system codec — `sips` on macOS, ImageMagick elsewhere — and can then convert to every offered image target, including WEBP, or to PDF. The pixel tools still need a natively readable input, so convert those formats first before rotate, flip, B&W, 50% or compress.
+- **Image decode** is native (Rust `image`) for PNG, JPEG, WebP, TIFF, BMP and GIF. HEIC/HEIF/AVIF first decode through the system codec — `sips` on macOS, ImageMagick elsewhere — and can then convert to every offered image target, including WEBP, or to PDF. The pixel tools use that same decode, so rotating or halving a phone screenshot works directly; nothing here can write HEIC through the pixel path, so the result is written as PNG.
 - **Image encode** for PNG, JPG, WebP, TIFF, BMP and GIF is native. HEIC export uses `sips` on macOS and requires ImageMagick on Windows/Linux. AVIF is accepted as an input but is not offered as an export target.
 - **Media** decode and encode are whatever your FFmpeg build supports; the menu offers MP4, MOV, GIF and M4A for video, and M4A, WAV and MP3 for audio.
 - **Office** files are parsed in pure Rust (`calamine` for spreadsheets, `zip` + `quick-xml` for PPTX), so no Office installation is needed.
@@ -130,11 +137,13 @@ Anything not in this table is not offered — the ring is built from this catalo
 
 The tool ring (`Option + Shift` while dragging). These are one-gesture operations, not conversions.
 
+"Same type" means the output keeps the input's container, with one exception: HEIC and AVIF can be decoded here but not re-encoded, so a pixel tool run on one of them writes PNG and says so in the filename.
+
 | Tool | Applies to | Output | What it does |
 | --- | --- | --- | --- |
 | Compress | image, video, audio, PDF | `.jpg`/`.png`, `.mp4`, `.m4a`, `.pdf` | Images re-encode at q68 (PNG kept when alpha); video at CRF 28; audio to 128k AAC; PDF images resampled to ≤1440 px at q60 JPEG, then objects pruned |
-| Metadata | image, PDF | same type, ` (clean)` | Rewrites the image with no EXIF; strips the PDF `/Info` and `/Metadata` entries |
-| Rotate | image, PDF | same type, ` (rotated)` | 90° clockwise, in place for the format |
+| Strip metadata | image, PDF | same type, ` (clean)` | Rewrites the image with no EXIF; strips the PDF `/Info` and `/Metadata` entries. It removes and writes a copy; it never displays what a file carries |
+| Rotate | image, PDF | same type, ` (rotated)` | 90° clockwise, in place for the format; a HEIC/AVIF input has no native encoder here, so it comes back as PNG |
 | Flip | image | same type, ` (flipped)` | Horizontal mirror |
 | B&W | image | same type, ` (bw)` | Grayscale conversion |
 | 50% | image | same type, ` (50%)` | Half width and height, Lanczos3 |
@@ -178,7 +187,11 @@ PDF→image and PDF split write into a new `Name pages` folder containing `Page 
 
 ## Capture & annotation
 
-**Capture.** Area capture paints a frozen still so the pixels you select are the pixels you get; full-screen capture skips the overlay entirely. Recordings save as MOV on macOS via `screencapture -v` and MP4 elsewhere via FFmpeg, with a floating timer and stop control. Linux capture prefers `grim` and falls back to `gnome-screenshot`.
+**Capture.** Area capture paints a frozen still so the pixels you select are the pixels you get; full-screen capture skips the overlay entirely. Recordings save as MOV on macOS via `screencapture -v` and MP4 elsewhere, with a floating timer and stop control. Linux capture prefers `grim` and falls back to `gnome-screenshot`; on Wayland, recording uses `wf-recorder`, because ffmpeg's `x11grab` has no root window to grab there.
+
+**Recording options are honest.** `capabilities()` in `src-tauri/src/recording.rs` reports what the backend actually implements, and the capture toolbar renders only those switches. macOS gets the microphone toggle (`screencapture -g`) and no frame-rate control, because `screencapture -v` has none; Windows and Linux get a frame-rate chip (15 / 24 / 30) that becomes ffmpeg's `-framerate`, and no microphone toggle, because no audio input is wired into the grab yet. Nothing in the UI can promise a setting the encoder would silently drop.
+
+**Result card.** A finished screenshot or recording appears bottom-right as a card with **Copy**, **Pin**, **Send**, **Reveal** and **Edit**. Hovering holds it open; otherwise it steps aside on its own. Settings -> Screenshots chooses what happens at that moment - **Result card** or **Open in editor** - and the editor is the fallback whenever a card window cannot be created.
 
 **Annotation.** The editor canvas works at native resolution and writes a new PNG, so the source file is never modified.
 
@@ -187,6 +200,8 @@ PDF→image and PDF split write into a new `Name pages` folder containing `Page 
 | Rectangle, Arrow, Highlight, Text | Freehand placement, colour and weight per annotation |
 | Redact | Solid black bar, burnt into the output — not an overlay |
 | Pixelate | Real mosaic sampling of the region underneath, not a translucent fill |
+| Blur | Gaussian blur of the region, clipped to the shape you drew |
+| Stamp | Check, cross and star glyphs, placed with a tap |
 | Number | Auto-incrementing callout badges |
 | Crop | Interactive crop with an explicit apply step |
 | Add BG | Rounded-corner padding with a gradient mat, for social and deck shots |
@@ -196,6 +211,16 @@ PDF→image and PDF split write into a new `Name pages` folder containing `Page 
 | Pin | Floats the image as an always-on-top window with copy and close |
 
 **Editor.** Images open the annotator; video opens a player; `txt` `md` `csv` `tsv` `html` `htm` open as editable text. Every editor host has Copy, Save As, Open, Reveal in Folder, OCR and Copy Text.
+
+## Capture history library
+
+Every capture, conversion result and received file is written by Rust into one library in the app data directory (`history.json`, capped at 300 entries), so all windows share a single list and a webview cache clear cannot throw it away. The main window's **Recent** card is that library:
+
+- **Search** once the list grows past a few rows; it filters on the file name.
+- **Pin** a row to keep it through the capacity limit, a deleted file, and Clear.
+- **Remove** one row, or **Clear** the library - pinned rows stay.
+- **Drag a row out** into Finder, a mail composer or a chat window: the row carries a `file://` URL, so the receiving application gets the file rather than a path string. Plain text and Shift's own internal type travel with it for editors and for the ring.
+- Click a row to open it in the editor; the row's other buttons send, reveal, and pin it to the screen.
 
 ## OCR
 
@@ -218,6 +243,12 @@ How it finds peers, with no server and no configuration:
 - File bytes move over a direct TCP connection: a `SHSF` handshake, a JSON header, the payload, then a one-byte acknowledgement, so a sender only reports success once the receiver has the whole file on disk.
 
 Only the local network is involved — nothing reaches the internet. The receiver listens on all interfaces, so a macOS firewall prompt appears the first time Shift shares; allowing it enables both directions.
+
+## Custom ring order
+
+A saved order picks a file type, then a ring (**Actions** or **Tools**), and rearranges its wedges. **The screen that edits those orders is not in Settings any more** — the reorder tab was removed, so orders are read from `settings.json` (`wedgeOrders`) but nothing in the app currently writes them. Existing files keep working; there is no way to change them from the interface yet.
+
+The catalogue, not the preset, decides what exists. `src/lib/radialOrder.ts` holds the wedge list for every kind and ring, and a saved order can only permute the ids that catalogue offers for that file: an id that has since been removed disappears from the ring, a newly added one slides into its default slot, and **Send** always stays last. A reorder takes effect on the next gesture - no restart, and no way to hide an action you suddenly need.
 
 ## Shortcuts
 
@@ -242,6 +273,7 @@ The menu bar (macOS) and notification area (Windows) icon exposes the actions yo
 | Capture full screen | `Alt+Shift+4` | Grab the monitor under the pointer |
 | Record area | `Alt+Shift+3` | Start, or stop, an area recording |
 | OCR an image… | — | Pick an image and read its text locally |
+| Update available *x.y.z* | — | Only while an update is available; opens Settings → Updates |
 | Quit Shift | `Cmd/Ctrl+Q` | Exit; an in-flight recording is finalised first |
 
 Tray labels follow the selected app language; native macOS permission prompts remain in English.
@@ -258,13 +290,20 @@ Settings → **Behaviour** holds two switches: **Drag rings** (master enable for
 
 Each is overridable in Settings. File actions offer a *collect everything in one folder* mode in place of beside-the-source. The Settings panel lists every resolved path, checks that it is actually writable, reveals it in the file manager, and deep-links to the macOS Screen Recording and Files & Folders privacy panes when access is missing.
 
+## Updates
+
+The update channel is this repository: a `releases` branch holding the installers plus `shift-update.json`, which names each artifact, its size and its SHA256. The feed URL is derived from the git remote at build time - Gitea, GitHub and GitLab forms are known, and `SHIFT_UPDATE_URL` overrides it - so no update service has to be deployed anywhere.
+
+Once a day at startup, and on demand from Settings -> **Updates**, Shift reads the manifest, compares versions with semver rules including prereleases, and offers a download. A downloaded installer is checked twice before it can be installed: exact byte length, then a recomputed SHA256 that must match the manifest. A mismatch deletes the file and says so, so nothing half-downloaded launches. Publishing is one command, `scripts/publish-release.sh`, and `docs/RELEASE.md` covers the manifest format, the flags, and the difference between the integrity the hash proves and the authenticity a signed manifest adds (`--key` plus a key baked in with `SHIFT_UPDATE_PUBKEY`).
+
 ## External dependencies
 
 Core conversion, radial menu, capture, and OCR work with nothing installed. These extend coverage:
 
 | Tool | Needed for | macOS | Windows | Linux |
 | --- | --- | --- | --- | --- |
-| FFmpeg | media convert/compress, 720p, mute, frame, mono; recording off-macOS | optional | **required** for recording | **required** |
+| FFmpeg | media convert/compress, 720p, mute, frame, mono; recording off-macOS | optional | **required** for recording | **required** (media, plus X11 recording) |
+| `wf-recorder` | area recording under Wayland | not needed | not needed | needed under Wayland |
 | Pandoc | document ↔ DOCX/RTF/HTML/TXT/MD (ODT input only) | optional | needed | needed |
 | Typst | Pandoc document-to-PDF engine | not needed (AppKit) | needed | needed |
 | Poppler `pdftoppm` | PDF → images, PDF → Word, scanned-PDF OCR | not needed (PDFKit) | needed | needed |
@@ -284,9 +323,12 @@ wedge rather than the app.
 | --- | --- | --- | --- |
 | Radial menu, editor, tray, i18n | Yes | Yes | Yes |
 | Drag-to-ring | AppKit global drag bridge | Win32 drag-state poll + native drop | none yet — main-window picker only |
-| Area / full-screen capture | `screencapture` | PowerShell | `grim` / `gnome-screenshot` |
+| Area / full-screen capture | `screencapture` | Win32 GDI `BitBlt` | `grim` / `gnome-screenshot` |
 | Monitor under cursor | Yes | Yes | `grim` output selection |
-| Area recording | `screencapture -v` | FFmpeg | planned |
+| Area recording | `screencapture -v`, audio via `-g` | FFmpeg `x11grab` | `wf-recorder` under Wayland, FFmpeg `x11grab` under X11 |
+| Recording frame-rate control | not offered (`screencapture` has none) | 15 / 24 / 30 | 15 / 24 / 30 (`-r` / `-framerate`) |
+| History library, drag a row out | Yes | Yes | Yes |
+| Git-backed updates: SHA256 gate, optional signed manifest | Yes | x64 is the published installer; an ARM machine gets it through the `windows` fallback | Checks and downloads; nothing published for Linux, so the answer is "no artifact" |
 | Image convert and edit | Yes | Yes | Yes |
 | HEIC / AVIF encode | `sips` | ImageMagick | ImageMagick |
 | PDF text, merge, split, rotate, compress | Yes | Yes | Yes |
@@ -311,7 +353,7 @@ pnpm tauri dev
 
 ```bash
 pnpm check          # TypeScript, no emit
-pnpm test           # conversion matrix and drag-target tests
+pnpm test           # conversion matrix, ring catalogue and order, drag payload, drop targets
 pnpm build          # tsc + vite
 cargo test --lib    # Rust unit tests, from src-tauri/
 pnpm tauri build    # release bundle
@@ -327,19 +369,21 @@ PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH" \
   pnpm tauri build --target universal-apple-darwin --bundles app,dmg
 ```
 
-The result is one universal Mach-O including universal drag, PDF-render and doc-render sidecars. To produce the Windows installer and portable ZIP from macOS, run `scripts/build-windows-release.sh`; full details are in `docs/BUILD_WINDOWS.md`.
+The result is one universal Mach-O including universal drag, PDF-render and doc-render sidecars. To produce the Windows installers and portable ZIPs — x64 and ARM64, both — from macOS, run `scripts/build-windows-release.sh`; full details are in `docs/BUILD_WINDOWS.md`.
 
 **Permissions (macOS).** Screen Recording for capture, Files & Folders for the output folders you choose, Microphone when recording with audio. Shift checks Screen Recording before opening the overlay, so a denial surfaces an actionable error rather than a black screenshot. Dev builds signed with a local certificate keep those grants stable across rebuilds; distribution needs Developer ID plus notarization.
 
 ## Architecture
 
 ```text
-React UI                     one webview, six views
-  ├─ main        drop target, shortcuts, recent outputs, language, settings
+React UI                     one webview, eight view kinds
+  ├─ main        drop target, shortcuts, history library, settings, first-run checks
   ├─ radial      transparent always-on-top ring, hit-tested by polar sector
   ├─ capture     frozen still + area selection
   ├─ recorder    floating timer and stop control
   ├─ editor      annotation canvas, text, video, OCR
+  ├─ result-*    floating capture result card, one window per capture
+  ├─ share-*     incoming transfer consent card
   └─ pin         always-on-top image reference
 
 Tauri command layer          src-tauri/src/
@@ -347,16 +391,20 @@ Tauri command layer          src-tauri/src/
   ├─ pdf.rs        merge, split, rotate, text, render, image→PDF, compress
   ├─ office.rs     PPTX and spreadsheet → Markdown, pure Rust
   ├─ capture.rs    full-screen capture, region crop, editor handoff
-  ├─ recording.rs  screencapture / FFmpeg, with interrupt-based finalization
+  ├─ recording.rs  screencapture / FFmpeg / wf-recorder, with signal-based finalization
   ├─ drag_bridge.rs  global drag detection, ring mode, radial positioning
-  ├─ settings.rs   output directories, write checks, privacy deep links
+  ├─ settings.rs   output directories, write checks, ring order, permission links,
+  │                first-run flag
+  ├─ history.rs    the shared capture/result library, pinning and capacity
+  ├─ result_card.rs  floating post-capture card with its own auto-close fuse
+  ├─ update.rs     manifest fetch, signature check, semver compare, SHA256 gate
   ├─ share.rs      LAN beacons, peer list, AirDrop-style file transfer
   └─ editor.rs     editor and pin window state
 
 Platform adapters
   ├─ macOS    AppKit drag bridge · PDFKit renderer · AppKit doc renderer · screencapture
-  ├─ Windows  Win32 drag state  · PowerShell capture · FFmpeg · Poppler
-  └─ Linux    grim / gnome-screenshot · FFmpeg · Poppler
+  ├─ Windows  Win32 drag state  · GDI BitBlt capture · FFmpeg · Poppler
+  └─ Linux    grim / gnome-screenshot · wf-recorder (Wayland) · FFmpeg · Poppler
 
 OCR: Tesseract.js WASM + bundled eng/chi_sim, in-process, offline
 ```
@@ -367,22 +415,27 @@ The radial hit-test is pure geometry — one polar calculation shared by native 
 
 ```text
 src/                 React UI, i18n (en/zh), Tauri API bindings
-src/lib/             pure helpers and Node tests, including the conversion matrix
+src/lib/             pure helpers and Node tests: conversion matrix, ring
+                     catalogue and ordering, drag payloads, drop targets
 src-tauri/src/       Rust command layer and platform adapters
 native/macos/        Swift sidecars: drag bridge, PDF renderer, doc renderer,
                      compiled into src-tauri/binaries/ by pnpm mac:drag-bridge
-scripts/            OCR staging, macOS sidecars, Windows installer and release builds
+scripts/            OCR staging, macOS sidecars, Windows installer, release build,
+                    manifest publish and manifest signing
 public/tesseract/    WASM core + traineddata, generated, not committed
 assets/              app icon source
 src-tauri/icons/     generated app icons per platform
-docs/                Windows build guide, roadmap
-.github/workflows/   macOS and Windows CI
+docs/                Windows build guide, release/update channel, roadmap, mobile plan
+scripts/linux/       Dockerfile that builds the Linux deb/AppImage off CI
+.github/workflows/   CI definitions for macOS, Windows and Linux (see Contributing)
 FileFlipper/         separate companion project, its own repository
 ```
 
 ## Privacy
 
-Shift makes no internet requests. Files are read, converted, and written locally; OCR runs in-process against bundled models; recent outputs are a local list. Nothing is uploaded, and nothing is collected.
+Shift makes no internet requests for anything it does to your files. They are read, converted, and written locally; OCR runs in-process against bundled models; the history library is a local file. Nothing is uploaded, and nothing is collected.
+
+Two paths touch the network, and neither carries file content unless you ask: the **update check** fetches a manifest over HTTPS at most once a day - and an installer only when you press the button - while **Send to a device** talks to your local network alone.
 
 The one exception is opt-in by usage: **Send to a device** talks to your local network only — UDP beacons on `239.255.77.88:47888` plus a direct TCP connection between the two machines, carrying the machine name so each side can label the other. It is inert until you open that picker or another Shift sends you a file.
 
@@ -391,12 +444,14 @@ The one exception is opt-in by usage: **Send to a device** talks to your local n
 - Document → PDF on Windows/Linux still needs Pandoc plus a working PDF engine; the bundled AppKit renderer is macOS-only.
 - PPTX and spreadsheet → PDF is a text and table summary, not a layout-accurate render.
 - `.doc`, `.pages`, `.ppt`, `.key` and `.numbers` are recognised but not parsed — export to DOCX/PPTX/XLSX first.
-- HEIC/HEIF/AVIF convert through the system decoder, but the pixel tools need a PNG/JPEG/WebP/TIFF/BMP/GIF input; AVIF is not yet an export target.
+- HEIC/HEIF/AVIF are read through the system decoder, so conversion and the pixel tools both accept them. Neither format can be written on this path, so a pixel tool applied to one produces a PNG; AVIF is not an export target at all.
 - PDF compression resamples embedded images to at most 1440 px as q60 JPEG. It deliberately skips anything it cannot prove it can round-trip — masks, indexed or CMYK colour, JPX/JBIG2/CCITT — so exotic scans may still resist shrinking.
-- Windows recording and media conversion require `ffmpeg` on `PATH`.
+- Windows recording and media conversion require `ffmpeg` on `PATH`. On Linux media conversion also requires it, area recording needs `wf-recorder` under Wayland and `ffmpeg` under X11, and neither path is exercised by the forge this repository is hosted on, so treat Linux capture as build-verified only.
+- Linux is a build target, not a shipped product: no deb or AppImage is published, so the update channel carries no `linux` key and a Linux build finds nothing to download. `scripts/linux/Dockerfile` and the `linux` job in CI remain the recipe for anyone who wants one.
+- Dragging a library row out uses the webview's file-URL drag support. It is the standard `text/uri-list` payload with a `file://` entry plus the plain path, and it needs a gesture-level check on each platform; until then, **Send**, **Reveal** and the row's own buttons are the guaranteed paths for handing a file over.
 - LAN sharing needs a network that allows peer traffic. Multicast is skipped by some guest and corporate Wi-Fi; those networks still work over the broadcast and unicast fallbacks, but two copies cannot meet across a router that isolates clients.
 - On Windows only one Shift copy per machine can hold the discovery port, so extra instances do not appear as peers.
-- Windows paths build and pass CI, but gesture-level QA needs real Windows hardware.
+- Windows and Linux paths are compile-verified here, and the forge hosting this repository runs no Actions, so nothing is ever built by CI on your behalf. Gesture-level QA needs real Windows and Linux hardware.
 - Signing identity changes on macOS may require re-approving Screen Recording and Accessibility.
 
 Roadmap: `docs/ROADMAP.md`.
@@ -423,6 +478,12 @@ Next to the source file by default, with a suffix — check the recent list in t
 **❓ Which languages are supported?**
 English and Simplified Chinese, switchable in the main window's Settings. On first launch it follows the system language. The tray menu follows the selected language; native macOS permission prompts stay in English.
 
+**❓ How does Shift get updates?**
+From this repository. A `releases` branch carries the installers plus a manifest with each file's SHA256; Settings → **Updates** shows the feed this build reads, checks it once a day, and downloads on request. Nothing installs until the download's byte length and recomputed SHA256 both match the manifest. `docs/RELEASE.md` documents publishing with `scripts/publish-release.sh`, and the optional ed25519 manifest signature that proves where the manifest came from rather than only that the download matches it.
+
+**❓ Can I change which wedge comes first?**
+The order is honoured, but there is currently no screen to change it: Settings no longer carries the reorder tab. An order written to `wedgeOrders` in `settings.json` is still applied, and an order can only arrange the wedges a file type actually supports — it cannot add or remove actions, and **Send** always stays last.
+
 **❓ Can I edit a screenshot without saving it?**
 Yes — annotation works on a canvas copy and only writes on **Save copy** or **Copy**. The source file is never modified. Use **Pin** to keep it floating on screen as a reference instead.
 
@@ -431,7 +492,9 @@ Quit from the tray and delete the app. Nothing is written outside your output fo
 
 ## Contributing
 
-Adding a format is one entry in `conversionFormats` in `src/lib/conversionFormats.ts`, its matrix test, and its handling in `perform_action` in `src-tauri/src/files.rs`; adding a tool is one entry in `toolWedges` plus one match arm. Run `pnpm check`, `pnpm test`, `pnpm build` and `cargo test --lib` before pushing. CI builds debug bundles on macOS and Windows.
+Adding a format is one entry in `conversionFormats` in `src/lib/conversionFormats.ts`, its matrix test, and its handling in `perform_action` in `src-tauri/src/files.rs`. Adding a tool is one id in the right list in `src/lib/radialOrder.ts`, its label, its icon in `WEDGE_ICONS`, and one match arm in `executeAction` - the ring renders the same catalogue, so it appears with no other registration. Run `pnpm check`, `pnpm test`, `pnpm build` and `cargo test --lib` before pushing.
+
+`.github/workflows/ci.yml` carries macOS, Windows and Linux jobs, but **the forge hosting this repository has no Actions runner**, so those jobs are definitions rather than a live guarantee: nothing is built until a GitHub mirror, a Forgejo Actions instance, or a contributor runs them. The four commands above are what CI would run, plus `pnpm tauri build` per platform; `scripts/linux/Dockerfile` builds the Linux packages on a plain Docker host.
 
 **Forks and derivative works are welcome.** You may use, modify, redistribute, and build on this code commercially, provided you keep the copyright notice and the LICENSE file.
 

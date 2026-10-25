@@ -1,16 +1,19 @@
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Check, LoaderCircle, Mic, MicOff, ScanLine, Square, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Check, Gauge, LoaderCircle, Mic, MicOff, ScanLine, Square, X } from "lucide-react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import { api } from "../lib/api";
-import { IS_MAC, normalizeSelection } from "../lib/utils";
-import type { CaptureSession } from "../types";
+import { normalizeSelection } from "../lib/utils";
+import type { CaptureSession, RecordingCapabilities } from "../types";
 
 interface Point {
   x: number;
   y: number;
 }
+
+/** Choices the frame-rate chip cycles through, low to high. */
+const FRAME_RATES = [15, 24, 30];
 
 export function CaptureOverlay() {
   const { t } = useI18n();
@@ -21,7 +24,19 @@ export function CaptureOverlay() {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [audio, setAudio] = useState(false);
+  // Which recording switches this platform actually implements. Offering a control the
+  // backend ignores would promise something the file cannot deliver, so the toolbar
+  // only renders what the platform reports.
+  const [capabilities, setCapabilities] = useState<RecordingCapabilities>({
+    audio: true,
+    fps: false,
+  });
+  // Frame rate is only sent where the capture backend accepts one, so this is a real
+  // request rather than a number that gets dropped on the floor.
+  const [fps, setFps] = useState(30);
   const stageRef = useRef<HTMLDivElement>(null);
+  const toolbarRef = useRef<HTMLDivElement>(null);
+  const [toolbarWidth, setToolbarWidth] = useState(260);
 
   useEffect(() => {
     if (!isTauri()) {
@@ -41,6 +56,7 @@ export function CaptureOverlay() {
     void api.getCaptureSession().then((next) => {
       if (next) setSession(next);
     });
+    void api.recordingCapabilities().then(setCapabilities).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -94,7 +110,12 @@ export function CaptureOverlay() {
     setStatus(t("processing"));
     try {
       if (session?.mode === "recording") {
-        await api.startRecording(selection.normalized, { audio, fps: 30 });
+        // Only the switches this platform honours are sent, so nothing in the
+        // toolbar can promise a recording option the backend would drop.
+        await api.startRecording(selection.normalized, {
+          audio: capabilities.audio ? audio : false,
+          ...(capabilities.fps ? { fps } : {}),
+        });
       } else {
         await api.captureCrop(selection.normalized);
       }
@@ -112,6 +133,14 @@ export function CaptureOverlay() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
+  });
+
+  useLayoutEffect(() => {
+    const node = toolbarRef.current;
+    if (!node) return;
+    // Keep the measured width so the clamping below centres the toolbar wherever the
+    // selection sits, without hard-coding how many chips the platform shows.
+    setToolbarWidth((current) => (current === node.offsetWidth ? current : node.offsetWidth));
   });
 
   if (!session) {
@@ -136,8 +165,8 @@ export function CaptureOverlay() {
     : 0;
   const toolbarLeft = selection
     ? Math.min(
-        Math.max(12, selection.left + selection.width / 2 - 130),
-        Math.max(12, window.innerWidth - 272),
+        Math.max(12, selection.left + selection.width / 2 - toolbarWidth / 2),
+        Math.max(12, window.innerWidth - toolbarWidth - 12),
       )
     : 0;
 
@@ -187,6 +216,7 @@ export function CaptureOverlay() {
             </div>
           </div>
           <div
+            ref={toolbarRef}
             className="capture-toolbar"
             style={{ top: toolbarTop, left: toolbarLeft }}
             onPointerDown={(event) => event.stopPropagation()}
@@ -194,13 +224,29 @@ export function CaptureOverlay() {
           >
             {session.mode === "recording" ? (
               <>
-                {IS_MAC ? (
+                {capabilities.audio ? (
                   <button
                     className={`capture-tool ${audio ? "is-selected" : ""}`}
                     onClick={() => setAudio((value) => !value)}
                     title={t("audio")}
                   >
                     {audio ? <Mic size={17} /> : <MicOff size={17} />}
+                  </button>
+                ) : null}
+                {capabilities.fps ? (
+                  <button
+                    className="capture-tool capture-fps"
+                    onClick={() =>
+                      setFps(
+                        FRAME_RATES[
+                          (FRAME_RATES.indexOf(fps) + 1) % FRAME_RATES.length
+                        ] ?? 30,
+                      )
+                    }
+                    title={t("frameRate")}
+                  >
+                    <Gauge size={15} />
+                    {fps}
                   </button>
                 ) : null}
                 <button className="capture-tool capture-record" onClick={() => void confirm()}>

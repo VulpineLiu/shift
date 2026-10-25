@@ -10,14 +10,18 @@ import type {
   FileOutputMode,
   NormalizedRect,
   RadialContext,
+  RecordingCapabilities,
   RecordingInfo,
   RecordingOptions,
   SharePeer,
   RuntimeInfo,
   SwitchState,
   SwitchUpdate,
+  UpdateProgress,
+  UpdateStatus,
   WriteCheck,
 } from "../types";
+import type { FileKind, RadialRing, WedgeOrders } from "./radialOrder";
 
 interface FileActionResultEvent {
   jobId: string;
@@ -77,7 +81,6 @@ export const api = {
   inspectFiles: (paths: string[]) => invoke<FileInfo[]>("inspect_files", { paths }),
   performFileAction,
   revealFile: (path: string) => invoke<void>("reveal_file", { path }),
-  existingFiles: (paths: string[]) => invoke<string[]>("existing_files", { paths }),
   openFile: (path: string) => invoke<void>("open_file", { path }),
   readTextFile: (path: string) => invoke<string>("read_text_file", { path }),
   readImageData: (path: string) => invoke<string>("read_image_data", { path }),
@@ -99,6 +102,7 @@ export const api = {
   captureFullscreen: () => invoke<string>("capture_fullscreen"),
   startRecording: (rect: NormalizedRect, options?: RecordingOptions) =>
     invoke<RecordingInfo>("start_recording", { rect, options }),
+  recordingCapabilities: () => invoke<RecordingCapabilities>("recording_capabilities"),
   stopRecording: () => invoke<RecordingInfo | null>("stop_recording"),
   recordingStatus: () => invoke<RecordingInfo | null>("recording_status"),
   getEditorSession: () => invoke<EditorInfo | null>("get_editor_session"),
@@ -138,6 +142,24 @@ export const api = {
   revealOutputDirectory: (kind: "screenshot" | "recording" | "files") =>
     invoke<void>("reveal_output_directory", { kind }),
   openFilesPermissionSettings: () => invoke<void>("open_files_permission_settings"),
+  setCaptureAfter: (after: "card" | "editor") =>
+    invoke<AppSettings>("set_capture_after", { after }),
+  setUpdateCheckEnabled: (enabled: boolean) =>
+    invoke<SwitchState>("set_update_check_enabled", { enabled }),
+  setSetupReviewed: (reviewed: boolean) => invoke<boolean>("set_setup_reviewed", { reviewed }),
+  getWedgeOrders: () => invoke<WedgeOrders>("get_wedge_orders"),
+  setWedgeOrder: (kind: FileKind, ring: RadialRing, order: string[]) =>
+    invoke<AppSettings>("set_wedge_order", { kind, ring, order }),
+  updateCheck: () =>
+    invoke<{ status: UpdateStatus; downloadReady: boolean }>("update_check"),
+  updateStatus: () => invoke<UpdateStatus | null>("update_status"),
+  updateDownload: () => invoke<UpdateStatus>("update_download"),
+  updateInstall: () => invoke<string>("update_install"),
+  updateClear: () => invoke<void>("update_clear"),
+  onUpdateProgress: (handler: (progress: UpdateProgress) => void) =>
+    listen<UpdateProgress>("update://progress", (event) => handler(event.payload)),
+  onUpdateStatus: (handler: (status: UpdateStatus | null) => void) =>
+    listen<UpdateStatus | null>("update://status", (event) => handler(event.payload)),
   getRuntimeInfo: () => invoke<RuntimeInfo>("machine_info"),
   installRuntimeComponent: (componentId: string) =>
     invoke<string>("install_runtime_component", { componentId }),
