@@ -3820,6 +3820,7 @@ dependencies = [
  "base64 0.22.1",
  "calamine",
  "chrono",
+ "flate2",
  "image",
  "libc",
  "lopdf 0.45.0",

@@ -1,6 +1,7 @@
 use std::{
+    ffi::OsStr,
     fs::{self, File},
-    io::Cursor,
+    io::{BufReader, Cursor, Write},
     path::{Path, PathBuf},
     process::Command,
     sync::OnceLock,
@@ -8,11 +9,15 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use image::{codecs::jpeg::JpegEncoder, DynamicImage, GenericImageView, ImageFormat, RgbImage};
+use image::{
+    codecs::{gif::GifDecoder, jpeg::JpegEncoder},
+    AnimationDecoder, Delay, DynamicImage, Frame, GenericImageView, ImageDecoder, ImageFormat,
+    RgbImage, RgbaImage,
+};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{
-    models::{ActionOutcome, FileInfo},
+    models::{ActionOutcome, ActionResultEvent, FileActionProgress, FileInfo},
     office, pdf, settings,
 };
 
@@ -32,6 +37,20 @@ fn extension_of(path: &Path) -> String {
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase()
+}
+
+fn image_mime(ext: &str) -> &'static str {
+    match ext {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "tiff" | "tif" => "image/tiff",
+        "bmp" => "image/bmp",
+        "gif" => "image/gif",
+        "heic" | "heif" => "image/heic",
+        "avif" => "image/avif",
+        _ => "application/octet-stream",
+    }
 }
 
 fn kind_of(ext: &str) -> &'static str {
@@ -225,7 +244,7 @@ fn macos_convert(input: &Path, output: &Path, target: &str) -> Result<(), String
         "pdf" => "pdf",
         other => other,
     };
-    let status = Command::new("/usr/bin/sips")
+    let status = crate::process::command("/usr/bin/sips")
         .args([
             "-s",
             "format",
@@ -240,7 +259,7 @@ fn macos_convert(input: &Path, output: &Path, target: &str) -> Result<(), String
         Ok(())
     } else {
         Err(format!(
-            "This Mac cannot write {} files. Try PNG or WEBP.",
+            "This Mac cannot write {} files. Try PNG or JPG.",
             target.to_ascii_uppercase()
         ))
     }
@@ -256,7 +275,7 @@ pub(crate) fn system_convert(input: &Path, output: &Path, target: &str) -> Resul
     let Some(magick) = resolve_tool("magick") else {
         return Err("HEIC/AVIF export on Windows requires ImageMagick (magick).".into());
     };
-    let status = Command::new(magick)
+    let status = crate::process::command(magick)
         .arg(input)
         .arg(output)
         .status()
@@ -276,7 +295,7 @@ pub(crate) fn system_convert(input: &Path, output: &Path, target: &str) -> Resul
     let Some(magick) = resolve_tool("magick") else {
         return Err("HEIC/AVIF export on Linux requires ImageMagick (magick).".into());
     };
-    let status = Command::new(magick)
+    let status = crate::process::command(magick)
         .arg(input)
         .arg(output)
         .status()
@@ -298,8 +317,29 @@ fn convert_file(input: &Path, target: &str, output_dir: Option<&Path>) -> Result
 
     if direct_formats.contains(&ext) {
         if let Ok(image) = image::open(input) {
-            save_image(&image, &output, format, 92)?;
+            if ext == "gif" {
+                save_gif_capped(input, &output, GIF_MAX_BYTES)?;
+            } else {
+                save_image(&image, &output, format, 92)?;
+            }
             return Ok(output);
+        }
+        if ext == "webp" {
+            // HEIC/HEIF/AVIF are readable only through the system codec, while
+            // macOS sips cannot encode WEBP. Decode to PNG, then use the native
+            // WEBP encoder.
+            let intermediate =
+                std::env::temp_dir().join(format!("shift-image-{}.png", uuid::Uuid::new_v4()));
+            if system_convert(input, &intermediate, "png").is_ok() {
+                let converted = image::open(&intermediate).ok();
+                let _ = fs::remove_file(intermediate);
+                if let Some(image) = converted {
+                    save_image(&image, &output, format, 92)?;
+                    return Ok(output);
+                }
+            } else {
+                let _ = fs::remove_file(intermediate);
+            }
         }
     }
     system_convert(input, &output, ext)?;
@@ -313,26 +353,239 @@ pub(crate) fn resolve_tool(name: &str) -> Option<PathBuf> {
         }
     }
     #[cfg(target_os = "macos")]
-    let directories = [
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
-        "/opt/local/bin",
-        "/usr/bin",
-        "/bin",
-        "/usr/sbin",
-        "/sbin",
-    ];
-    #[cfg(not(target_os = "macos"))]
-    let directories = ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+    {
+        let directories = [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/opt/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+        ];
+        directories
+            .into_iter()
+            .map(|directory| Path::new(directory).join(name))
+            .find(|candidate| candidate.is_file())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        find_windows_tool(name)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let directories = ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+        directories
+            .into_iter()
+            .map(|directory| Path::new(directory).join(name))
+            .find(|candidate| candidate.is_file())
+    }
+}
+
+pub(crate) fn document_pdf_engine() -> Option<PathBuf> {
+    [
+        "xelatex",
+        "lualatex",
+        "pdflatex",
+        "tectonic",
+        "typst",
+        "weasyprint",
+        "wkhtmltopdf",
+    ]
+    .into_iter()
+    .find_map(resolve_tool)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_tool_file_names(name: &str) -> Vec<String> {
+    let mut names = vec![name.to_string()];
+    if Path::new(name).extension().is_none() {
+        names.push(format!("{name}.exe"));
+    }
+    names
+}
+
+#[cfg(target_os = "windows")]
+fn push_windows_environment_directory(
+    directories: &mut Vec<PathBuf>,
+    variable: &str,
+    suffix: &str,
+) {
+    if let Some(root) = std::env::var_os(variable) {
+        directories.push(PathBuf::from(root).join(suffix));
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_tool_directories() -> Vec<PathBuf> {
+    let mut directories = Vec::new();
+    for (variable, suffix) in [
+        ("LOCALAPPDATA", r"Microsoft\WinGet\Links"),
+        ("LOCALAPPDATA", r"Microsoft\WindowsApps"),
+        ("LOCALAPPDATA", "Pandoc"),
+        ("LOCALAPPDATA", r"Programs\Pandoc"),
+        ("ProgramFiles", "Pandoc"),
+        ("ProgramW6432", "Pandoc"),
+        ("ProgramFiles", r"ffmpeg\bin"),
+        ("ProgramW6432", r"ffmpeg\bin"),
+        ("ProgramFiles", r"Gyan\FFmpeg\bin"),
+        ("ProgramW6432", r"Gyan\FFmpeg\bin"),
+        ("ProgramFiles", r"FFmpeg\bin"),
+        ("ProgramW6432", r"FFmpeg\bin"),
+        ("ProgramData", r"chocolatey\bin"),
+        ("USERPROFILE", r"scoop\shims"),
+    ] {
+        push_windows_environment_directory(&mut directories, variable, suffix);
+    }
+
+    // ImageMagick installs into a versioned folder under Program Files.
+    for variable in ["ProgramFiles", "ProgramW6432"] {
+        let Some(root) = std::env::var_os(variable) else {
+            continue;
+        };
+        let Ok(entries) = fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir()
+                && entry
+                    .file_name()
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .starts_with("imagemagick-")
+            {
+                directories.push(path);
+            }
+        }
+    }
     directories
-        .into_iter()
-        .map(|directory| Path::new(directory).join(name))
-        .find(|candidate| candidate.is_file())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_winget_prefixes(name: &str) -> &'static [&'static str] {
+    match name {
+        "pandoc" => &["johnmacfarlane.pandoc", "chocolatey.pandoc"],
+        "ffmpeg" => &["gyan.ffmpeg"],
+        "pdftoppm" | "pdfimages" | "pdfinfo" => &["oschwartz10612.poppler"],
+        "magick" => &["imagemagick.imagemagick"],
+        "typst" => &["typst.typst"],
+        "winget" => &[],
+        _ => &[],
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn find_file_below(
+    directory: &Path,
+    file_names: &[String],
+    remaining_depth: usize,
+) -> Option<PathBuf> {
+    if remaining_depth == 0 {
+        return None;
+    }
+    let entries = fs::read_dir(directory).ok()?;
+    let mut directories = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            directories.push(path);
+            continue;
+        }
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        if file_names
+            .iter()
+            .any(|candidate| file_name.eq_ignore_ascii_case(candidate))
+        {
+            return Some(path);
+        }
+    }
+    directories.into_iter().find_map(|directory| {
+        find_file_below(&directory, file_names, remaining_depth.saturating_sub(1))
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn find_winget_package_tool(name: &str, file_names: &[String]) -> Option<PathBuf> {
+    let prefixes = windows_winget_prefixes(name);
+    if prefixes.is_empty() {
+        return None;
+    }
+    let packages =
+        PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join(r"Microsoft\WinGet\Packages");
+    let entries = fs::read_dir(packages).ok()?;
+    for entry in entries.flatten() {
+        let package_name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if !entry.path().is_dir()
+            || !prefixes
+                .iter()
+                .any(|prefix| package_name.starts_with(prefix))
+        {
+            continue;
+        }
+        if let Some(found) = find_file_below(&entry.path(), file_names, 6) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn find_windows_tool(name: &str) -> Option<PathBuf> {
+    static FOUND: OnceLock<std::sync::Mutex<std::collections::HashMap<String, PathBuf>>> =
+        OnceLock::new();
+    let cache = FOUND.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Some(path) = cache.lock().ok().and_then(|tools| tools.get(name).cloned()) {
+        return Some(path);
+    }
+    let found = find_windows_tool_uncached(name);
+    if let Some(path) = found.as_ref() {
+        if let Ok(mut tools) = cache.lock() {
+            tools.insert(name.to_string(), path.clone());
+        }
+    }
+    found
+}
+
+#[cfg(target_os = "windows")]
+fn find_windows_tool_uncached(name: &str) -> Option<PathBuf> {
+    let file_names = windows_tool_file_names(name);
+    for directory in windows_tool_directories() {
+        for file_name in &file_names {
+            let candidate = directory.join(file_name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    find_winget_package_tool(name, &file_names)
+}
+
+/// Runs long media and document work below the UI's scheduling priority on
+/// macOS, so a CPU-heavy encoder cannot starve the always-on-top radial window.
+pub(crate) fn background_command(program: impl AsRef<OsStr>) -> Command {
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = crate::process::command("/usr/bin/nice");
+        command.args(["-n", "10"]).arg(program);
+        command
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = crate::process::command(program);
+        crate::process::background(&mut command);
+        command
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        crate::process::command(program)
+    }
 }
 
 fn ffmpeg_path() -> Result<PathBuf, String> {
     resolve_tool("ffmpeg").ok_or_else(|| {
-        "This conversion needs ffmpeg. Install it with Homebrew or add it to your PATH.".to_string()
+        "This conversion needs ffmpeg. Install it from Settings > Runtime Components or add it to your PATH."
+            .to_string()
     })
 }
 
@@ -340,10 +593,7 @@ fn ffmpeg_has_encoder(name: &str) -> bool {
     let Ok(ffmpeg) = ffmpeg_path() else {
         return false;
     };
-    let Ok(output) = Command::new(ffmpeg)
-        .args(["-hide_banner", "-encoders"])
-        .output()
-    else {
+    let Ok(output) = crate::process::output(ffmpeg, &["-hide_banner", "-encoders"]) else {
         return false;
     };
     String::from_utf8_lossy(&output.stdout).contains(name)
@@ -360,6 +610,10 @@ fn video_encoder() -> &'static str {
             "mpeg4"
         }
     })
+}
+
+pub(crate) fn video_encoder_name() -> &'static str {
+    video_encoder()
 }
 
 fn video_encode_args(crf: &'static str, bitrate: &'static str) -> Vec<&'static str> {
@@ -382,6 +636,138 @@ fn video_encode_args(crf: &'static str, bitrate: &'static str) -> Vec<&'static s
 /// Video -> GIF stays small and predictable: first 15 seconds, 12 fps, 480 px wide.
 const GIF_MAX_SECONDS: &str = "15";
 const GIF_FILTER: &str = "fps=12,scale=480:-1:flags=lanczos";
+/// Hard ceiling on the byte size of any GIF Shift writes.
+const GIF_MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// The same ceiling for the ffmpeg path, passed as `-fs`.
+const GIF_MAX_BYTES_FFMPEG: &str = "8388608";
+/// Longest animation kept when re-encoding an existing animated GIF.
+const GIF_MAX_MILLIS: u32 = 15_000;
+/// Most frames kept when re-encoding an existing animated GIF.
+const GIF_MAX_FRAMES: usize = 180;
+/// Widest dimension kept when re-encoding an existing animated GIF.
+const GIF_MAX_SIDE: u32 = 480;
+
+/// Writes a GIF that respects the size ceiling. An animated source keeps its
+/// frames; the running duration, the frame count and the resulting byte size
+/// are all capped so a long recording cannot become a huge file.
+fn save_gif_capped(input: &Path, output: &Path, max_bytes: u64) -> Result<(), String> {
+    let (width, height, frames) = match gif_frames(input) {
+        Ok(frames) => frames,
+        // Not an animated GIF: a still image becomes a single-frame GIF.
+        Err(_) => {
+            let image =
+                image::open(input).map_err(|error| format!("Could not read image: {error}"))?;
+            let rgba = image.to_rgba8();
+            let (width, height) = scaled_size(rgba.width(), rgba.height());
+            (
+                width,
+                height,
+                vec![Frame::from_parts(
+                    rgba,
+                    0,
+                    0,
+                    Delay::from_numer_denom_ms(0, 1),
+                )],
+            )
+        }
+    };
+    let buffer = encode_gif_frames(&frames, width, height, max_bytes)?;
+    let mut file = File::create(output).map_err(|error| describe_write_error(output, error))?;
+    file.write_all(&buffer)
+        .map_err(|error| describe_write_error(output, error))?;
+    Ok(())
+}
+
+/// Encodes as many frames as fit into the byte ceiling. Frame count is found
+/// by bisection because a frame's compressed size is only known once written.
+fn encode_gif_frames(
+    frames: &[Frame],
+    width: u32,
+    height: u32,
+    max_bytes: u64,
+) -> Result<Vec<u8>, String> {
+    let encode = |count: usize| -> Result<Vec<u8>, String> {
+        let mut buffer: Vec<u8> = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut buffer);
+            for frame in frames.iter().take(count) {
+                let resized = resize_rgba(frame.buffer(), width, height);
+                encoder
+                    .encode_frame(Frame::from_parts(resized, 0, 0, frame.delay()))
+                    .map_err(|error| format!("Could not write the GIF: {error}"))?;
+            }
+        }
+        Ok(buffer)
+    };
+
+    let full = encode(frames.len())?;
+    if full.len() as u64 <= max_bytes {
+        return Ok(full);
+    }
+    let (mut low, mut high) = (1_usize, frames.len() - 1);
+    let mut best = encode(1)?;
+    while low <= high {
+        let middle = (low + high) / 2;
+        let candidate = encode(middle)?;
+        if candidate.len() as u64 <= max_bytes {
+            best = candidate;
+            low = middle + 1;
+        } else {
+            high = middle.saturating_sub(1);
+        }
+    }
+    Ok(best)
+}
+
+/// Decodes a GIF into frames, capped by duration and frame count. The size of
+/// the source decides the output size: still images keep their dimensions,
+/// animations are scaled down to the GIF width ceiling.
+fn gif_frames(input: &Path) -> Result<(u32, u32, Vec<Frame>), String> {
+    let file = File::open(input).map_err(|error| format!("Could not read image: {error}"))?;
+    let decoder = GifDecoder::new(BufReader::new(file))
+        .map_err(|error| format!("Could not read image: {error}"))?;
+    let (width, height) = decoder.dimensions();
+    let mut frames = Vec::new();
+    let mut elapsed = 0_u32;
+    for frame in decoder.into_frames() {
+        let frame = frame.map_err(|error| format!("Could not read image: {error}"))?;
+        let delay = frame.delay().numer_denom_ms().0.min(GIF_MAX_MILLIS);
+        elapsed = elapsed.saturating_add(delay);
+        if elapsed > GIF_MAX_MILLIS || frames.len() >= GIF_MAX_FRAMES {
+            break;
+        }
+        frames.push(Frame::from_parts(
+            frame.into_buffer(),
+            0,
+            0,
+            Delay::from_numer_denom_ms(delay, 1),
+        ));
+    }
+    if frames.is_empty() {
+        return Err("Could not read the image frames.".into());
+    }
+    let (width, height) = scaled_size(width, height);
+    Ok((width, height, frames))
+}
+
+/// Scales a frame pair down to the GIF width ceiling.
+fn scaled_size(width: u32, height: u32) -> (u32, u32) {
+    if width <= GIF_MAX_SIDE {
+        return (width.max(1), height.max(1));
+    }
+    let height = (height as f64 * GIF_MAX_SIDE as f64 / width as f64)
+        .round()
+        .max(1.0) as u32;
+    (GIF_MAX_SIDE, height)
+}
+
+/// Resizes a frame to the given size with a smooth filter.
+fn resize_rgba(image: &RgbaImage, width: u32, height: u32) -> RgbaImage {
+    if image.width() == width && image.height() == height {
+        return image.clone();
+    }
+    image::imageops::resize(image, width, height, image::imageops::FilterType::Lanczos3)
+}
 
 fn convert_media(input: &Path, target: &str, output_dir: Option<&Path>) -> Result<PathBuf, String> {
     let ffmpeg = ffmpeg_path()?;
@@ -395,7 +781,7 @@ fn convert_media(input: &Path, target: &str, output_dir: Option<&Path>) -> Resul
         other => return Err(format!("Unsupported media format: {other}")),
     };
     let output = unique_output_in(input, output_dir, "", ext)?;
-    let mut command = Command::new(ffmpeg);
+    let mut command = background_command(&ffmpeg);
     command.args(["-y", "-i", input.to_string_lossy().as_ref()]);
     match target {
         "gif" => {
@@ -403,6 +789,9 @@ fn convert_media(input: &Path, target: &str, output_dir: Option<&Path>) -> Resul
             // turns into a hundreds-of-megabytes animated file.
             command.args(["-t", GIF_MAX_SECONDS]);
             command.args(["-vf", GIF_FILTER, "-loop", "0"]);
+            // Cap the byte size too: ffmpeg stops writing once the file is
+            // this big, so a busy screen cannot produce a runaway GIF.
+            command.args(["-fs", GIF_MAX_BYTES_FFMPEG]);
         }
         "m4a" => {
             command.args(["-vn", "-c:a", "aac", "-b:a", "192k"]);
@@ -439,7 +828,7 @@ fn convert_mp3_with_lame(input: &Path, output: &Path) -> Result<PathBuf, String>
     })?;
     let ffmpeg = ffmpeg_path()?;
     let wav = std::env::temp_dir().join(format!("shift-{}.wav", uuid::Uuid::new_v4()));
-    let status = Command::new(ffmpeg)
+    let status = background_command(&ffmpeg)
         .args(["-y", "-i"])
         .arg(input)
         .args(["-vn", "-ac", "2", "-ar", "44100"])
@@ -450,7 +839,7 @@ fn convert_mp3_with_lame(input: &Path, output: &Path) -> Result<PathBuf, String>
         let _ = fs::remove_file(&wav);
         return Err("Could not extract audio for MP3 export.".into());
     }
-    let status = Command::new(lame)
+    let status = background_command(&lame)
         .args(["--silent", "-b", "192"])
         .arg(&wav)
         .arg(output)
@@ -472,7 +861,7 @@ fn compress_media(input: &Path, output_dir: Option<&Path>) -> Result<PathBuf, St
         ("mp4", false)
     };
     let output = unique_output_in(input, output_dir, " (compressed)", extension)?;
-    let mut command = Command::new(ffmpeg);
+    let mut command = background_command(&ffmpeg);
     command.args(["-y", "-i", input.to_string_lossy().as_ref()]);
     if audio_only {
         command.args(["-vn", "-c:a", "aac", "-b:a", "128k"]);
@@ -491,7 +880,7 @@ fn compress_media(input: &Path, output_dir: Option<&Path>) -> Result<PathBuf, St
 }
 
 #[cfg(target_os = "macos")]
-fn doc_render_bridge() -> Option<PathBuf> {
+pub(crate) fn doc_render_bridge() -> Option<PathBuf> {
     let triple = match std::env::consts::ARCH {
         "aarch64" => "aarch64-apple-darwin",
         "x86_64" => "x86_64-apple-darwin",
@@ -515,33 +904,84 @@ fn doc_render_bridge() -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-fn native_document_pdf(input: &Path, output_dir: Option<&Path>) -> Result<Option<PathBuf>, String> {
+fn native_document_pdf(
+    input: &Path,
+    output_dir: Option<&Path>,
+    on_progress: Option<&(dyn Fn(u32, u32, bool) + Sync)>,
+) -> Result<Option<PathBuf>, String> {
+    if extension_of(input) == "docx" {
+        let work = std::env::temp_dir().join(format!("shift-docx-pdf-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&work).map_err(|error| error.to_string())?;
+        let target_dir = output_dir
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| directory_of(input));
+        let result = (|| {
+            let Some(images) = office::document_page_images(input, &work)? else {
+                return Ok(None);
+            };
+            let generated =
+                pdf::images_to_pdf_with_progress(&images, Some(&work), |done, total| {
+                    if let Some(report) = on_progress {
+                        report(done, total, false);
+                    }
+                })?;
+            rename_office_output(generated, input, &target_dir).map(Some)
+        })();
+        let _ = fs::remove_dir_all(work);
+        if let Some(output) = result? {
+            return Ok(Some(output));
+        }
+    }
     let Some(renderer) = doc_render_bridge() else {
         return Ok(None);
     };
     let extension = extension_of(input);
     let mut source = input.to_path_buf();
     let mut temporary = None;
+    let mut base_dir = input
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
     if matches!(extension.as_str(), "md" | "markdown") {
-        if let Some(pandoc) = resolve_tool("pandoc") {
-            let path =
-                std::env::temp_dir().join(format!("shift-doc-{}.html", uuid::Uuid::new_v4()));
-            let status = Command::new(pandoc)
+        // Markdown must never reach the renderer as plain text: without that
+        // step the PDF is a printout of the markup. Pandoc is nicer when it is
+        // installed, and the built-in writer covers every other machine.
+        let path = std::env::temp_dir().join(format!("shift-doc-{}.html", uuid::Uuid::new_v4()));
+        let pandoc_rendered = resolve_tool("pandoc").is_some_and(|pandoc| {
+            background_command(&pandoc)
                 .arg(input)
                 .args(["-s", "-t", "html", "-o"])
                 .arg(&path)
                 .status()
-                .map_err(|error| format!("Could not run pandoc: {error}"))?;
-            if status.success() && path.exists() {
-                source = path.clone();
-                temporary = Some(path);
-            }
+                .map(|status| status.success() && path.exists())
+                .unwrap_or(false)
+        });
+        let rendered = pandoc_rendered
+            || match fs::read_to_string(input) {
+                Ok(text) => fs::write(&path, crate::markdown::to_html(&text)).is_ok(),
+                Err(_) => false,
+            };
+        if !rendered {
+            let _ = fs::remove_file(&path);
+            return Err(format!(
+                "Could not render {} as HTML before creating the PDF.",
+                input.display()
+            ));
         }
+        source = path.clone();
+        temporary = Some(path);
+        // Keep the original folder as the HTML base URL so relative images
+        // resolve even though the generated HTML lives in a temp directory.
+        base_dir = input
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
     }
     let output = unique_output_in(input, output_dir, "", "pdf")?;
-    let status = Command::new(renderer)
+    let status = background_command(&renderer)
         .arg(&source)
         .arg(&output)
+        .arg(&base_dir)
         .status()
         .map_err(|error| format!("Could not start the document renderer: {error}"))?;
     if let Some(path) = temporary {
@@ -552,6 +992,58 @@ fn native_document_pdf(input: &Path, output_dir: Option<&Path>) -> Result<Option
         return Err("Could not render this document to PDF.".into());
     }
     Ok(Some(output))
+}
+
+/// Converts through the built-in macOS text converter.
+///
+/// Pandoc is an optional tool, and machines without it used to fail every
+/// Word/RTF/ODT request. `textutil` ships with macOS and writes the same
+/// formats, so Markdown is rendered to HTML first and handed over.
+#[cfg(target_os = "macos")]
+fn textutil_convert(
+    input: &Path,
+    target: &str,
+    output_dir: Option<&Path>,
+) -> Result<Option<PathBuf>, String> {
+    let writer = match target.to_ascii_lowercase().as_str() {
+        "docx" => "docx",
+        "rtf" => "rtf",
+        "odt" => "odt",
+        "html" | "htm" => "html",
+        "txt" => "txt",
+        _ => return Ok(None),
+    };
+    let extension = extension_of(input);
+    let mut source = input.to_path_buf();
+    let mut temporary = None;
+    // textutil reads Markdown as plain text, so give it rendered HTML instead.
+    if matches!(extension.as_str(), "md" | "markdown") {
+        let path = std::env::temp_dir().join(format!("shift-doc-{}.html", uuid::Uuid::new_v4()));
+        let text = fs::read_to_string(input)
+            .map_err(|error| format!("Could not read {}: {error}", input.display()))?;
+        fs::write(&path, crate::markdown::to_html(&text))
+            .map_err(|error| format!("Could not render Markdown: {error}"))?;
+        source = path.clone();
+        temporary = Some(path);
+    }
+    let output = unique_output_in(input, output_dir, "", writer)?;
+    let status = background_command("/usr/bin/textutil")
+        .args(["-convert", writer])
+        .arg("-output")
+        .arg(output.to_string_lossy().as_ref())
+        .arg(source.to_string_lossy().as_ref())
+        .status();
+    if let Some(path) = temporary {
+        let _ = fs::remove_file(path);
+    }
+    match status {
+        Ok(status) if status.success() && output.exists() => Ok(Some(output)),
+        Ok(_) => {
+            let _ = fs::remove_file(&output);
+            Ok(None)
+        }
+        Err(error) => Err(format!("Could not run the macOS text converter: {error}")),
+    }
 }
 
 /// Renames a generated file from a throwaway intermediate name to one derived
@@ -578,6 +1070,7 @@ fn convert_document(
     input: &Path,
     target: &str,
     output_dir: Option<&Path>,
+    on_progress: Option<&(dyn Fn(u32, u32, bool) + Sync)>,
 ) -> Result<PathBuf, String> {
     let extension = extension_of(input);
     if extension == "pages" {
@@ -585,15 +1078,52 @@ fn convert_document(
     }
     if target.eq_ignore_ascii_case("pdf") {
         #[cfg(target_os = "macos")]
-        if let Some(output) = native_document_pdf(input, output_dir)? {
+        if let Some(output) = native_document_pdf(input, output_dir, on_progress)? {
             return Ok(output);
         }
     }
-    let pandoc = resolve_tool("pandoc").ok_or_else(|| {
-        "Document conversion needs pandoc. Install it with Homebrew or add it to your PATH."
-            .to_string()
-    })?;
-    let (extension, writer) = match target.to_ascii_lowercase().as_str() {
+    // Image-bearing PDFs go straight to page rendering. A text-only PDF keeps
+    // the text-layer path so its Word output stays editable.
+    if extension == "pdf" && target.eq_ignore_ascii_case("docx") {
+        if !pdf::has_embedded_images(input)? {
+            let text = pdf::text_of(input)?;
+            let temporary =
+                std::env::temp_dir().join(format!("shift-pdf-{}.md", uuid::Uuid::new_v4()));
+            fs::write(&temporary, text).map_err(|error| error.to_string())?;
+            let target_dir = output_dir
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| directory_of(input));
+            let result = convert_document(&temporary, "docx", Some(&target_dir), None)
+                .and_then(|generated| rename_office_output(generated, input, &target_dir));
+            let _ = fs::remove_file(&temporary);
+            return result;
+        }
+        if pdf::renderer_path().is_none() {
+            return Err(
+                "PDF to Word needs Poppler (pdftoppm). Install it from Settings > Runtime Components."
+                    .into(),
+            );
+        }
+        let output = unique_output_in(input, output_dir, "", "docx")?;
+        match on_progress {
+            Some(report) => {
+                pdf::to_docx_with_progress(input, &output, |done, total, packaging| {
+                    report(done, total, packaging)
+                })?
+            }
+            None => pdf::to_docx(input, &output)?,
+        }
+        return Ok(output);
+    }
+    let target = target.to_ascii_lowercase();
+    let pdf_engine = (target == "pdf").then(document_pdf_engine).flatten();
+    if target == "pdf" && pdf_engine.is_none() {
+        return Err(
+            "PDF output needs a Pandoc PDF engine. Install Typst from Settings > Runtime Components or add a supported engine to your PATH."
+                .into(),
+        );
+    }
+    let (extension, writer) = match target.as_str() {
         "md" | "markdown" => ("md", Some("gfm")),
         "html" => ("html", Some("html")),
         "txt" => ("txt", Some("plain")),
@@ -603,19 +1133,43 @@ fn convert_document(
         "odt" => ("odt", None),
         other => return Err(format!("Unsupported document format: {other}")),
     };
+    let pandoc = match resolve_tool("pandoc") {
+        Some(pandoc) => pandoc,
+        None => {
+            #[cfg(target_os = "macos")]
+            if let Some(output) = textutil_convert(input, extension, output_dir)? {
+                return Ok(output);
+            }
+            return Err(
+                "Document conversion needs pandoc. Install it from Settings > Runtime Components or add it to your PATH."
+                    .into(),
+            );
+        }
+    };
     let output = unique_output_in(input, output_dir, "", extension)?;
-    let mut command = Command::new(pandoc);
+    let mut command = background_command(&pandoc);
     command.arg(input);
     if let Some(writer) = writer {
         command.args(["-t", writer]);
+    }
+    if matches!(target.as_str(), "html" | "rtf") {
+        command.arg("--standalone");
+    }
+    if let Some(engine) = pdf_engine {
+        command.arg("--pdf-engine").arg(engine);
     }
     let status = command
         .args(["-o", output.to_string_lossy().as_ref()])
         .status()
         .map_err(|error| format!("Could not run pandoc: {error}"))?;
     if !status.success() || !output.exists() {
+        let _ = fs::remove_file(&output);
+        #[cfg(target_os = "macos")]
+        if let Some(output) = textutil_convert(input, extension, output_dir)? {
+            return Ok(output);
+        }
         return Err(format!(
-            "Could not convert {} to {}. Check that pandoc and the required PDF engine are installed.",
+            "Could not convert {} to {}. The source may be damaged or contain unsupported content.",
             input.display(),
             extension.to_ascii_uppercase()
         ));
@@ -701,7 +1255,7 @@ fn mute_video(input: &Path, output_dir: Option<&Path>) -> Result<PathBuf, String
     let ffmpeg = ffmpeg_path()?;
     let ext = extension_of(input);
     let output = unique_output_in(input, output_dir, " (muted)", &ext)?;
-    let status = Command::new(ffmpeg)
+    let status = background_command(&ffmpeg)
         .args(["-y", "-i"])
         .arg(input)
         .args(["-c:v", "copy", "-an"])
@@ -717,7 +1271,7 @@ fn mute_video(input: &Path, output_dir: Option<&Path>) -> Result<PathBuf, String
 fn resize_video_720(input: &Path, output_dir: Option<&Path>) -> Result<PathBuf, String> {
     let ffmpeg = ffmpeg_path()?;
     let output = unique_output_in(input, output_dir, " (720p)", "mp4")?;
-    let status = Command::new(ffmpeg)
+    let status = background_command(&ffmpeg)
         .args(["-y", "-i"])
         .arg(input)
         .args(["-vf", "scale=-2:720"])
@@ -735,7 +1289,7 @@ fn resize_video_720(input: &Path, output_dir: Option<&Path>) -> Result<PathBuf, 
 fn frame_video(input: &Path, output_dir: Option<&Path>) -> Result<PathBuf, String> {
     let ffmpeg = ffmpeg_path()?;
     let output = unique_output_in(input, output_dir, " (frame)", "png")?;
-    let status = Command::new(ffmpeg)
+    let status = background_command(&ffmpeg)
         .args(["-y", "-ss", "0", "-i"])
         .arg(input)
         .args(["-frames:v", "1"])
@@ -751,7 +1305,7 @@ fn frame_video(input: &Path, output_dir: Option<&Path>) -> Result<PathBuf, Strin
 fn mono_audio(input: &Path, output_dir: Option<&Path>) -> Result<PathBuf, String> {
     let ffmpeg = ffmpeg_path()?;
     let output = unique_output_in(input, output_dir, " (mono)", "m4a")?;
-    let status = Command::new(ffmpeg)
+    let status = background_command(&ffmpeg)
         .args(["-y", "-i"])
         .arg(input)
         .args(["-vn", "-ac", "1", "-c:a", "aac", "-b:a", "128k"])
@@ -765,7 +1319,10 @@ fn mono_audio(input: &Path, output_dir: Option<&Path>) -> Result<PathBuf, String
 }
 
 fn directory_of(input: &Path) -> PathBuf {
-    input.parent().unwrap_or_else(|| Path::new(".")).to_path_buf()
+    input
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
 }
 
 fn crop_file(
@@ -793,41 +1350,137 @@ fn crop_file(
 pub fn open_path(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let mut command = {
-        let mut command = Command::new("/usr/bin/open");
+        let mut command = crate::process::command("/usr/bin/open");
         command.arg(path);
-        command
-    };
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut command = Command::new("cmd");
-        command.args(["/C", "start", "", path.to_string_lossy().as_ref()]);
         command
     };
     #[cfg(target_os = "linux")]
     let mut command = {
-        let mut command = Command::new("xdg-open");
+        let mut command = crate::process::command("xdg-open");
         command.arg(path);
         command
     };
-    command.status().map_err(|error| error.to_string())?;
-    Ok(())
+    #[cfg(target_os = "windows")]
+    return windows_open(path);
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        command.status().map_err(|error| error.to_string())?;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_open(path: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let file: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    } as isize;
+    if result <= 32 {
+        Err(format!(
+            "Windows could not open {}. The default application may be missing.",
+            path.display()
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 pub fn reveal_path(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
-    let status = Command::new("/usr/bin/open")
+    return crate::process::command("/usr/bin/open")
         .args(["-R", path.to_string_lossy().as_ref()])
-        .status();
+        .status()
+        .map(|_| ())
+        .map_err(|error| error.to_string());
+
     #[cfg(target_os = "windows")]
-    let status = Command::new("explorer")
-        .arg(format!("/select,{}", path.to_string_lossy()))
-        .status();
-    #[cfg(target_os = "linux")]
-    let status = Command::new("xdg-open")
+    return windows_reveal(path);
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    return crate::process::command("xdg-open")
         .arg(path.parent().unwrap_or(path))
-        .status();
-    status.map_err(|error| error.to_string())?;
-    Ok(())
+        .status()
+        .map(|_| ())
+        .map_err(|error| error.to_string());
+}
+
+/// Selects a file in Explorer the way `open -R` does in Finder: a window already
+/// showing that folder is reused and brought forward. `explorer /select,…` cannot
+/// do this, it spawns a fresh window for every conversion that finishes.
+#[cfg(target_os = "windows")]
+fn windows_reveal(path: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::System::Com::{
+        CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
+    };
+    use windows_sys::Win32::UI::Shell::{
+        ILFindLastID, ILFree, ILRemoveLastID, SHOpenFolderAndSelectItems, SHParseDisplayName,
+    };
+
+    // The shell namespace APIs need COM on this thread. A thread that already
+    // picked another apartment model returns RPC_E_CHANGED_MODE and keeps it, so
+    // only uninitialise an apartment this call actually created.
+    const RPC_E_CHANGED_MODE: i32 = -2_147_418_113; // 0x80010105
+    let initialised = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut item = std::ptr::null_mut();
+    let parsed = unsafe {
+        SHParseDisplayName(
+            wide.as_ptr(),
+            std::ptr::null_mut(),
+            &mut item,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    let result = if parsed < 0 || item.is_null() {
+        Err(format!(
+            "Windows could not find {} in the shell namespace.",
+            path.display()
+        ))
+    } else {
+        // Read the target's own identifier before truncating the list: removing
+        // the last entry first would leave the parent folder's identifier.
+        let child = unsafe { ILFindLastID(item) };
+        if child.is_null() || unsafe { ILRemoveLastID(item) } == 0 {
+            Err(format!("Windows could not open {}.", path.display()))
+        } else {
+            let children = [child as *const _];
+            let opened = unsafe { SHOpenFolderAndSelectItems(item, 1, children.as_ptr(), 0) };
+            if opened < 0 {
+                Err(format!("Explorer refused to reveal {}.", path.display()))
+            } else {
+                Ok(())
+            }
+        }
+    };
+
+    unsafe { ILFree(item) };
+    if initialised != RPC_E_CHANGED_MODE {
+        unsafe { CoUninitialize() };
+    }
+    result
 }
 
 pub fn perform_action(
@@ -835,6 +1488,7 @@ pub fn perform_action(
     paths: &[String],
     target: Option<&str>,
     output_dir: Option<&Path>,
+    on_progress: Option<&(dyn Fn(u32, u32, bool) + Sync)>,
 ) -> Result<ActionOutcome, String> {
     if paths.is_empty() {
         return Err("No files selected.".into());
@@ -958,12 +1612,20 @@ pub fn perform_action(
             "convert" if is_pdf && matches!(target, Some("txt" | "md")) => {
                 pdf::extract_text_to(input, target.unwrap_or("txt"), output_dir)?
             }
-            "convert" if is_pdf && matches!(target, Some("docx" | "rtf")) => {
+            "convert"
+                if is_pdf && target.is_some_and(|value| value.eq_ignore_ascii_case("docx")) =>
+            {
+                let target_dir = output_dir
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| directory_of(input));
+                convert_document(input, "docx", Some(&target_dir), on_progress)?
+            }
+            "convert" if is_pdf && matches!(target, Some("rtf" | "odt")) => {
                 // The text layer becomes a Markdown intermediate, then the same
                 // document writer produces the requested container.
                 let text = pdf::text_of(input)?;
-                let temporary = std::env::temp_dir()
-                    .join(format!("shift-pdf-{}.md", uuid::Uuid::new_v4()));
+                let temporary =
+                    std::env::temp_dir().join(format!("shift-pdf-{}.md", uuid::Uuid::new_v4()));
                 fs::write(&temporary, text).map_err(|error| error.to_string())?;
                 let target = target.unwrap_or("docx");
                 // Write straight into the resolved output folder, then rename away
@@ -971,17 +1633,15 @@ pub fn perform_action(
                 let target_dir = output_dir
                     .map(Path::to_path_buf)
                     .unwrap_or_else(|| directory_of(input));
-                let result = convert_document(&temporary, target, Some(&target_dir))
+                let result = convert_document(&temporary, target, Some(&target_dir), None)
                     .and_then(|generated| rename_office_output(generated, input, &target_dir));
                 let _ = fs::remove_file(&temporary);
                 result?
             }
-            "convert" if is_pdf => {
-                return Err(
-                    "Pick a supported target for this PDF: an image format, TXT, MD, DOCX or RTF."
-                        .into(),
-                )
-            }
+            "convert" if is_pdf => return Err(
+                "Pick a supported target for this PDF: an image format, TXT, MD, DOCX, RTF or ODT."
+                    .into(),
+            ),
             "convert"
                 if is_image
                     && target
@@ -991,7 +1651,7 @@ pub fn perform_action(
                 pdf::images_to_pdf(&[input.to_path_buf()], output_dir)?
             }
             "convert" if is_document => {
-                convert_document(input, target.unwrap_or("md"), output_dir)?
+                convert_document(input, target.unwrap_or("md"), output_dir, on_progress)?
             }
             "convert" if is_presentation => match target.unwrap_or("md") {
                 "md" => office::presentation_to_markdown(input, output_dir)?,
@@ -1006,7 +1666,7 @@ pub fn perform_action(
                             .unwrap_or_else(|| Path::new("."))
                             .to_path_buf()
                     });
-                    let result = convert_document(&markdown, "pdf", Some(&target_dir))
+                    let result = convert_document(&markdown, "pdf", Some(&target_dir), None)
                         .and_then(|generated| rename_office_output(generated, input, &target_dir));
                     let _ = fs::remove_dir_all(&temporary);
                     result?
@@ -1030,7 +1690,7 @@ pub fn perform_action(
                             .unwrap_or_else(|| Path::new("."))
                             .to_path_buf()
                     });
-                    let result = convert_document(&markdown, "pdf", Some(&target_dir))
+                    let result = convert_document(&markdown, "pdf", Some(&target_dir), None)
                         .and_then(|generated| rename_office_output(generated, input, &target_dir));
                     let _ = fs::remove_dir_all(&temporary);
                     result?
@@ -1101,83 +1761,165 @@ pub fn editor_kind(path: &Path) -> &'static str {
     }
 }
 
+/// Every command in this file reads, decodes or spawns, so each one runs on a
+/// blocking thread: the webview stays responsive while previews are decoded and
+/// while a conversion writes its output.
 #[tauri::command]
-pub fn inspect_files(paths: Vec<String>) -> Result<Vec<FileInfo>, String> {
-    inspect_paths(&paths)
+pub async fn inspect_files(paths: Vec<String>) -> Result<Vec<FileInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || inspect_paths(&paths))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
 pub fn perform_file_action(
     app: AppHandle,
+    job_id: String,
     action: String,
     paths: Vec<String>,
     target: Option<String>,
-) -> Result<ActionOutcome, String> {
-    let output_dir = settings::files_output_dir(&app)?;
-    let outcome = perform_action(&action, &paths, target.as_deref(), output_dir.as_deref())?;
-    if settings::auto_reveal(&app) {
-        if let Some(first) = outcome.outputs.first() {
-            let path = Path::new(first);
-            if path.exists() {
-                let _ = reveal_path(path);
+) -> Result<(), String> {
+    // Return immediately and report through events. The webview never waits on
+    // a slow encoder or document renderer before it can paint the busy state.
+    let worker = app.clone();
+    std::thread::Builder::new()
+        .name("shift-file-action".into())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                || -> Result<ActionOutcome, String> {
+                    let output_dir = settings::files_output_dir(&worker)?;
+                    let auto_reveal = settings::auto_reveal(&worker);
+                    let progress_worker = worker.clone();
+                    let progress_job = job_id.clone();
+                    let outcome = perform_action(
+                        &action,
+                        &paths,
+                        target.as_deref(),
+                        output_dir.as_deref(),
+                        Some(&|done, total, packaging| {
+                            let _ = progress_worker.emit(
+                                "app://file-action-progress",
+                                FileActionProgress {
+                                    job_id: progress_job.clone(),
+                                    done,
+                                    total,
+                                    packaging,
+                                },
+                            );
+                        }),
+                    )?;
+                    if auto_reveal {
+                        if let Some(first) = outcome.outputs.first() {
+                            let path = Path::new(first);
+                            if path.exists() {
+                                let _ = reveal_path(path);
+                            }
+                        }
+                    }
+                    Ok(outcome)
+                },
+            ))
+            .unwrap_or_else(|_| Err("File action stopped unexpectedly.".into()));
+
+            match result {
+                Ok(outcome) => {
+                    let _ = worker.emit("app://file-result", outcome.clone());
+                    let _ = worker.emit(
+                        "app://file-action-finished",
+                        ActionResultEvent {
+                            job_id,
+                            outcome: Some(outcome),
+                            error: None,
+                        },
+                    );
+                }
+                Err(error) => {
+                    let _ = worker.emit(
+                        "app://file-action-finished",
+                        ActionResultEvent {
+                            job_id,
+                            outcome: None,
+                            error: Some(error),
+                        },
+                    );
+                }
             }
-        }
+        })
+        .map_err(|error| format!("Could not start the file action: {error}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn reveal_file(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || reveal_path(Path::new(&path)))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn existing_files(paths: Vec<String>) -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        paths
+            .into_iter()
+            .filter(|path| Path::new(path).is_file())
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+#[tauri::command]
+pub async fn open_file(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || open_path(Path::new(&path)))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn read_text_file(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        fs::read_to_string(path).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Return image bytes as a data URL. The editor draws this into a canvas and
+/// exports it later; loading through `asset://` would taint the canvas in
+/// WKWebView and make `toDataURL` fail with SecurityError.
+#[tauri::command]
+pub async fn read_image_data(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || image_data_url(Path::new(&path)))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn image_data_url(path: &Path) -> Result<String, String> {
+    let ext = extension_of(path);
+    if !IMAGE_EXTENSIONS.contains(&ext.as_str()) {
+        return Err("This file is not a supported image.".to_string());
     }
-    let _ = app.emit("app://file-result", outcome.clone());
-    Ok(outcome)
+    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    Ok(format!(
+        "data:{};base64,{}",
+        image_mime(&ext),
+        STANDARD.encode(bytes)
+    ))
 }
 
 #[tauri::command]
-pub fn reveal_file(path: String) -> Result<(), String> {
-    reveal_path(Path::new(&path))
-}
-
-#[tauri::command]
-pub fn existing_files(paths: Vec<String>) -> Vec<String> {
-    paths
-        .into_iter()
-        .filter(|path| Path::new(path).is_file())
-        .collect()
-}
-
-#[tauri::command]
-pub fn open_file(path: String) -> Result<(), String> {
-    open_path(Path::new(&path))
-}
-
-#[tauri::command]
-pub fn read_file_data_url(path: String) -> Result<String, String> {
-    let bytes = fs::read(&path).map_err(|error| error.to_string())?;
-    let ext = extension_of(Path::new(&path));
-    let mime = match ext.as_str() {
-        "jpg" | "jpeg" => "image/jpeg",
-        "png" => "image/png",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        "bmp" => "image/bmp",
-        "tiff" | "tif" => "image/tiff",
-        "pdf" => "application/pdf",
-        "mp4" => "video/mp4",
-        "mov" => "video/quicktime",
-        _ => "application/octet-stream",
-    };
-    Ok(format!("data:{mime};base64,{}", STANDARD.encode(bytes)))
-}
-
-#[tauri::command]
-pub fn read_text_file(path: String) -> Result<String, String> {
-    fs::read_to_string(path).map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-pub fn save_image_data(
+pub async fn save_image_data(
     app: AppHandle,
     source: String,
     data_url: String,
     suffix: Option<String>,
 ) -> Result<String, String> {
-    let output_dir = settings::files_output_dir(&app)?;
-    save_image_data_in(&source, &data_url, suffix.as_deref(), output_dir.as_deref())
+    tauri::async_runtime::spawn_blocking(move || {
+        let output_dir = settings::files_output_dir(&app)?;
+        save_image_data_in(&source, &data_url, suffix.as_deref(), output_dir.as_deref())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 fn save_image_data_in(
@@ -1204,28 +1946,63 @@ fn save_image_data_in(
 }
 
 #[tauri::command]
-pub fn render_pdf_pages(app: AppHandle, path: String) -> Result<Vec<String>, String> {
-    let folder = app_cache_dir(&app)?.join(format!(
-        "ocr-{}",
-        chrono::Local::now().format("%Y%m%d-%H%M%S-%3f")
-    ));
-    pdf::to_images_in(Path::new(&path), "png", &folder).map(|pages| {
-        pages
-            .into_iter()
-            .map(|page| page.to_string_lossy().to_string())
-            .collect()
+pub async fn render_pdf_pages(app: AppHandle, path: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let folder = app_cache_dir(&app)?.join(format!(
+            "ocr-{}",
+            chrono::Local::now().format("%Y%m%d-%H%M%S-%3f")
+        ));
+        pdf::to_images_in(Path::new(&path), "png", &folder).map(|pages| {
+            pages
+                .into_iter()
+                .map(|page| page.to_string_lossy().to_string())
+                .collect()
+        })
     })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn save_text_near(
+pub async fn cleanup_pdf_pages(app: AppHandle, paths: Vec<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let cache = app_cache_dir(&app)?;
+        let canonical_cache = fs::canonicalize(&cache).map_err(|error| error.to_string())?;
+        for path in paths {
+            let path = PathBuf::from(path);
+            if let Some(parent) = path.parent() {
+                let is_pdf_page_dir = parent
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("ocr-"))
+                    && fs::canonicalize(parent)
+                        .ok()
+                        .and_then(|directory| directory.parent().map(Path::to_path_buf))
+                        .is_some_and(|directory| directory == canonical_cache);
+                if is_pdf_page_dir {
+                    let _ = fs::remove_dir_all(parent);
+                }
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn save_text_near(
     app: AppHandle,
     source: String,
     text: String,
     suffix: Option<String>,
 ) -> Result<String, String> {
-    let output_dir = settings::files_output_dir(&app)?;
-    save_text_near_in(&source, &text, suffix.as_deref(), output_dir.as_deref())
+    tauri::async_runtime::spawn_blocking(move || {
+        let output_dir = settings::files_output_dir(&app)?;
+        save_text_near_in(&source, &text, suffix.as_deref(), output_dir.as_deref())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 fn save_text_near_in(
@@ -1282,6 +2059,27 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn converts_system_only_image_formats_to_native_webp() {
+        let dir = scratch_dir();
+        let input = dir.join("sample.png");
+        sample_image(&input);
+        let heic = dir.join("sample.heic");
+        if system_convert(&input, &heic, "heic").is_err() {
+            fs::remove_dir_all(dir).unwrap();
+            return;
+        }
+
+        let output = convert_file(&heic, "webp", None).unwrap();
+        assert_eq!(
+            output.extension().and_then(|value| value.to_str()),
+            Some("webp")
+        );
+        assert!(image::open(&output).is_ok());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn custom_output_directory_collects_results() {
         let dir = scratch_dir();
@@ -1294,6 +2092,7 @@ mod tests {
             &[input.to_string_lossy().to_string()],
             Some("jpg"),
             Some(&output_dir),
+            None,
         )
         .unwrap();
 
@@ -1331,8 +2130,13 @@ mod tests {
         let dir = scratch_dir();
         let input = dir.join("shot.png");
         sample_image(&input);
+        let data_url = image_data_url(&input).unwrap();
+        assert!(data_url.starts_with("data:image/png;base64,"));
         let data = fs::read(&input).unwrap();
-        let data_url = format!("data:image/png;base64,{}", STANDARD.encode(data));
+        assert_eq!(
+            data_url,
+            format!("data:image/png;base64,{}", STANDARD.encode(data))
+        );
         let output = save_image_data_in(
             input.to_string_lossy().as_ref(),
             &data_url,
@@ -1466,11 +2270,35 @@ mod tests {
             "<h1>Shift</h1><p>Local <strong>documents</strong>.</p>",
         )
         .unwrap();
-        let output = convert_document(&input, "md", None).unwrap();
+        let output = convert_document(&input, "md", None, None).unwrap();
         let text = fs::read_to_string(output).unwrap();
         assert!(text.contains("# Shift"));
         assert!(text.contains("**documents**"));
+        let html = convert_document(&input, "html", None, None).unwrap();
+        assert!(fs::read_to_string(html)
+            .unwrap()
+            .contains("<!DOCTYPE html>"));
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn textutil_fallback_converts_markdown_to_word_formats() {
+        for target in ["docx", "rtf", "odt"] {
+            let dir = scratch_dir();
+            let input = dir.join("note.md");
+            fs::write(&input, "# Shift\n\nLocal **documents**.\n").unwrap();
+
+            let output = textutil_convert(&input, target, None)
+                .unwrap()
+                .unwrap_or_else(|| panic!("textutil did not write {target}"));
+            assert_eq!(
+                output.extension().and_then(|value| value.to_str()),
+                Some(target)
+            );
+            assert!(output.exists(), "{output:?}");
+            fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -1479,13 +2307,66 @@ mod tests {
         let dir = scratch_dir();
         let input = dir.join("sample.html");
         fs::write(&input, "<h1>Shift</h1><p>Native PDF.</p>").unwrap();
-        let output = convert_document(&input, "pdf", None).unwrap();
+        let output = convert_document(&input, "pdf", None, None).unwrap();
         assert!(output.exists());
         assert_eq!(
             output.extension().and_then(|value| value.to_str()),
             Some("pdf")
         );
         assert!(fs::read(&output).unwrap().starts_with(b"%PDF"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn renders_image_only_docx_pages_to_pdf() {
+        use std::io::Write as _;
+        use zip::{write::SimpleFileOptions, ZipWriter};
+
+        let dir = scratch_dir();
+        let first = dir.join("first.png");
+        let second = dir.join("second.png");
+        sample_image(&first);
+        sample_image(&second);
+        let input = dir.join("scan.docx");
+        let file = fs::File::create(&input).unwrap();
+        let mut zip = ZipWriter::new(file);
+        zip.start_file("word/_rels/document.xml.rels", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/first.png"/>
+              <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/second.png"/>
+            </Relationships>"#,
+        )
+        .unwrap();
+        zip.start_file("word/document.xml", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(
+            br#"<w:document xmlns:w="w" xmlns:a="a" xmlns:r="r"><w:body>
+              <w:p><w:r><w:drawing><a:blip r:embed="rId1"/></w:drawing></w:r></w:p>
+              <w:p><w:r><w:drawing><a:blip r:embed="rId2"/></w:drawing></w:r></w:p>
+            </w:body></w:document>"#,
+        )
+        .unwrap();
+        for (name, path) in [("first.png", &first), ("second.png", &second)] {
+            zip.start_file(format!("word/media/{name}"), SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(&fs::read(path).unwrap()).unwrap();
+        }
+        zip.finish().unwrap();
+
+        let progress = std::sync::Mutex::new(Vec::new());
+        let report = |done, total, packaging| {
+            progress.lock().unwrap().push((done, total, packaging));
+        };
+        let output = convert_document(&input, "pdf", None, Some(&report)).unwrap();
+        let pages = lopdf::Document::load(&output).unwrap().get_pages().len();
+        assert_eq!(pages, 2);
+        assert_eq!(
+            *progress.lock().unwrap(),
+            vec![(1, 2, false), (2, 2, false)]
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1512,6 +2393,7 @@ mod tests {
             &[input.to_string_lossy().to_string()],
             Some("pdf"),
             Some(&dir),
+            None,
         )
         .unwrap();
         assert_eq!(outcome.outputs.len(), 1);
@@ -1532,6 +2414,7 @@ mod tests {
             &[input.to_string_lossy().to_string()],
             Some("pdf"),
             Some(&dir),
+            None,
         )
         .unwrap();
         assert_eq!(outcome.outputs.len(), 1);
@@ -1554,6 +2437,7 @@ mod tests {
             &[input.to_string_lossy().to_string()],
             Some("docx"),
             None,
+            None,
         )
         .expect("a PDF text layer should convert to DOCX");
         assert_eq!(outcome.outputs.len(), 1);
@@ -1564,6 +2448,40 @@ mod tests {
         );
         assert!(Path::new(&outcome.outputs[0]).exists());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn converts_pdf_text_layer_to_rtf_and_odt_when_pandoc_is_available() {
+        if which::which("pandoc").is_err() {
+            return;
+        }
+        for target in ["rtf", "odt"] {
+            let dir = scratch_dir();
+            let input = dir.join("report.pdf");
+            write_text_pdf(&input, "Quarterly numbers");
+
+            let outcome = perform_action(
+                "convert",
+                &[input.to_string_lossy().to_string()],
+                Some(target),
+                None,
+                None,
+            )
+            .unwrap_or_else(|error| panic!("PDF to {target} failed: {error}"));
+            assert_eq!(outcome.outputs.len(), 1);
+            assert!(
+                outcome.outputs[0].ends_with(&format!("report.{target}")),
+                "output must follow the requested format: {:?}",
+                outcome.outputs[0]
+            );
+            assert!(Path::new(&outcome.outputs[0]).exists());
+            if target == "rtf" {
+                assert!(fs::read_to_string(&outcome.outputs[0])
+                    .unwrap()
+                    .starts_with("{\\rtf1"));
+            }
+            fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]
@@ -1582,6 +2500,7 @@ mod tests {
             &[input.to_string_lossy().to_string()],
             Some("docx"),
             Some(&output_dir),
+            None,
         )
         .unwrap();
         let produced = PathBuf::from(&outcome.outputs[0]);
@@ -1590,7 +2509,10 @@ mod tests {
             Some(output_dir.as_path()),
             "a custom output folder must win over the source folder: {produced:?}"
         );
-        assert!(produced.to_string_lossy().contains("report"), "{produced:?}");
+        assert!(
+            produced.to_string_lossy().contains("report"),
+            "{produced:?}"
+        );
         assert_eq!(produced.extension().and_then(|v| v.to_str()), Some("docx"));
         // Nothing should leak next to the original.
         assert!(!dir.join("nested").join("report.docx").exists());
@@ -1607,7 +2529,9 @@ mod tests {
         });
         let content = format!("BT /F1 18 Tf 72 720 Td ({text}) Tj ET");
         let content_id = document.add_object(Stream::new(dictionary! {}, content.into_bytes()));
-        let pages_id = document.add_object(dictionary! { "Type" => "Pages", "Kids" => Vec::<Object>::new(), "Count" => 0_i64 });
+        let pages_id = document.add_object(
+            dictionary! { "Type" => "Pages", "Kids" => Vec::<Object>::new(), "Count" => 0_i64 },
+        );
         let page_id = document.add_object(dictionary! {
             "Type" => "Page",
             "Parent" => pages_id,
@@ -1642,11 +2566,94 @@ mod tests {
             .unwrap();
         assert!(status.success());
 
-        let output = convert_document(&docx, "md", None).unwrap();
+        let output = convert_document(&docx, "md", None, None).unwrap();
         let text = fs::read_to_string(output).unwrap();
         assert!(text.contains("Shift"));
         assert!(text.contains("Document round trip"));
         fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Writes an animated GIF with the given frame count and delay.
+    fn sample_animated_gif(path: &Path, frames: usize, delay_ms: u32) {
+        let mut buffer: Vec<u8> = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut buffer);
+            for index in 0..frames {
+                let mut frame = RgbaImage::from_pixel(64, 48, Rgba([index as u8, 40, 90, 255]));
+                frame.put_pixel(0, 0, Rgba([255, 255, 255, 255]));
+                encoder
+                    .encode_frame(Frame::from_parts(
+                        frame,
+                        0,
+                        0,
+                        Delay::from_numer_denom_ms(delay_ms, 1),
+                    ))
+                    .unwrap();
+            }
+        }
+        fs::write(path, buffer).unwrap();
+    }
+
+    #[test]
+    fn gif_conversion_keeps_animation() {
+        let dir = scratch_dir();
+        let input = dir.join("animated.gif");
+        sample_animated_gif(&input, 8, 50);
+
+        let output = convert_file(&input, "gif", None).unwrap();
+        let decoder = GifDecoder::new(BufReader::new(File::open(&output).unwrap())).unwrap();
+        let frames = decoder
+            .into_frames()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(frames.len(), 8, "animation must survive the conversion");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn gif_conversion_caps_duration_and_size() {
+        let dir = scratch_dir();
+        let input = dir.join("long.gif");
+        // 240 frames of 100 ms is 24 seconds, well past the 15 second cap.
+        sample_animated_gif(&input, 240, 100);
+
+        let output = convert_file(&input, "gif", None).unwrap();
+        let bytes = fs::metadata(&output).unwrap().len();
+        assert!(
+            bytes <= GIF_MAX_BYTES,
+            "GIF grew past the ceiling: {bytes} bytes"
+        );
+
+        let decoder = GifDecoder::new(BufReader::new(File::open(&output).unwrap())).unwrap();
+        let mut elapsed = 0_u32;
+        let mut count = 0_usize;
+        for frame in decoder.into_frames() {
+            let frame = frame.unwrap();
+            elapsed = elapsed.saturating_add(frame.delay().numer_denom_ms().0);
+            count += 1;
+        }
+        assert!(count <= GIF_MAX_FRAMES, "too many frames kept: {count}");
+        assert!(
+            elapsed <= GIF_MAX_MILLIS,
+            "animation is longer than the cap: {elapsed} ms"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn gif_conversion_respects_a_tight_byte_ceiling() {
+        let dir = scratch_dir();
+        let input = dir.join("noisy.gif");
+        sample_animated_gif(&input, 40, 40);
+
+        let output = dir.join("small.gif");
+        save_gif_capped(&input, &output, 20_000).unwrap();
+        let bytes = fs::metadata(&output).unwrap().len();
+        assert!(bytes <= 20_000, "GIF grew past the ceiling: {bytes} bytes");
+
+        // The result must still be a readable GIF, not a truncated file.
+        let decoder = GifDecoder::new(BufReader::new(File::open(&output).unwrap())).unwrap();
+        assert!(decoder.into_frames().next().unwrap().is_ok());
+        fs::remove_dir_all(dir).unwrap();
+    }
 }

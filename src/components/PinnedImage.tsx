@@ -1,10 +1,18 @@
 import { isTauri } from "@tauri-apps/api/core";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import { writeImage } from "@tauri-apps/plugin-clipboard-manager";
 import { Copy, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import { api } from "../lib/api";
+
+interface PinnedPreview {
+  id: number;
+  path: string;
+  dataUrl: string;
+  width: number;
+  height: number;
+}
 
 function decodePath(value: string | null): string | null {
   if (!value || value.length % 2 !== 0 || !/^[0-9a-f]+$/i.test(value)) return null;
@@ -18,24 +26,84 @@ function decodePath(value: string | null): string | null {
 
 export function PinnedImage() {
   const { t } = useI18n();
-  const path = decodePath(new URLSearchParams(window.location.search).get("path"));
+  const [path, setPath] = useState(() =>
+    decodePath(new URLSearchParams(window.location.search).get("path")),
+  );
   const [src, setSrc] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const latestId = useRef(0);
+  const renderedId = useRef(0);
 
   useEffect(() => {
-    if (!path) {
-      setError("The pinned image is unavailable.");
-      return;
-    }
     if (!isTauri()) {
       setSrc("/demo-preview.svg");
       return;
     }
-    void api
-      .readFileDataUrl(path)
-      .then(setSrc)
-      .catch((reason) => setError(String(reason)));
-  }, [path]);
+    let disposed = false;
+    const apply = (preview: PinnedPreview | null) => {
+      if (disposed) return;
+      if (!preview) {
+        if (latestId.current === 0) setSrc(null);
+        return;
+      }
+      if (preview.id < latestId.current) return;
+      if (preview.id === renderedId.current) return;
+      latestId.current = preview.id;
+      setPath(preview.path);
+      const image = new Image();
+      image.onload = () => {
+        if (disposed) return;
+        renderedId.current = preview.id;
+        setSrc(preview.dataUrl);
+        setError(null);
+        // Let React commit the loaded image before the native window is shown.
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            if (!disposed) void api.pinReady(preview.id);
+          });
+        });
+      };
+      image.onerror = () => {
+        if (disposed) return;
+        renderedId.current = preview.id;
+        setError(t("pinLoadFailed"));
+        void api.pinReady(preview.id);
+      };
+      image.src = preview.dataUrl;
+    };
+    const refresh = () => {
+      void api
+        .getPinnedImage()
+        .then(apply)
+        .catch((reason) => {
+          if (disposed) return;
+          setError(String(reason).replace(/^Error:\s*/, ""));
+          void api.pinReady(null);
+        });
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    let unlisten: Promise<() => void> | null = null;
+    // Register first: a reused pin window can receive a new image immediately
+    // after the previous pin is closed. Querying first would lose that event.
+    unlisten = listen<PinnedPreview>("pin://show", (event) => apply(event.payload)).then(
+      (stopListening) => {
+        if (!disposed) refresh();
+        return stopListening;
+      },
+    );
+    return () => {
+      disposed = true;
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      void unlisten?.then((release) => release());
+    };
+    // Language changes only affect error text, not the image payload.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function copy() {
     if (!path) return;
@@ -51,10 +119,16 @@ export function PinnedImage() {
       <div
         className="pin-surface"
         data-tauri-drag-region
-        onDoubleClick={() => void getCurrentWindow().close()}
+        onDoubleClick={() => void api.closePin()}
       >
         {src ? (
-          <img src={src} alt="" draggable={false} data-tauri-drag-region />
+          <img
+            src={src}
+            alt=""
+            draggable={false}
+            data-tauri-drag-region
+            onError={() => setError(t("pinLoadFailed"))}
+          />
         ) : (
           <div className="pin-loading" />
         )}
@@ -63,7 +137,7 @@ export function PinnedImage() {
         <button type="button" title={t("copy")} onClick={() => void copy()}>
           <Copy size={13} />
         </button>
-        <button type="button" title={t("close")} onClick={() => void getCurrentWindow().close()}>
+        <button type="button" title={t("close")} onClick={() => void api.closePin()}>
           <X size={13} />
         </button>
       </div>

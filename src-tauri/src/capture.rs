@@ -1,7 +1,6 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use chrono::Local;
@@ -89,7 +88,7 @@ fn capture_screen(app: &AppHandle, monitor: &tauri::Monitor) -> Result<CaptureSo
             (monitor.size().width as f64 / scale).round() as u32,
             (monitor.size().height as f64 / scale).round() as u32,
         );
-        let status = Command::new("/usr/sbin/screencapture")
+        let status = crate::process::command("/usr/sbin/screencapture")
             .args([
                 "-x",
                 "-R",
@@ -110,43 +109,23 @@ fn capture_screen(app: &AppHandle, monitor: &tauri::Monitor) -> Result<CaptureSo
 
     #[cfg(target_os = "windows")]
     {
-        let script = format!(
-            r#"Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$point = [System.Windows.Forms.Cursor]::Position
-$screen = [System.Windows.Forms.Screen]::FromPoint($point)
-$bounds = $screen.Bounds
-$bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
-$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-$graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-$bitmap.Save('{}', [System.Drawing.Imaging.ImageFormat]::Png)
-$graphics.Dispose()
-$bitmap.Dispose()"#,
-            output.to_string_lossy().replace('\'', "''")
-        );
-        let status = Command::new("powershell")
-            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
-            .status()
-            .map_err(|error| format!("Could not launch screen capture: {error}"))?;
-        if !status.success() || !output.exists() {
-            return Err("Screen capture failed.".into());
-        }
+        capture_windows_screen(monitor, &output)?;
     }
 
     #[cfg(target_os = "linux")]
     {
         let status = if let Some(grim) = crate::files::resolve_tool("grim") {
             if let Some(name) = monitor.name() {
-                Command::new(grim)
+                crate::process::command(grim)
                     .args(["-o", name, output.to_string_lossy().as_ref()])
                     .status()
             } else {
-                Command::new(grim)
+                crate::process::command(grim)
                     .arg(output.to_string_lossy().as_ref())
                     .status()
             }
         } else if let Some(gnome_screenshot) = crate::files::resolve_tool("gnome-screenshot") {
-            Command::new(gnome_screenshot)
+            crate::process::command(gnome_screenshot)
                 .args(["-f", output.to_string_lossy().as_ref()])
                 .status()
         } else {
@@ -168,6 +147,126 @@ $bitmap.Dispose()"#,
         monitor_y: monitor.position().y as f64,
         scale_factor: monitor.scale_factor(),
     })
+}
+
+#[cfg(target_os = "windows")]
+fn capture_windows_screen(monitor: &tauri::Monitor, output: &Path) -> Result<(), String> {
+    use windows_sys::Win32::Graphics::Gdi::{
+        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
+        GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CAPTUREBLT,
+        DIB_RGB_COLORS, HGDIOBJ, SRCCOPY,
+    };
+    use windows_sys::Win32::UI::HiDpi::{
+        SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    };
+    // Capture only the monitor under the cursor. Grabbing the virtual desktop
+    // would make a mixed-DPI or multi-monitor setup produce an image whose
+    // origin no longer matches the overlay window.
+    let x = monitor.position().x;
+    let y = monitor.position().y;
+    let width = monitor.size().width as i32;
+    let height = monitor.size().height as i32;
+    unsafe {
+        // Tauri's monitor bounds are physical pixels. Pin this worker thread
+        // to per-monitor-v2 while calling GDI; otherwise GetDC(NULL) may use a
+        // thread-scaled virtual desktop and the capture no longer aligns with
+        // the overlay.
+        let previous_awareness =
+            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        let restore_awareness = || {
+            if !previous_awareness.is_null() {
+                SetThreadDpiAwarenessContext(previous_awareness);
+            }
+        };
+        if width <= 0 || height <= 0 {
+            restore_awareness();
+            return Err("Windows did not report a usable screen size.".into());
+        }
+        let screen = GetDC(std::ptr::null_mut());
+        if screen.is_null() {
+            restore_awareness();
+            return Err("Windows could not open the desktop surface.".into());
+        }
+        let memory = CreateCompatibleDC(screen);
+        let bitmap = CreateCompatibleBitmap(screen, width, height);
+        if memory.is_null() || bitmap.is_null() {
+            if !bitmap.is_null() {
+                DeleteObject(bitmap as HGDIOBJ);
+            }
+            if !memory.is_null() {
+                DeleteDC(memory);
+            }
+            ReleaseDC(std::ptr::null_mut(), screen);
+            restore_awareness();
+            return Err("Windows could not allocate a screenshot surface.".into());
+        }
+        let previous = SelectObject(memory, bitmap as HGDIOBJ);
+        let copied = BitBlt(
+            memory,
+            0,
+            0,
+            width,
+            height,
+            screen,
+            x,
+            y,
+            SRCCOPY | CAPTUREBLT,
+        );
+        let mut info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                // Negative height asks GDI for top-down rows, matching PNG.
+                biHeight: -height,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB,
+                biSizeImage: 0,
+                biXPelsPerMeter: 0,
+                biYPelsPerMeter: 0,
+                biClrUsed: 0,
+                biClrImportant: 0,
+            },
+            bmiColors: [windows_sys::Win32::Graphics::Gdi::RGBQUAD {
+                rgbBlue: 0,
+                rgbGreen: 0,
+                rgbRed: 0,
+                rgbReserved: 0,
+            }],
+        };
+        let mut pixels = vec![0_u8; width as usize * height as usize * 4];
+        let rows = GetDIBits(
+            memory,
+            bitmap,
+            0,
+            height as u32,
+            pixels.as_mut_ptr().cast(),
+            &mut info,
+            DIB_RGB_COLORS,
+        );
+        SelectObject(memory, previous);
+        DeleteObject(bitmap as HGDIOBJ);
+        DeleteDC(memory);
+        ReleaseDC(std::ptr::null_mut(), screen);
+
+        if copied == 0 || rows == 0 {
+            restore_awareness();
+            return Err("Windows could not copy the screen surface.".into());
+        }
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+            pixel[3] = 255;
+        }
+        let Some(image) = image::RgbaImage::from_raw(width as u32, height as u32, pixels) else {
+            restore_awareness();
+            return Err("Windows returned an invalid screenshot buffer.".into());
+        };
+        let result = image
+            .save_with_format(output, image::ImageFormat::Png)
+            .map_err(|error| format!("Could not save the screenshot: {error}"));
+        restore_awareness();
+        result
+    }
 }
 
 fn screenshot_directory(app: &AppHandle) -> Result<PathBuf, String> {
@@ -284,9 +383,13 @@ pub fn get_capture_session(
         .clone())
 }
 
+/// Capture work runs off the main thread: freezing a screen, decoding the grab
+/// and writing the crop all take longer than a frame budget.
 #[tauri::command]
-pub fn start_capture(app: AppHandle, mode: String) -> Result<CaptureSessionInfo, String> {
-    begin_capture(&app, &mode)
+pub async fn start_capture(app: AppHandle, mode: String) -> Result<CaptureSessionInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || begin_capture(&app, &mode))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -300,12 +403,13 @@ pub fn cancel_capture(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn capture_crop(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    rect: NormalizedRect,
-) -> Result<String, String> {
-    finish_capture(&app, &state, &rect)
+pub async fn capture_crop(app: AppHandle, rect: NormalizedRect) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        finish_capture(&app, &state, &rect)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 fn finish_capture(
@@ -359,29 +463,45 @@ pub fn capture_fullscreen_core(app: &AppHandle, state: &AppState) -> Result<Stri
 }
 
 #[tauri::command]
-pub fn capture_fullscreen(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
-    let result = capture_fullscreen_core(&app, &state);
-    if result.is_err() {
-        if let Some(window) = app.get_webview_window("main") {
-            let _ = window.show();
-            let _ = window.set_focus();
+pub async fn capture_fullscreen(app: AppHandle) -> Result<String, String> {
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let result = capture_fullscreen_core(&app, &state);
+        if result.is_err() {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
         }
-    }
+        result
+    })
+    .await
+    .map_err(|error| error.to_string())?;
     result
 }
 
 #[tauri::command]
-pub fn copy_file_to(source: String, destination: String) -> Result<(), String> {
-    fs::copy(Path::new(&source), Path::new(&destination))
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+pub async fn copy_file_to(source: String, destination: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        fs::copy(Path::new(&source), Path::new(&destination))
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn open_screen_recording_settings() -> Result<(), String> {
+pub async fn open_screen_recording_settings() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(open_screen_recording_settings_sync)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn open_screen_recording_settings_sync() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let status = Command::new("/usr/bin/open")
+        let status = crate::process::command("/usr/bin/open")
             .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
             .status()
             .map_err(|error| error.to_string())?;

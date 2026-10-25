@@ -10,11 +10,7 @@ use std::path::PathBuf;
 
 // Each helper is only pulled in where it is actually used, so no platform
 // carries dead imports.
-#[cfg(target_os = "macos")]
-use std::{fs, process::Command};
-#[cfg(target_os = "windows")]
-use std::process::Command;
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(any(target_os = "macos", all(unix, not(target_os = "macos"))))]
 use std::fs;
 
 /// Registers or unregisters Shift as a login item.
@@ -38,7 +34,20 @@ fn platform_set(enabled: bool) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn platform_is_enabled() -> bool {
-    agent_plist().is_some_and(|path| path.exists())
+    let Some(path) = agent_plist() else {
+        return false;
+    };
+    if !path.exists() {
+        return false;
+    }
+    // A plist that still points at an old location is a leftover from a moved
+    // app, so the toggle has to be used again to register the new path.
+    let Some(current) = executable_path() else {
+        return false;
+    };
+    fs::read_to_string(&path)
+        .map(|plist| plist.contains(&current.to_string_lossy().to_string()))
+        .unwrap_or(false)
 }
 
 #[cfg(target_os = "windows")]
@@ -75,17 +84,13 @@ fn platform_is_enabled() -> bool {
     false
 }
 
-/// The app to launch. Inside a `.app` bundle this is the bundle itself, so the
-/// Dock name, icon and macOS TCC identity match what the user approved.
+/// The app to launch. On macOS this is the executable inside the `.app`
+/// bundle: a LaunchAgent cannot run a bundle, it can only run a program.
+/// Pointing it at the bundle makes launchd fail with `EX_CONFIG`, so the
+/// executable is used instead. It keeps the same bundle identity, icon and
+/// macOS TCC permission the user approved.
 fn executable_path() -> Option<PathBuf> {
     let current = std::env::current_exe().ok()?;
-    let mut cursor = current.as_path();
-    while let Some(parent) = cursor.parent() {
-        if parent.extension().and_then(|value| value.to_str()) == Some("app") {
-            return Some(parent.to_path_buf());
-        }
-        cursor = parent;
-    }
     Some(current)
 }
 
@@ -135,11 +140,11 @@ fn install_macos_agent() -> Result<(), String> {
     let domain = format!("gui/{}", unsafe { libc::getuid() });
     // Modern launchctl first, legacy load as a fallback. Either one succeeding
     // is enough, and the plist also takes effect at the next login regardless.
-    let modern = Command::new("launchctl")
+    let modern = crate::process::command("launchctl")
         .args(["bootstrap", domain.as_str(), &path.to_string_lossy()])
         .status();
     if !matches!(modern, Ok(status) if status.success()) {
-        let _ = Command::new("launchctl")
+        let _ = crate::process::command("launchctl")
             .args(["load", &path.to_string_lossy()])
             .status();
     }
@@ -155,10 +160,10 @@ fn remove_macos_agent() -> Result<(), String> {
         return Ok(());
     }
     let domain = format!("gui/{}", unsafe { libc::getuid() });
-    let _ = Command::new("launchctl")
+    let _ = crate::process::command("launchctl")
         .args(["bootout", domain.as_str(), &path.to_string_lossy()])
         .status();
-    let _ = Command::new("launchctl")
+    let _ = crate::process::command("launchctl")
         .args(["unload", &path.to_string_lossy()])
         .status();
     fs::remove_file(&path).map_err(|error| error.to_string())
@@ -167,34 +172,122 @@ fn remove_macos_agent() -> Result<(), String> {
 // -------------------------------------------------------------- Windows
 
 #[cfg(target_os = "windows")]
-const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 
 #[cfg(target_os = "windows")]
-fn registry_command(arguments: &[&str]) -> Result<std::process::ExitStatus, String> {
-    Command::new("reg")
-        .args(arguments)
-        .status()
-        .map_err(|error| format!("Could not run reg.exe: {error}"))
+fn wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// Access the Run key in process. Spawning `reg.exe` for every settings
+/// snapshot made a GUI app flash a console window and added tens of
+/// milliseconds to each settings action.
 #[cfg(target_os = "windows")]
 fn query_windows_run_key() -> bool {
-    matches!(
-        registry_command(&["query", RUN_KEY, "/v", "Shift"]),
-        Ok(status) if status.success()
-    )
+    use windows_sys::Win32::{
+        Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS},
+        System::Registry::{
+            RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE,
+            REG_SZ,
+        },
+    };
+
+    let subkey = wide(RUN_KEY);
+    let name = wide("Shift");
+    let mut key: HKEY = std::ptr::null_mut();
+    let opened = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            0,
+            KEY_QUERY_VALUE,
+            &mut key,
+        )
+    };
+    if opened == ERROR_FILE_NOT_FOUND {
+        return false;
+    }
+    if opened != ERROR_SUCCESS || key.is_null() {
+        return false;
+    }
+    let mut kind = 0_u32;
+    let mut size = 0_u32;
+    let query = unsafe {
+        RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            std::ptr::null(),
+            &mut kind,
+            std::ptr::null_mut(),
+            &mut size,
+        )
+    };
+    let exists = query == ERROR_SUCCESS && kind == REG_SZ && size > 0;
+    unsafe { RegCloseKey(key) };
+    exists
 }
 
 #[cfg(target_os = "windows")]
 fn set_windows_run_key(enabled: bool) -> Result<(), String> {
-    if enabled {
+    use windows_sys::Win32::{
+        Foundation::ERROR_SUCCESS,
+        System::Registry::{
+            RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+            KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ,
+        },
+    };
+
+    let subkey = wide(RUN_KEY);
+    let name = wide("Shift");
+    let mut key: HKEY = std::ptr::null_mut();
+    let opened = unsafe {
+        RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            0,
+            std::ptr::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE,
+            std::ptr::null(),
+            &mut key,
+            std::ptr::null_mut(),
+        )
+    };
+    if opened != ERROR_SUCCESS || key.is_null() {
+        return Err(format!(
+            "Could not open the Windows startup registry key ({opened})."
+        ));
+    }
+
+    let result = if enabled {
         let target = executable_path().ok_or_else(|| "Could not locate Shift.".to_string())?;
-        // Quote the path: it usually contains "Program Files" or a user name
-        // with spaces, and the Run key performs no quoting of its own.
-        let value = format!("\"{}\"", target.display());
-        registry_command(&["add", RUN_KEY, "/v", "Shift", "/t", "REG_SZ", "/d", &value, "/f"])?;
+        // The Run key executes the string as written; quote paths containing spaces.
+        let value = wide(&format!("\"{}\"", target.display()));
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                value.as_ptr().cast::<u8>(),
+                value.len() * std::mem::size_of::<u16>(),
+            )
+        };
+        unsafe {
+            RegSetValueExW(
+                key,
+                name.as_ptr(),
+                0,
+                REG_SZ,
+                bytes.as_ptr(),
+                bytes.len() as u32,
+            )
+        }
     } else {
-        registry_command(&["delete", RUN_KEY, "/v", "Shift", "/f"])?;
+        unsafe { RegDeleteValueW(key, name.as_ptr()) }
+    };
+    unsafe { RegCloseKey(key) };
+    if result != ERROR_SUCCESS {
+        return Err(format!(
+            "Could not {} the Windows startup entry ({result}).",
+            if enabled { "create" } else { "remove" }
+        ));
     }
     Ok(())
 }
@@ -235,4 +328,23 @@ fn remove_linux_autostart() -> Result<(), String> {
         fs::remove_file(&path).map_err(|error| error.to_string())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_agent_points_at_an_executable_not_a_bundle() {
+        let path = agent_plist().unwrap();
+        // A LaunchAgent cannot run an `.app` bundle, so the plist must name a
+        // program inside it.
+        let target = executable_path().unwrap();
+        assert!(
+            target.extension().and_then(|value| value.to_str()) != Some("app"),
+            "the agent must not point at a bundle: {target:?}"
+        );
+        assert!(path.ends_with(format!("{LABEL}.plist")));
+    }
 }

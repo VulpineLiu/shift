@@ -4,6 +4,7 @@ import { MainWindow } from "./components/MainWindow";
 import { PinnedImage } from "./components/PinnedImage";
 import { RadialMenu } from "./components/RadialMenu";
 import { RecorderHud } from "./components/RecorderHud";
+import { ShareNotice } from "./components/ShareNotice";
 import type { View } from "./types";
 
 function resolveView(): View {
@@ -13,7 +14,8 @@ function resolveView(): View {
     value === "capture" ||
     value === "recorder" ||
     value === "editor" ||
-    value === "pin"
+    value === "pin" ||
+    value === "share-notice"
   ) {
     return value;
   }
@@ -35,6 +37,8 @@ export default function App() {
       return <Editor />;
     case "pin":
       return <PinnedImage />;
+    case "share-notice":
+      return <ShareNotice />;
     default:
       return <MainWindow />;
   }

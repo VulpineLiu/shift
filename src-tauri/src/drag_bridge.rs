@@ -3,7 +3,7 @@ use std::thread;
 #[cfg(target_os = "macos")]
 use std::{
     io::{BufRead, BufReader},
-    process::{Command, Stdio},
+    process::Stdio,
 };
 
 use serde::Serialize;
@@ -93,7 +93,7 @@ pub fn spawn(app: &AppHandle) {
             eprintln!("Shift drag bridge was not found. Shift-drag will be unavailable.");
             return;
         };
-        let mut child = match Command::new(path)
+        let mut child = match crate::process::command(path)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -129,7 +129,7 @@ fn spawn_windows_monitor(app: &AppHandle) {
         Foundation::POINT,
         UI::{
             Input::KeyboardAndMouse::{
-                GetAsyncKeyState, VK_CONTROL, VK_LBUTTON, VK_RBUTTON, VK_SHIFT,
+                GetAsyncKeyState, VK_LBUTTON, VK_MENU, VK_RBUTTON, VK_SHIFT,
             },
             WindowsAndMessaging::{
                 GetCursorPos, GetSystemMetrics, SM_CXDRAG, SM_CYDRAG, SM_SWAPBUTTON,
@@ -144,6 +144,9 @@ fn spawn_windows_monitor(app: &AppHandle) {
         let mut tools_mode = false;
         let mut down = POINT { x: 0, y: 0 };
         let mut ignore_press = false;
+        // Gesture tracing is edge-triggered so the log stays readable on a 33ms poll.
+        let mut reported_disabled = false;
+        let mut reported_foreground = false;
 
         loop {
             let swapped = unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0;
@@ -155,16 +158,18 @@ fn spawn_windows_monitor(app: &AppHandle) {
             }
 
             if !mouse_down {
+                // Release ends the gesture. macOS gets an explicit `cancel` from its
+                // bridge, but on Windows the ring only closes when a WebView2 OLE drop
+                // or leave arrives, so a drag that Explorer never turned into an OLE
+                // session (text, a shortcut, a drag started outside a shell folder)
+                // would leave the ring on screen for good. Let the webview decide: it
+                // knows whether OLE ever handed it files.
                 if armed {
-                    armed = false;
-                    let window = app.get_webview_window("radial");
-                    if let Some(window) = window {
-                        thread::spawn(move || {
-                            thread::sleep(std::time::Duration::from_millis(360));
-                            let _ = window.hide();
-                        });
+                    if let Some(window) = app.get_webview_window("radial") {
+                        let _ = window.emit("radial://dragend", ());
                     }
                 }
+                armed = false;
                 mouse_was_down = false;
                 thread::sleep(std::time::Duration::from_millis(33));
                 continue;
@@ -176,20 +181,31 @@ fn spawn_windows_monitor(app: &AppHandle) {
                 ignore_press = foreground_is_self();
             }
             if ignore_press {
+                if !reported_foreground {
+                    reported_foreground = true;
+                    eprintln!("shift: press started inside Shift itself, ignoring this gesture");
+                }
                 thread::sleep(std::time::Duration::from_millis(33));
                 continue;
             }
+            reported_foreground = false;
 
             let shift = unsafe { GetAsyncKeyState(VK_SHIFT as i32) } as u16 & 0x8000 != 0;
-            let control = unsafe { GetAsyncKeyState(VK_CONTROL as i32) } as u16 & 0x8000 != 0;
+            // Keep the drag gesture consistent with the Alt+Shift global shortcuts.
+            let alt = unsafe { GetAsyncKeyState(VK_MENU as i32) } as u16 & 0x8000 != 0;
             let threshold_x = unsafe { GetSystemMetrics(SM_CXDRAG) }.max(4);
             let threshold_y = unsafe { GetSystemMetrics(SM_CYDRAG) }.max(4);
 
             if !armed {
                 if !drag_enabled(&app) {
+                    if !reported_disabled {
+                        reported_disabled = true;
+                        eprintln!("shift: drag ring is disabled in settings, ignoring the gesture");
+                    }
                     thread::sleep(std::time::Duration::from_millis(100));
                     continue;
                 }
+                reported_disabled = false;
                 if !shift {
                     thread::sleep(std::time::Duration::from_millis(33));
                     continue;
@@ -201,12 +217,18 @@ fn spawn_windows_monitor(app: &AppHandle) {
                     continue;
                 }
                 armed = true;
-                tools_mode = control;
+                tools_mode = alt;
                 let (x, y) = physical_to_logical(&app, point);
                 let mode = if tools_mode { "tools" } else { "formats" };
-                let _ = show_radial(&app, Vec::new(), mode, Some((x, y)), true);
-            } else if shift && control != tools_mode {
-                tools_mode = control;
+                match show_radial(&app, Vec::new(), mode, Some((x, y)), true) {
+                    Ok(_) => eprintln!(
+                        "shift: armed {mode} ring at logical ({x:.0}, {y:.0}) from physical ({}, {}) with threshold {threshold_x}x{threshold_y}",
+                        point.x, point.y
+                    ),
+                    Err(error) => eprintln!("shift: could not open the {mode} ring: {error}"),
+                }
+            } else if shift && alt != tools_mode {
+                tools_mode = alt;
                 let mode = if tools_mode { "tools" } else { "formats" };
                 let state = app.state::<AppState>();
                 if let Ok(mut current) = state.radial_mode.lock() {
@@ -249,7 +271,34 @@ fn physical_to_logical(
             && point.y <= y + monitor.size().height as i32
     });
     let scale = monitor.map(|monitor| monitor.scale_factor()).unwrap_or(1.0);
-    (point.x as f64 / scale, point.y as f64 / scale)
+    let logical = (point.x as f64 / scale, point.y as f64 / scale);
+    // set_position(LogicalPosition) is scaled back up by tao using the *window's*
+    // scale factor, not the cursor monitor's (tao window.rs set_outer_position). On a
+    // mixed-DPI desktop those differ, which shifts the ring by the ratio between them,
+    // so record both plus the match that produced the divisor.
+    let window_scale = app
+        .get_webview_window("radial")
+        .and_then(|window| window.scale_factor().ok())
+        .unwrap_or(1.0);
+    let matched = match monitor {
+        Some(monitor) => format!(
+            "monitor {}x{} at {},{} scale {}",
+            monitor.size().width,
+            monitor.size().height,
+            monitor.position().x,
+            monitor.position().y,
+            monitor.scale_factor()
+        ),
+        None => format!(
+            "no monitor contained the point ({} monitors)",
+            monitors.len()
+        ),
+    };
+    eprintln!(
+        "shift: ring coords physical ({}, {}) -> logical ({:.0}, {:.0}); {matched}; window scale {window_scale}",
+        point.x, point.y, logical.0, logical.1
+    );
+    logical
 }
 
 /// Whether the Shift-drag gesture may open a ring. Read by both the macOS
@@ -257,7 +306,11 @@ fn physical_to_logical(
 #[allow(dead_code)] // unused on Linux, which has no drag monitor yet
 fn drag_enabled(app: &AppHandle) -> bool {
     app.try_state::<AppState>()
-        .map(|state| state.drag_enabled.load(std::sync::atomic::Ordering::Relaxed))
+        .map(|state| {
+            state
+                .drag_enabled
+                .load(std::sync::atomic::Ordering::Relaxed)
+        })
         .unwrap_or(true)
 }
 
@@ -303,14 +356,6 @@ fn handle_bridge_event(app: &AppHandle, event: BridgeEvent) {
                 "radial://move"
             };
             let _ = window.emit(event_name, payload);
-
-            if event.event_type == "end" {
-                let window = window.clone();
-                thread::spawn(move || {
-                    thread::sleep(std::time::Duration::from_millis(500));
-                    let _ = window.hide();
-                });
-            }
         }
         "mode" => {
             let mode = if event.tools.unwrap_or(false) {
@@ -326,6 +371,7 @@ fn handle_bridge_event(app: &AppHandle, event: BridgeEvent) {
                 let _ = window.emit("radial://mode", mode);
             }
         }
+        "cancel" => hide(app),
         _ => {}
     }
 }
@@ -405,6 +451,38 @@ pub fn show_radial(
         .set_position(LogicalPosition::new(origin_x, origin_y))
         .map_err(|error| error.to_string())?;
     window.show().map_err(|error| error.to_string())?;
+    #[cfg(target_os = "windows")]
+    {
+        let title = window
+            .title()
+            .map(|value| format!("{value:?}"))
+            .unwrap_or_else(|error| format!("error({error})"));
+        let visible = window
+            .is_visible()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|error| format!("error({error})"));
+        let position = window
+            .outer_position()
+            .map(|value| format!("{},{}", value.x, value.y))
+            .unwrap_or_else(|error| format!("error({error})"));
+        let size = window
+            .outer_size()
+            .map(|value| format!("{}x{}", value.width, value.height))
+            .unwrap_or_else(|error| format!("error({error})"));
+        let scale = window
+            .scale_factor()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|error| format!("error({error})"));
+        eprintln!(
+            "shift: radial window after show: title={title} visible={visible} position={position} size={size} scale={scale}"
+        );
+    }
+    // A drop has already finished when the main panel opens a ring. Focusing
+    // that ring enables normal hover and keyboard handling. During a live
+    // Finder drag the non-activating window must stay unfocused.
+    if !dragging {
+        let _ = window.set_focus();
+    }
     window
         .emit("radial://show", context.clone())
         .map_err(|error| error.to_string())?;
@@ -422,10 +500,17 @@ pub fn hide(app: &AppHandle) {
     }
 }
 
+/// The ring's own commands decode image previews, so they run off the main thread
+/// and the ring never waits on a batch of large photos.
 #[tauri::command]
-pub fn get_radial_context(
-    state: tauri::State<'_, AppState>,
-) -> Result<Option<RadialContext>, String> {
+pub async fn get_radial_context(app: AppHandle) -> Result<Option<RadialContext>, String> {
+    tauri::async_runtime::spawn_blocking(move || radial_context(&app))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn radial_context(app: &AppHandle) -> Result<Option<RadialContext>, String> {
+    let state = app.state::<AppState>();
     let files = state
         .radial_files
         .lock()
@@ -439,14 +524,15 @@ pub fn get_radial_context(
     if files.is_empty() {
         return Ok(None);
     }
+    let dragging = *state
+        .radial_dragging
+        .lock()
+        .map_err(|error| error.to_string())?;
     Ok(Some(RadialContext {
         file_info: crate::files::inspect_paths(&files)?,
         files,
         mode,
-        dragging: *state
-            .radial_dragging
-            .lock()
-            .map_err(|error| error.to_string())?,
+        dragging,
     }))
 }
 
@@ -457,7 +543,7 @@ pub fn hide_radial(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn show_files_in_radial(
+pub async fn show_files_in_radial(
     app: AppHandle,
     files: Vec<String>,
     mode: Option<String>,
@@ -465,12 +551,15 @@ pub fn show_files_in_radial(
     if files.is_empty() {
         return Err("No files selected.".into());
     }
-    show_radial(
-        &app,
-        files,
-        mode.as_deref().unwrap_or("actions"),
-        None,
-        false,
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        show_radial(
+            &app,
+            files,
+            mode.as_deref().unwrap_or("actions"),
+            None,
+            false,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
-

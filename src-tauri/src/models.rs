@@ -50,6 +50,23 @@ pub struct ActionOutcome {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ActionResultEvent {
+    pub job_id: String,
+    pub outcome: Option<ActionOutcome>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileActionProgress {
+    pub job_id: String,
+    pub done: u32,
+    pub total: u32,
+    pub packaging: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RecordingInfo {
     pub output: String,
     pub started_at: i64,

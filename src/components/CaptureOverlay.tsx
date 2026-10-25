@@ -226,7 +226,6 @@ export function CaptureOverlay() {
           </span>
           <div>
             <strong>{t("dragSelect")}</strong>
-            <span>{session.mode === "recording" ? t("recordingHint") : t("screenshotHint")}</span>
           </div>
           <kbd>ESC</kbd>
         </div>

@@ -18,6 +18,7 @@ Built on Tauri 2, Rust, React and TypeScript. Native capture and drag behaviour 
 - [Compression, naming, cancellation](#compression-naming-cancellation)
 - [Capture & annotation](#capture--annotation)
 - [OCR](#ocr)
+- [Send to a device](#send-to-a-device)
 - [Shortcuts](#shortcuts)
 - [Tray menu](#tray-menu)
 - [Output locations](#output-locations)
@@ -36,15 +37,17 @@ Built on Tauri 2, Rust, React and TypeScript. Native capture and drag behaviour 
 
 ## What it does
 
-**The radial menu is the whole interface.** Hold `Shift` and drag a file in Finder (or `Ctrl + Shift` on Windows) and a ring opens under the cursor. Release over a format to convert, or add `Option`/`Alt` to switch to the tool ring. The main window accepts drops too, and its `Convert files` / `File tools` buttons open the same rings for files you pick yourself.
+**The radial menu is the whole interface.** Hold `Shift` and drag a file in Finder (or `Shift + Alt` on Windows) and a ring opens under the cursor. Release over a format to convert, or add `Option`/`Alt` to switch to the tool ring. The main window accepts drops too, and its `Convert files` / `File tools` buttons open the same rings for files you pick yourself.
 
-**Everything is type-aware.** The ring only offers what the selected file can actually become — an image offers PNG/JPG/WEBP/HEIC/TIFF/BMP/GIF/PDF, a PPTX offers PDF and Markdown, and a `.key` or `.pages` file offers no conversion wedges at all instead of failing later. The centre shows a glass preview with the file's dimensions and size; a multi-file selection renders a stacked icon deck.
+**Everything is type-aware.** The ring only offers what the selected file can actually become, and never repeats the source format — an image can target PNG/JPG/WEBP/HEIC/TIFF/BMP/GIF/PDF except its current format, a PPTX offers PDF and Markdown, and a `.key` or `.pages` file offers no conversion wedges at all instead of failing later. The centre shows a glass preview with the file's dimensions and size; a multi-file selection renders a stacked icon deck.
 
 **Batch by default.** Select ten files, drag, and one gesture produces ten outputs. Results land next to each source with a descriptive suffix (`report (compressed).pdf`, `photo (rotated).png`) and never overwrite — a numeric suffix is appended on collision. Settings can collect every result into one folder instead.
 
 **Capture is built in.** Frozen-screen area capture, full-screen capture, and area recording with a floating timer, all aimed at the monitor under the pointer rather than always the primary display. Screenshots open straight into the annotation canvas and can be pinned as always-on-top reference windows.
 
 **OCR runs on-device.** English and Simplified Chinese, via a bundled Tesseract WASM engine with the traineddata shipped inside the app. No network access at any point in the OCR path.
+
+**Files can hop to another machine.** Every running Shift announces itself on the local network, so the recent list can hand a file to another computer the way AirDrop does — tap a device name, watch the progress bar, and the file lands in Shift's output folder on the other side.
 
 ## Quick start
 
@@ -62,9 +65,9 @@ Shift lives in the menu bar (macOS) and the notification area (Windows), and it 
 > 💡 Changed your mind? Release back near the centre (inside the 92 px inner radius) and nothing happens.
 > 💡 Near a screen edge the ring slides back on screen; the whole 760 px ring is clamped inside the monitor under the pointer.
 
-**Use a tool (`Option + Shift`, or `Ctrl + Shift` on Windows).** Same gesture, and the wedges become tools for that file type instead of formats. While the ring is open, keep `Shift` held and press or release `Option`/`Ctrl` to flip between the format ring and the tool ring.
+**Use a tool (`Option + Shift`, or `Alt + Shift` on Windows).** Same gesture, and the wedges become tools for that file type instead of formats. While the ring is open, keep `Shift` held and press or release `Option`/`Alt` to flip between the format ring and the tool ring.
 
-**Prefer not to drag?** In the main window, **Convert files** and **File tools** open a picker and then show the same ring for what you chose; **OCR** picks an image and reads it. Dropping files straight onto the main window opens the action ring directly.
+**Prefer not to drag?** In the main window, **Convert files** and **File tools** open a picker and then show the same ring for what you chose; **OCR** picks an image and reads it. Dropping files straight onto the main window opens the action ring directly. Drop them **onto a button** instead and that button lights up and runs its own action: **Convert files** opens the format ring, **File tools** the tool ring, **OCR** reads the image.
 
 **Several files at once.** Multi-select with `⌘`/`Ctrl`-click, then drag. Every file is processed. With 2+ images or 2+ PDFs selected, a **Merge** wedge appears that combines them into a single PDF.
 
@@ -76,7 +79,7 @@ Recognition is by extension, against four tables in `src-tauri/src/files.rs`. Th
 
 | Kind | Extensions |
 | --- | --- |
-| `image` | **`png` `jpg` `jpeg` `webp` `tiff` `tif` `bmp` `gif`** `heic` `heif` `avif` |
+| `image` | **`png` `jpg` `jpeg` `webp` `tiff` `tif` `bmp` `gif` `heic` `heif` `avif`** |
 | `video` | **`mp4` `mov` `m4v` `avi` `mkv` `webm`** |
 | `audio` | **`mp3` `wav` `m4a` `aiff` `aif` `caf` `flac` `ogg`** |
 | `pdf` | **`pdf`** |
@@ -87,37 +90,40 @@ Recognition is by extension, against four tables in `src-tauri/src/files.rs`. Th
 
 Decoding and encoding are not symmetric, and the app does not pretend otherwise:
 
-- **Image decode** is native (Rust `image`) for PNG, JPEG, WebP, TIFF, BMP, GIF, and every tool-ring operation uses that decoder. HEIC/HEIF/AVIF are not in it, so those formats convert through the system path — `sips` on macOS, ImageMagick elsewhere — but rotate, flip, B&W, 50% and compress will not read them until they are converted first.
-- **Image encode** for PNG, JPG, WebP, TIFF, BMP, GIF is native. HEIC export goes through `sips` on macOS and requires ImageMagick on Windows/Linux. AVIF reads fine and can be written by the same system path, but the ring does not offer it yet.
+- **Image decode** is native (Rust `image`) for PNG, JPEG, WebP, TIFF, BMP and GIF. HEIC/HEIF/AVIF first decode through the system codec — `sips` on macOS, ImageMagick elsewhere — and can then convert to every offered image target, including WEBP, or to PDF. The pixel tools still need a natively readable input, so convert those formats first before rotate, flip, B&W, 50% or compress.
+- **Image encode** for PNG, JPG, WebP, TIFF, BMP and GIF is native. HEIC export uses `sips` on macOS and requires ImageMagick on Windows/Linux. AVIF is accepted as an input but is not offered as an export target.
 - **Media** decode and encode are whatever your FFmpeg build supports; the menu offers MP4, MOV, GIF and M4A for video, and M4A, WAV and MP3 for audio.
 - **Office** files are parsed in pure Rust (`calamine` for spreadsheets, `zip` + `quick-xml` for PPTX), so no Office installation is needed.
 - **Recognised but not converted:** `.doc`, `.pages`, `.ppt`, `.key` and `.numbers` get their proper icon plus Edit, Open and Reveal, but no format wedges. Export them to DOCX, PPTX or XLSX first.
 
 ## Conversions
 
-The format ring for a given file type. Every arrow below is wired in `src-tauri/src/files.rs`.
+The format ring for a given file type. Every target below is wired in `src-tauri/src/files.rs`; the source's own format is filtered out at runtime.
 
-| Source | Ring offers | Engine | Notes |
+| Source | Ring targets (source format excluded) | Engine | Notes |
 | --- | --- | --- | --- |
 | Image | `PNG` `JPG` `WEBP` `TIFF` `BMP` `GIF` | Rust `image` | Lossless path when the codec allows it |
 | Image | `HEIC` | `sips` / ImageMagick | macOS native; other OS need `magick` |
 | Image | `PDF` | `printpdf` | One page per image, sized at 300 dpi |
 | Video | `MP4` `MOV` | FFmpeg | `libx264`, falling back to `h264_videotoolbox` then `mpeg4` |
-| Video | `GIF` | FFmpeg | First 15 s only, 12 fps, 480 px wide — capped so a long recording cannot produce a 100 MB GIF |
+| Video | `GIF` | FFmpeg | First 15 s only, 12 fps, 480 px wide, 8 MB ceiling — capped so a long recording cannot produce a 100 MB GIF |
 | Video | `M4A` | FFmpeg | Audio track only, 192k AAC |
 | Audio | `M4A` `WAV` `MP3` | FFmpeg | MP3 falls back to `lame` if FFmpeg lacks `libmp3lame` |
 | PDF | `TXT` `MD` | `lopdf` | Text-layer extraction; errors clearly when a PDF is scanned |
-| PDF | `DOCX` `RTF` | `lopdf` + Pandoc | Text layer becomes the document body; needs Pandoc |
+| PDF | `DOCX` | Page rendering + native DOCX packaging | PDFKit on macOS, Poppler on Windows/Linux; preserves images, diagrams and page layout without Microsoft Word |
+| PDF | `RTF` `ODT` | `lopdf` + Pandoc | Text layer becomes the document body; needs Pandoc |
 | PDF | `HEIC` | PDFKit / Poppler + `sips` | Pages render as PNG then transcode; needs a system HEIC codec |
 | PDF | `PNG` `JPG` `TIFF` | PDFKit / Poppler | One file per page into a `… pages` folder |
 | Document `docx` `rtf` `odt` `txt` `md` `html` | `PDF` | AppKit renderer (macOS) · Pandoc elsewhere | macOS path needs no LaTeX or wkhtmltopdf |
-| Document `docx` `rtf` `odt` `txt` `md` `html` | `DOCX` `RTF` `HTML` `TXT` `MD` `ODT` | Pandoc | Markdown writes as GFM |
+| Document `docx` `rtf` `odt` `txt` `md` `html` | `DOCX` `RTF` `HTML` `TXT` `MD` `ODT` | Pandoc | The source format is omitted; Markdown writes as GFM, HTML and RTF as standalone documents |
 | Presentation `.pptx` | `MD` `PDF` | Pure Rust + Pandoc | Per-slide headings, bullet text and **tables as real Markdown tables**; PDF is a text summary, not a layout render |
 | Spreadsheet | `MD` `PDF` | `calamine` / Rust | One Markdown table per sheet; `csv`/`tsv` parsed directly |
 
 Anything not in this table is not offered — the ring is built from this catalogue at runtime, so a wedge you can click is a wedge that works. If a dependency is missing, the wedge names it instead of failing silently.
 
-> Note: unlike some radial converters, Shift does **not** hide the file's own format. Dragging a PNG still shows PNG, which makes it a quick way to re-encode a file in place.
+**Page progress follows one rule.** Conversions that can enumerate real pages report the same `Converting page N/M…` event. Image-only DOCX→PDF and image-bearing PDF→DOCX use that path. One-shot Word→PDF layout and text-only PDF→DOCX cannot expose a reliable page count, so they show `Processing…` rather than a fabricated percentage.
+
+> Note: the conversion ring never repeats the source format. For example, a DOCX offers no DOCX target, avoiding a needless full rewrite that can lose layout.
 > Scanned/image-only PDFs have no text layer, so `TXT`/`MD` return a clear error — use **OCR** on those, which renders each page first.
 
 ## Tools
@@ -199,6 +205,20 @@ Tesseract.js with the LSTM core, running as WASM inside the app. `eng` and `chi_
 - **Scanned PDFs** — pages are rendered to images first, then OCR'd sequentially with per-page progress, and the results are written to a ` (OCR)` text file with `--- Page N ---` separators.
 - **Text PDFs** — use Extract Text instead; it reads the embedded layer directly and is far faster.
 
+## Send to a device
+
+Shift keeps a live list of the other Shift copies on your network and uses it for an AirDrop-style transfer. Hover any row in **Recent** and press the send button, or open a file's **Tools** ring and release over **Send** — either way a picker opens with one card per device, and clicking a card starts the transfer. The Tools ring offers Send for every file type, and selecting several files sends them as one batch.
+
+Nothing lands without consent: the receiving machine shows a small card naming the sender and the file, with **Accept** and **Decline** and a countdown. Declining, closing the card, or letting it expire stops the transfer before a single file byte moves. An accepted batch is asked once, then the remaining files of that batch follow on their own. Accepted files are written to Shift's output folder, appear in that machine's Recent list, and a note names the sender. Names that already exist get ` 2`, ` 3` appended, and a partial transfer never leaves a half-written file behind.
+
+How it finds peers, with no server and no configuration:
+
+- Every copy sends a small UDP beacon every two seconds to multicast group `239.255.77.88:47888`, plus a legacy broadcast copy for networks that drop multicast. Beacons carry the machine name, OS, and the ephemeral TCP port that will receive files.
+- A beacon that has not been repeated for nine seconds drops the device from the list, so switching networks clears stale entries by itself.
+- File bytes move over a direct TCP connection: a `SHSF` handshake, a JSON header, the payload, then a one-byte acknowledgement, so a sender only reports success once the receiver has the whole file on disk.
+
+Only the local network is involved — nothing reaches the internet. The receiver listens on all interfaces, so a macOS firewall prompt appears the first time Shift shares; allowing it enables both directions.
+
 ## Shortcuts
 
 | Action | macOS | Windows / Linux |
@@ -207,7 +227,7 @@ Tesseract.js with the LSTM core, running as WASM inside the app. `eng` and `chi_
 | Record area | `⌥⇧3` | `Alt+Shift+3` |
 | Capture full screen | `⌥⇧4` | `Alt+Shift+4` |
 | Format ring while dragging | hold `⇧` | hold `Shift` |
-| Tool ring while dragging | `⌥⇧` | `Ctrl+Shift` |
+| Tool ring while dragging | `⌥⇧` | `Alt+Shift` |
 
 The three capture shortcuts are registered globally. The drag rings are modifier-driven: begin dragging with the modifier already held and the ring appears under the cursor without Shift needing focus.
 
@@ -224,7 +244,7 @@ The menu bar (macOS) and notification area (Windows) icon exposes the actions yo
 | OCR an image… | — | Pick an image and read its text locally |
 | Quit Shift | `Cmd/Ctrl+Q` | Exit; an in-flight recording is finalised first |
 
-Tray labels are English only for now; everything inside the windows follows the app language.
+Tray labels follow the selected app language; native macOS permission prompts remain in English.
 
 Settings → **Behaviour** holds two switches: **Drag rings** (master enable for the Shift-drag gesture) and **Launch at login**.
 
@@ -246,11 +266,17 @@ Core conversion, radial menu, capture, and OCR work with nothing installed. Thes
 | --- | --- | --- | --- | --- |
 | FFmpeg | media convert/compress, 720p, mute, frame, mono; recording off-macOS | optional | **required** for recording | **required** |
 | Pandoc | document ↔ DOCX/RTF/ODT/HTML/TXT/MD | optional | needed | needed |
-| Poppler `pdftoppm` | PDF → images, scanned-PDF OCR | not needed (PDFKit) | needed | needed |
-| ImageMagick `magick` | HEIC/AVIF encode | not needed (`sips`) | needed | needed |
+| Typst | Pandoc document-to-PDF engine | not needed (AppKit) | needed | needed |
+| Poppler `pdftoppm` | PDF → images, PDF → Word, scanned-PDF OCR | not needed (PDFKit) | needed | needed |
+| ImageMagick `magick` | HEIC/HEIF/AVIF input plus HEIC output | not needed (`sips`) | needed | needed |
 | LAME | MP3 encode when FFmpeg lacks `libmp3lame` | rare | rare | rare |
 
-Tools are found on `PATH` at call time and results are cached, so a missing dependency degrades one wedge rather than the app.
+Settings -> **Runtime components** shows the tools found on the current machine,
+their versions and paths. Missing Pandoc, Typst, FFmpeg, Poppler and ImageMagick can be
+installed from the same panel through Homebrew on macOS or WinGet on Windows,
+then detected again automatically. Tools are also found on `PATH` and their
+standard install locations at call time, so a missing dependency degrades one
+wedge rather than the app.
 
 ## Platform status
 
@@ -265,6 +291,7 @@ Tools are found on `PATH` at call time and results are cached, so a missing depe
 | HEIC / AVIF encode | `sips` | ImageMagick | ImageMagick |
 | PDF text, merge, split, rotate, compress | Yes | Yes | Yes |
 | PDF → images | PDFKit sidecar (+ `sips` for HEIC) | Poppler (+ ImageMagick for HEIC) | Poppler (+ ImageMagick for HEIC) |
+| PDF → Word | Built-in page renderer | Poppler required | Poppler required |
 | Scanned-PDF OCR | Yes | Poppler required | Poppler required |
 | Document → PDF | bundled AppKit renderer | Pandoc + a PDF engine | Pandoc + a PDF engine |
 | PPTX / XLSX / ODS → Markdown | Yes (pure Rust) | Yes | Yes |
@@ -284,6 +311,7 @@ pnpm tauri dev
 
 ```bash
 pnpm check          # TypeScript, no emit
+pnpm test           # conversion matrix and drag-target tests
 pnpm build          # tsc + vite
 cargo test --lib    # Rust unit tests, from src-tauri/
 pnpm tauri build    # release bundle
@@ -294,17 +322,19 @@ Universal macOS build:
 ```bash
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 pnpm mac:drag-bridge
-RUSTUP_TOOLCHAIN=stable pnpm tauri build --target universal-apple-darwin --bundles app
+PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH" \
+  RUSTUP_TOOLCHAIN=stable \
+  pnpm tauri build --target universal-apple-darwin --bundles app,dmg
 ```
 
-The result is one universal Mach-O including universal drag, PDF-render and doc-render sidecars. Windows build steps are in `docs/BUILD_WINDOWS.md`.
+The result is one universal Mach-O including universal drag, PDF-render and doc-render sidecars. To produce the Windows installer and portable ZIP from macOS, run `scripts/build-windows-release.sh`; full details are in `docs/BUILD_WINDOWS.md`.
 
 **Permissions (macOS).** Screen Recording for capture, Files & Folders for the output folders you choose, Microphone when recording with audio. Shift checks Screen Recording before opening the overlay, so a denial surfaces an actionable error rather than a black screenshot. Dev builds signed with a local certificate keep those grants stable across rebuilds; distribution needs Developer ID plus notarization.
 
 ## Architecture
 
 ```text
-React UI                     one webview, five views
+React UI                     one webview, six views
   ├─ main        drop target, shortcuts, recent outputs, language, settings
   ├─ radial      transparent always-on-top ring, hit-tested by polar sector
   ├─ capture     frozen still + area selection
@@ -320,6 +350,7 @@ Tauri command layer          src-tauri/src/
   ├─ recording.rs  screencapture / FFmpeg, with interrupt-based finalization
   ├─ drag_bridge.rs  global drag detection, ring mode, radial positioning
   ├─ settings.rs   output directories, write checks, privacy deep links
+  ├─ share.rs      LAN beacons, peer list, AirDrop-style file transfer
   └─ editor.rs     editor and pin window state
 
 Platform adapters
@@ -336,10 +367,11 @@ The radial hit-test is pure geometry — one polar calculation shared by native 
 
 ```text
 src/                 React UI, i18n (en/zh), Tauri API bindings
+src/lib/             pure helpers and Node tests, including the conversion matrix
 src-tauri/src/       Rust command layer and platform adapters
 native/macos/        Swift sidecars: drag bridge, PDF renderer, doc renderer,
                      compiled into src-tauri/binaries/ by pnpm mac:drag-bridge
-scripts/            OCR asset staging, macOS sidecar build
+scripts/            OCR staging, macOS sidecars, Windows installer and release builds
 public/tesseract/    WASM core + traineddata, generated, not committed
 assets/              app icon source
 src-tauri/icons/     generated app icons per platform
@@ -350,7 +382,9 @@ FileFlipper/         separate companion project, its own repository
 
 ## Privacy
 
-Shift makes no network requests. Files are read, converted, and written locally; OCR runs in-process against bundled models; recent outputs are a local list. Nothing is uploaded, and nothing is collected.
+Shift makes no internet requests. Files are read, converted, and written locally; OCR runs in-process against bundled models; recent outputs are a local list. Nothing is uploaded, and nothing is collected.
+
+The one exception is opt-in by usage: **Send to a device** talks to your local network only — UDP beacons on `239.255.77.88:47888` plus a direct TCP connection between the two machines, carrying the machine name so each side can label the other. It is inert until you open that picker or another Shift sends you a file.
 
 ## Known limitations
 
@@ -360,6 +394,8 @@ Shift makes no network requests. Files are read, converted, and written locally;
 - HEIC/HEIF/AVIF convert through the system decoder, but the pixel tools need a PNG/JPEG/WebP/TIFF/BMP/GIF input; AVIF is not yet an export target.
 - PDF compression resamples embedded images to at most 1440 px as q60 JPEG. It deliberately skips anything it cannot prove it can round-trip — masks, indexed or CMYK colour, JPX/JBIG2/CCITT — so exotic scans may still resist shrinking.
 - Windows recording and media conversion require `ffmpeg` on `PATH`.
+- LAN sharing needs a network that allows peer traffic. Multicast is skipped by some guest and corporate Wi-Fi; those networks still work over the broadcast and unicast fallbacks, but two copies cannot meet across a router that isolates clients.
+- On Windows only one Shift copy per machine can hold the discovery port, so extra instances do not appear as peers.
 - Windows paths build and pass CI, but gesture-level QA needs real Windows hardware.
 - Signing identity changes on macOS may require re-approving Screen Recording and Accessibility.
 
@@ -368,7 +404,7 @@ Roadmap: `docs/ROADMAP.md`.
 ## FAQ
 
 **❓ I hold Shift while dragging and no ring appears.**
-Start the drag first — mouse button held, file moving past the drag threshold — and hold `Shift` during it. Pressing `Shift` with a file merely selected does nothing. On Windows the ring needs `Shift` held at the moment the drag crosses the system threshold; add `Ctrl` at that moment for tools.
+Start the drag first — mouse button held, file moving past the drag threshold — and hold `Shift` during it. Pressing `Shift` with a file merely selected does nothing. On Windows the ring needs `Shift` held at the moment the drag crosses the system threshold; add `Alt` at that moment for tools.
 
 **❓ It says this file type has no formats.**
 Unrecognised extensions get Open and Reveal only, and legacy Apple/Office formats (`.doc`, `.pages`, `.ppt`, `.key`, `.numbers`) intentionally offer no conversion. Export them to DOCX, PPTX or XLSX first.
@@ -376,7 +412,7 @@ Unrecognised extensions get Open and Reveal only, and legacy Apple/Office format
 **❓ Can I make it run at login, or toggle it off?**
 Yes, both, in Settings → **Behaviour**. **Drag rings** is the master switch for the Shift-drag gesture: off means no ring ever appears, while the tray, window and shortcuts keep working. **Launch at login** registers a LaunchAgent on macOS, a `HKCU\...\Run` entry on Windows, or an autostart `.desktop` file on Linux, and is reversible from the same toggle.
 
-The login item is registered for the current user only and points at the app bundle, so macOS keeps the same Screen Recording identity across launches. Move the app and re-toggle it once.
+The login item is registered for the current user only and points at the executable inside the app bundle, so macOS keeps the same Screen Recording identity across launches. Move the app and re-toggle it once.
 
 **❓ Are my files uploaded?**
 No. There is no upload path in the code and no network call in the conversion or OCR paths; the Tesseract models ship inside the app. Nothing is collected, and there is no account.
@@ -385,7 +421,7 @@ No. There is no upload path in the code and no network call in the conversion or
 Next to the source file by default, with a suffix — check the recent list in the main window first, since clicking an entry opens the result. Settings lists every resolved output path and can reveal it.
 
 **❓ Which languages are supported?**
-English and Simplified Chinese, switchable in the main window's Settings. On first launch it follows the system language. The tray menu and native macOS permission prompts stay in English.
+English and Simplified Chinese, switchable in the main window's Settings. On first launch it follows the system language. The tray menu follows the selected language; native macOS permission prompts stay in English.
 
 **❓ Can I edit a screenshot without saving it?**
 Yes — annotation works on a canvas copy and only writes on **Save copy** or **Copy**. The source file is never modified. Use **Pin** to keep it floating on screen as a reference instead.
@@ -395,7 +431,7 @@ Quit from the tray and delete the app. Nothing is written outside your output fo
 
 ## Contributing
 
-Adding a format is one entry in `formatSetFor` in `src/components/RadialMenu.tsx` plus its handling in `perform_action` in `src-tauri/src/files.rs`; adding a tool is one entry in `toolWedges` plus one match arm. CI runs `pnpm check`, `pnpm build`, `cargo test --lib`, and a debug bundle on macOS and Windows.
+Adding a format is one entry in `conversionFormats` in `src/lib/conversionFormats.ts`, its matrix test, and its handling in `perform_action` in `src-tauri/src/files.rs`; adding a tool is one entry in `toolWedges` plus one match arm. Run `pnpm check`, `pnpm test`, `pnpm build` and `cargo test --lib` before pushing. CI builds debug bundles on macOS and Windows.
 
 **Forks and derivative works are welcome.** You may use, modify, redistribute, and build on this code commercially, provided you keep the copyright notice and the LICENSE file.
 

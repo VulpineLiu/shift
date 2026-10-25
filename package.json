@@ -12,6 +12,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "check": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test src/lib/*.test.ts",
     "mac:drag-bridge": "bash scripts/build-macos-drag-bridge.sh"
   },
   "dependencies": {

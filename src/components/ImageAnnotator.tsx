@@ -179,24 +179,32 @@ export function ImageAnnotator({ path, onSaved }: Props) {
     setTextPoint(null);
     setTextDraft("");
     setImageHistory([]);
-    const source = isTauri()
-      ? api.readFileDataUrl(path)
-      : Promise.resolve("/demo-preview.svg");
-    void source.then((url) => {
+    const image = new Image();
+    image.onload = () => {
       if (cancelled) return;
-      const image = new Image();
-      image.onload = () => {
-        if (cancelled) return;
-        imageRef.current = image;
-        const canvas = canvasRef.current;
-        if (!canvas) return;
-        canvas.width = image.naturalWidth;
-        canvas.height = image.naturalHeight;
-        const context = canvas.getContext("2d");
-        if (context) context.drawImage(image, 0, 0);
-      };
-      image.src = url;
-    });
+      imageRef.current = image;
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      const context = canvas.getContext("2d");
+      if (context) context.drawImage(image, 0, 0);
+    };
+    image.onerror = () => {
+      if (!cancelled) setError(t("pinLoadFailed"));
+    };
+    if (isTauri()) {
+      void api
+        .readImageData(path)
+        .then((url) => {
+          if (!cancelled) image.src = url;
+        })
+        .catch((reason) => {
+          if (!cancelled) setError(String(reason).replace(/^Error:\s*/, ""));
+        });
+    } else {
+      image.src = "/demo-preview.svg";
+    }
     return () => {
       cancelled = true;
     };

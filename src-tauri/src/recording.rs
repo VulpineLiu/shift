@@ -1,7 +1,7 @@
 use std::{
     fs,
     path::PathBuf,
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{Child, ChildStdin, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -102,7 +102,7 @@ fn start_process(
         let _ = options.fps;
         let region = logical_region(app, state, rect)?;
         let output = output_path(app, "mov")?;
-        let mut command = Command::new("/usr/sbin/screencapture");
+        let mut command = crate::process::command("/usr/sbin/screencapture");
         command.args([
             "-x",
             "-v",
@@ -137,7 +137,7 @@ fn start_process(
             .ok_or_else(|| "Screen recording needs ffmpeg on Windows and Linux.".to_string())?;
         let region = physical_region(app, state, rect)?;
         let output = output_path(app, "mp4")?;
-        let mut command = Command::new(ffmpeg);
+        let mut command = crate::process::command(ffmpeg);
         #[cfg(target_os = "windows")]
         command.args([
             "-y",
@@ -344,22 +344,31 @@ pub fn stop_on_exit(app: &AppHandle, state: &AppState) {
     let _ = app;
 }
 
+/// Starting a recording spawns a capture process and stopping one waits for the
+/// encoder to finalize the file (up to three seconds), so neither belongs on the
+/// main thread.
 #[tauri::command]
-pub fn start_recording(
+pub async fn start_recording(
     app: AppHandle,
-    state: State<'_, AppState>,
     rect: NormalizedRect,
     options: Option<RecordingOptions>,
 ) -> Result<RecordingInfo, String> {
-    start(&app, &state, &rect, options.unwrap_or_default())
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        start(&app, &state, &rect, options.unwrap_or_default())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn stop_recording(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<Option<RecordingInfo>, String> {
-    stop(&app, &state)
+pub async fn stop_recording(app: AppHandle) -> Result<Option<RecordingInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        stop(&app, &state)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -378,6 +387,7 @@ pub fn recording_status(state: State<'_, AppState>) -> Result<Option<RecordingIn
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     #[test]
     fn stops_recording_process_cleanly() {

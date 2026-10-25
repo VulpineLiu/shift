@@ -2,11 +2,13 @@ import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
-  ArrowUpRight,
   Check,
   Circle,
   Clock3,
+  Cpu,
+  Download,
   FileAudio,
   File as FileGeneric,
   FileImage,
@@ -18,7 +20,6 @@ import {
   FolderOpen,
   FolderSearch,
   FileOutput,
-  Keyboard,
   LoaderCircle,
   Maximize,
   Pin,
@@ -26,6 +27,7 @@ import {
   RefreshCw,
   ScanLine,
   ScanText,
+  Send,
   Settings2,
   ShieldAlert,
   ShieldCheck,
@@ -33,8 +35,10 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
-import { useI18n } from "../i18n";
+import { getInitialLang, publishLang, useI18n } from "../i18n";
 import { api } from "../lib/api";
+import { hitTestDropTarget, toWindowPoint } from "../lib/dropTargets";
+import { SharePanel } from "./SharePanel";
 import {
   basename,
   dirname,
@@ -48,7 +52,16 @@ import {
   subscribeRecent,
   timeAgo,
 } from "../lib/utils";
-import type { AppSettings, HotkeyStatus, WriteCheck } from "../types";
+import type {
+  AppSettings,
+  HotkeyStatus,
+  RuntimeComponent,
+  RuntimeInfo,
+  ShareTransfer,
+  SwitchState,
+  SwitchUpdate,
+  WriteCheck,
+} from "../types";
 
 const FALLBACK_SETTINGS: AppSettings = {
   fileOutputMode: "alongside",
@@ -57,10 +70,12 @@ const FALLBACK_SETTINGS: AppSettings = {
   recordingDir: "~/Movies/Shift",
   autoReveal: true,
   dragEnabled: true,
+  shareEnabled: true,
   autostart: false,
   defaultFileOutputDir: "~/Downloads/Shift",
   defaultScreenshotDir: "~/Pictures/Shift",
   defaultRecordingDir: "~/Movies/Shift",
+  language: "",
 };
 
 const DROP_ICONS = [
@@ -194,18 +209,30 @@ export function MainWindow() {
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
-  const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [languageError, setLanguageError] = useState<string | null>(null);
+  // Every switch uses this snapshot until the real settings arrive. Starting
+  // empty made the first click wait for a disk read before it could change.
+  const [settings, setSettings] = useState<AppSettings | null>(FALLBACK_SETTINGS);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<"system" | "runtime">("system");
   const [screenAccess, setScreenAccess] = useState<boolean | null>(null);
   const [checks, setChecks] = useState<WriteCheck[] | null>(null);
   const [checking, setChecking] = useState(false);
+  const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo | null>(null);
+  const [runtimeLoading, setRuntimeLoading] = useState(false);
+  const [runtimeInstalling, setRuntimeInstalling] = useState<string | null>(null);
+  const [runtimeError, setRuntimeError] = useState<string | null>(null);
+  const [runtimeInstallHelp, setRuntimeInstallHelp] = useState<
+    "homebrew" | "winget" | null
+  >(null);
   const [recent, setRecent] = useState<RecentItem[]>(getRecentItems);
+  const [sharePaths, setSharePaths] = useState<string[] | null>(null);
   const toastTimer = useRef<number | null>(null);
   const [, setNowTick] = useState(0);
   const [dropAction, setDropAction] = useState<DropAction | null>(null);
   const [hotkeys, setHotkeys] = useState<HotkeyStatus | null>(null);
   const dropTargets = useRef<Partial<Record<DropAction, HTMLElement | null>>>({});
-  const windowOrigin = useRef<{ x: number; y: number } | null>(null);
+  const runtimeCheckStarted = useRef(false);
 
   function flash(message: string, duration = 2600) {
     if (toastTimer.current) window.clearTimeout(toastTimer.current);
@@ -256,46 +283,19 @@ export function MainWindow() {
     }, 450);
   }
 
-  // wry reports drag positions two different ways: AppKit passes draggingLocation,
-  // i.e. points relative to the webview and therefore 1:1 with CSS pixels, while
-  // the Windows drag controller forwards OLE screen coordinates in physical
-  // pixels. Only the second reading needs the window origin and scale removed.
-  function localPoint(position: { x: number; y: number }): { x: number; y: number } | null {
-    if (IS_MAC) return position;
-    const origin = windowOrigin.current;
-    if (!origin) return null;
-    const scale = window.devicePixelRatio || 1;
-    return { x: (position.x - origin.x) / scale, y: (position.y - origin.y) / scale };
-  }
-
-  async function readWindowOrigin() {
-    if (IS_MAC) return;
-    try {
-      const position = await getCurrentWebview().position();
-      windowOrigin.current = { x: position.x, y: position.y };
-    } catch {
-      windowOrigin.current = null;
-    }
+  function localPoint(position: { x: number; y: number }) {
+    return toWindowPoint(position, IS_MAC ? "mac" : "other", window.devicePixelRatio || 1);
   }
 
   function actionAt(position: { x: number; y: number }): DropAction | null {
     const point = localPoint(position);
     if (!point) return null;
-    const { x, y } = point;
-    const entries: Array<[DropAction, HTMLElement | null | undefined]> = [
-      ["formats", dropTargets.current.formats],
-      ["tools", dropTargets.current.tools],
-      ["ocr", dropTargets.current.ocr],
+    const boxes: Array<[DropAction, DOMRect | null | undefined]> = [
+      ["formats", dropTargets.current.formats?.getBoundingClientRect()],
+      ["tools", dropTargets.current.tools?.getBoundingClientRect()],
+      ["ocr", dropTargets.current.ocr?.getBoundingClientRect()],
     ];
-    for (const [action, element] of entries) {
-      if (!element) continue;
-      const box = element.getBoundingClientRect();
-      // Generous padding so a drop near a button still lands on it.
-      if (x >= box.left - 10 && x <= box.right + 10 && y >= box.top - 12 && y <= box.bottom + 12) {
-        return action;
-      }
-    }
-    return null;
+    return hitTestDropTarget(boxes, point);
   }
 
   function dropFiles(paths: string[], action: DropAction | null) {
@@ -319,6 +319,44 @@ export function MainWindow() {
     } catch (error) {
       flash(String(error), 3800);
     }
+  }
+
+  // Toggles flip their visual state at once and reconcile with the backend
+  // snapshot afterwards, so a slow disk or login-item call cannot stall the switch.
+  async function applyToggle(
+    patch: Partial<AppSettings>,
+    task: () => Promise<SwitchState | SwitchUpdate>,
+  ) {
+    const previous = settings;
+    if (previous) setSettings({ ...previous, ...patch });
+    try {
+      const response = await task();
+      setSettings((current) => {
+        if (!current) return current;
+        const enabled =
+          "state" in response ? response.state.enabled : response.enabled;
+        return {
+          ...current,
+          ...patch,
+          ...("autostart" in response && response.autostart !== null
+            ? { autostart: response.autostart }
+            : { autostart: "autostart" in patch ? enabled : current.autostart }),
+          dragEnabled: "dragEnabled" in patch ? enabled : current.dragEnabled,
+          shareEnabled: "shareEnabled" in patch ? enabled : current.shareEnabled,
+          autoReveal: "autoReveal" in patch ? enabled : current.autoReveal,
+        };
+      });
+    } catch (error) {
+      if (previous) setSettings(previous);
+      flash(String(error), 3800);
+    }
+  }
+
+  async function changeLanguage(next: "en" | "zh") {
+    setLanguageError(null);
+    // publishLang persists the choice and notifies Rust exactly once. `setLang`
+    // also updates this webview, so the switch does not wait for that IPC.
+    setLang(next);
   }
 
   async function chooseFolder(kind: OutputKind) {
@@ -345,6 +383,76 @@ export function MainWindow() {
       setHotkeys(await api.hotkeyStatus());
     } catch {
       setHotkeys(null);
+    }
+  }
+
+  async function refreshRuntime() {
+    if (!isTauri()) return;
+    setRuntimeLoading(true);
+    setRuntimeError(null);
+    setRuntimeInstallHelp(null);
+    try {
+      setRuntimeInfo(await api.getRuntimeInfo());
+    } catch (error) {
+      setRuntimeError(String(error).replace(/^Error:\s*/, ""));
+    } finally {
+      setRuntimeLoading(false);
+    }
+  }
+
+  function describeRuntimeInstallError(error: unknown) {
+    const message = String(error).replace(/^Error:\s*/, "");
+    setRuntimeInstallHelp(
+      message === "homebrew-missing"
+        ? "homebrew"
+        : message === "winget-missing"
+          ? "winget"
+          : null,
+    );
+    if (message === "homebrew-missing") {
+      return t("runtimeInstallNeedsHomebrew");
+    }
+    if (message === "winget-missing") {
+      return t("runtimeInstallNeedsWinget");
+    }
+    if (
+      message === "runtime-install-unsupported" ||
+      message === "unsupported-runtime-component"
+    ) {
+      return t("runtimeInstallUnsupported");
+    }
+    if (message.startsWith("homebrew-install-failed:")) {
+      return `${t("runtimeInstallFailed")} ${message
+        .slice("homebrew-install-failed:".length)
+        .trim()}`;
+    }
+    if (message.startsWith("winget-install-failed:")) {
+      return `${t("runtimeInstallFailed")} ${message
+        .slice("winget-install-failed:".length)
+        .trim()}`;
+    }
+    if (
+      message === "homebrew-install-missing-binary" ||
+      message === "winget-install-missing-binary"
+    ) {
+      return t("runtimeInstallFailed");
+    }
+    return message;
+  }
+
+  async function installRuntimeComponent(component: RuntimeComponent) {
+    if (runtimeInstalling) return;
+    setRuntimeInstalling(component.id);
+    setRuntimeError(null);
+    setRuntimeInstallHelp(null);
+    try {
+      await api.installRuntimeComponent(component.id);
+      await refreshRuntime();
+      flash(t("runtimeInstallComplete", { name: component.name }));
+    } catch (error) {
+      setRuntimeError(describeRuntimeInstallError(error));
+    } finally {
+      setRuntimeInstalling(null);
     }
   }
 
@@ -376,7 +484,15 @@ export function MainWindow() {
     }
     void api
       .getSettings()
-      .then(setSettings)
+      .then((loaded) => {
+        setSettings(loaded);
+        // The tray menu is native, so it can only show the language the backend
+        // knows about. Adopt the stored choice, or hand it ours on a first run;
+        // the backend only writes when the value actually changed.
+        const stored = loaded.language;
+        const effective = stored === "en" || stored === "zh" ? stored : getInitialLang();
+        if (effective !== stored) publishLang(effective);
+      })
       .catch((error) => {
         setSettings(FALLBACK_SETTINGS);
         flash(String(error), 3200);
@@ -405,11 +521,47 @@ export function MainWindow() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    const onLanguageError = (event: Event) => {
+      const detail = (event as CustomEvent<string>).detail;
+      setLanguageError(detail || t("languageSaveFailed"));
+    };
+    window.addEventListener("shift:language-error", onLanguageError);
+    return () => window.removeEventListener("shift:language-error", onLanguageError);
+  }, [t]);
+
   // Reading the status also consumes a "second copy tried to start" marker.
   useEffect(() => {
     if (settingsOpen && isTauri()) void refreshHotkeys();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settingsOpen]);
+
+  // Announce files that another Shift pushed to this machine. A dedicated effect so
+  // the message re-subscribes when the language changes.
+  useEffect(() => {
+    if (!isTauri()) return;
+    const unlisten = listen<ShareTransfer>("share://transfer", (event) => {
+      const transfer = event.payload;
+      if (transfer.state === "received" && transfer.path) {
+        flash(t("shareReceived", { name: transfer.fileName, peer: transfer.peerName }), 3600);
+      }
+    });
+    return () => {
+      void unlisten.then((release) => release());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [t]);
+
+  useEffect(() => {
+    if (!isTauri() || runtimeCheckStarted.current) return;
+    runtimeCheckStarted.current = true;
+    // Probe while the home screen is idle so opening Runtime components does not
+    // wait for every external tool to start once.
+    const timer = window.setTimeout(() => void refreshRuntime(), 600);
+    return () => window.clearTimeout(timer);
+    // Automatic detection runs only once; later checks come from the refresh button.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     const unlisteners: Array<() => void> = [];
@@ -418,9 +570,7 @@ export function MainWindow() {
         .onDragDropEvent((event) => {
           if (event.payload.type === "enter") {
             setDragging(true);
-            const position = event.payload.position;
-            // Cache the origin once per drag: it cannot move while dragging.
-            void readWindowOrigin().then(() => setDropAction(actionAt(position)));
+            setDropAction(actionAt(event.payload.position));
           }
           if (event.payload.type === "over") {
             setDropAction(actionAt(event.payload.position));
@@ -473,6 +623,22 @@ export function MainWindow() {
 
   const outputLabel = (kind: WriteCheck["kind"]) =>
     kind === "screenshot" ? t("screenshots") : kind === "recording" ? t("recordings") : t("fileResults");
+  const runtimeGroups = runtimeInfo
+    ? [
+        { id: "documents", label: t("runtimeDocuments") },
+        { id: "graphics", label: t("runtimeGraphics") },
+        { id: "video", label: t("runtimeVideo") },
+        { id: "capture", label: t("runtimeCapture") },
+        { id: "ocr", label: t("runtimeOcr") },
+      ]
+        .map((group) => ({
+          ...group,
+          components: runtimeInfo.components.filter(
+            (component) => component.category === group.id,
+          ),
+        }))
+        .filter((group) => group.components.length > 0)
+    : [];
 
   return (
     <div className={`home ${IS_MAC ? "is-mac" : ""}`}>
@@ -567,7 +733,6 @@ export function MainWindow() {
             })}
           </div>
           <h1>{dragging ? t("homeDropRelease") : t("homeDropTitle")}</h1>
-          <p>{t("homeDropBody")}</p>
           <div className={`home-primary-actions ${dropAction ? "has-drop-target" : ""}`}>
             <button
               className={`home-primary ${dropAction === "formats" ? "is-drop-target" : ""}`}
@@ -584,7 +749,6 @@ export function MainWindow() {
                 <FileOutput size={16} />
               )}
               {t("convertFiles")}
-              <ArrowUpRight size={15} />
             </button>
             <button
               className={`home-secondary ${dropAction === "tools" ? "is-drop-target" : ""}`}
@@ -611,29 +775,16 @@ export function MainWindow() {
               {t("ocr")}
             </button>
           </div>
-          <div className="home-shortcut-row">
-            <span>{dragging ? t("dragHintActive") : t("dragHint")}</span>
-            <span className="home-shortcut-group">
-              <kbd>{IS_MAC ? "\u21e7" : "Shift"}</kbd>
-              {t("dragHintConvert")}
-            </span>
-            <span className="home-shortcut-group">
-              <kbd>{IS_MAC ? "\u2325\u21e7" : "Ctrl+Shift"}</kbd>
-              {t("dragHintTools")}
-            </span>
-          </div>
         </section>
 
         <aside className="home-side">
           <section className="home-card home-card-recent">
             <header className="home-card-head">
               <Clock3 size={16} />
-              <div>
-                <span>{t("recent")}</span>
-                <h2>
-                  {recent.length > 0 ? `${recent.length} ${t("items")}` : t("nothingYet")}
-                </h2>
-              </div>
+              <h1>{t("recent")}</h1>
+              <span className="home-card-count">
+                {recent.length > 0 ? t("itemCount", { count: recent.length }) : t("nothingYet")}
+              </span>
             </header>
             {recent.length === 0 ? (
               <div className="home-empty">
@@ -659,6 +810,9 @@ export function MainWindow() {
                       </span>
                     </button>
                     <span className="home-recent-actions">
+                      <button title={t("sendTo")} onClick={() => setSharePaths([item.path])}>
+                        <Send size={13} />
+                      </button>
                       <button title={t("revealFile")} onClick={() => void api.revealFile(item.path)}>
                         <FolderSearch size={13} />
                       </button>
@@ -683,221 +837,372 @@ export function MainWindow() {
 
       <aside className={`home-settings ${settingsOpen ? "is-open" : ""}`}>
         <header className="home-settings-head">
-          <div>
-            <span>{t("settings")}</span>
-            <h2>{t("outputSettings")}</h2>
-          </div>
-          <button className="home-icon-button" onClick={() => setSettingsOpen(false)}>
+          <button
+            className="home-icon-button home-settings-close"
+            onClick={() => setSettingsOpen(false)}
+            aria-label={t("close")}
+            title={t("close")}
+          >
             <X size={17} />
           </button>
+          <div className="home-settings-heading">
+            <h2>{settingsTab === "system" ? t("systemSettings") : t("runtimeComponents")}</h2>
+          </div>
         </header>
 
-        <section className="home-settings-section">
-          <div className="home-section-title">
-            <FolderCog size={15} />
-            {t("fileResults")}
-          </div>
-          <div className="home-segment">
-            <button
-              className={settings?.fileOutputMode !== "custom" ? "is-active" : ""}
-              onClick={() => void applySettings(() => api.setFileOutputMode("alongside"))}
-            >
-              {t("nextToOriginal")}
-            </button>
-            <button
-              className={settings?.fileOutputMode === "custom" ? "is-active" : ""}
-              onClick={() => void applySettings(() => api.setFileOutputMode("custom"))}
-            >
-              {t("customFolder")}
-            </button>
-          </div>
-          <p className="home-settings-hint">
-            {settings?.fileOutputMode === "custom" ? t("customFolderHint") : t("alongsideHint")}
-          </p>
-          {settings?.fileOutputMode === "custom" ? (
-            <OutputLocation
-              label={t("fileResults")}
-              path={settings.fileOutputDir}
-              chooseLabel={t("chooseFolder")}
-              revealLabel={t("revealFolder")}
-              resetLabel={t("reset")}
-              onChoose={() => void chooseFolder("files")}
-              onReveal={() => void api.revealOutputDirectory("files")}
-              onReset={() => void resetFolder("files")}
-            />
-          ) : null}
-        </section>
-
-        <section className="home-settings-section">
-          <div className="home-section-title">
-            <ScanLine size={15} />
-            {t("screenshots")}
-          </div>
-          <OutputLocation
-            label={t("location")}
-            path={settings?.screenshotDir ?? FALLBACK_SETTINGS.screenshotDir}
-            chooseLabel={t("chooseFolder")}
-            revealLabel={t("revealFolder")}
-            resetLabel={t("reset")}
-            onChoose={() => void chooseFolder("screenshot")}
-            onReveal={() => void api.revealOutputDirectory("screenshot")}
-            onReset={() => void resetFolder("screenshot")}
-          />
-        </section>
-
-        <section className="home-settings-section">
-          <div className="home-section-title">
-            <Circle size={14} />
-            {t("recordings")}
-          </div>
-          <OutputLocation
-            label={t("location")}
-            path={settings?.recordingDir ?? FALLBACK_SETTINGS.recordingDir}
-            chooseLabel={t("chooseFolder")}
-            revealLabel={t("revealFolder")}
-            resetLabel={t("reset")}
-            onChoose={() => void chooseFolder("recording")}
-            onReveal={() => void api.revealOutputDirectory("recording")}
-            onReset={() => void resetFolder("recording")}
-          />
-        </section>
-
-        <section className="home-settings-section">
-          <div className="home-section-title">{t("behaviour")}</div>
-          <label className="home-toggle-row">
-            <span>
-              <strong>{t("dragRings")}</strong>
-              <small>{t("dragRingsHint")}</small>
-            </span>
-            <button
-              className={`home-toggle ${settings?.dragEnabled ?? true ? "is-on" : ""}`}
-              onClick={() =>
-                void applySettings(() => api.setDragEnabled(!(settings?.dragEnabled ?? true)))
-              }
-              aria-pressed={settings?.dragEnabled ?? true}
-            >
-              <span />
-            </button>
-          </label>
-          <label className="home-toggle-row">
-            <span>
-              <strong>{t("autostart")}</strong>
-              <small>{t("autostartHint")}</small>
-            </span>
-            <button
-              className={`home-toggle ${settings?.autostart ? "is-on" : ""}`}
-              onClick={() => void applySettings(() => api.setAutostart(!(settings?.autostart ?? false)))}
-              aria-pressed={settings?.autostart ?? false}
-            >
-              <span />
-            </button>
-          </label>
-        </section>
-
-        <section className="home-settings-section">
-          <label className="home-toggle-row">
-            <span>
-              <strong>{t("showInFinder")}</strong>
-              <small>{t("showInFinderHint")}</small>
-            </span>
-            <button
-              className={`home-toggle ${settings?.autoReveal ? "is-on" : ""}`}
-              onClick={() =>
-                void applySettings(() => api.setAutoReveal(!(settings?.autoReveal ?? true)))
-              }
-              aria-pressed={settings?.autoReveal ?? true}
-            >
-              <span />
-            </button>
-          </label>
-        </section>
-
-        <section className="home-settings-section">
-          <div className="home-section-title">
-            <Keyboard size={15} />
-            {t("hotkeys")}
-          </div>
-          {hotkeys && hotkeys.live && hotkeys.others.length === 0 ? (
-            <p className="home-settings-hint">{t("hotkeysOk")}</p>
-          ) : null}
-          {hotkeys && (!hotkeys.live || hotkeys.others.length > 0) ? (
-            <div className="home-hotkeys is-warn">
-              <p className="home-settings-hint">
-                {hotkeys.others.length > 0
-                  ? t("hotkeysOthers", { count: hotkeys.others.length })
-                  : t("hotkeysNotLive")}
-              </p>
-              <button className="settings-wide-button" onClick={() => void reclaimHotkeys()}>
-                <RefreshCw size={14} />
-                {t("hotkeysFix")}
-              </button>
-            </div>
-          ) : null}
-          <div className="home-hotkey-list">
-            {(hotkeys?.hotkeys.length
-              ? hotkeys.hotkeys
-              : ["Alt+Shift+2", "Alt+Shift+3", "Alt+Shift+4"]
-            ).map((hotkey) => (
-              <span key={hotkey}>{hotkey.replace("Alt+Shift+", `${IS_MAC ? "\u2325\u21e7" : "Alt+Shift+"}`)}</span>
-            ))}
-          </div>
-        </section>
-
-        <section className="home-settings-section">
-          <div className="home-section-title">
-            <ShieldCheck size={15} />
-            {t("accessCheck")}
-          </div>
-          <p className="home-settings-hint">{t("accessCheckHint")}</p>
-          <button className="settings-wide-button" onClick={() => void runAccessCheck()}>
-            {checking ? <LoaderCircle size={14} className="spin" /> : <RefreshCw size={14} />}
-            {checking ? t("checking") : t("checkAccess")}
+        <div className="home-settings-tabs" role="tablist" aria-label={t("settings")}>
+          <button
+            id="settings-tab-system"
+            className={`home-settings-tab ${settingsTab === "system" ? "is-active" : ""}`}
+            role="tab"
+            aria-selected={settingsTab === "system"}
+            aria-controls="settings-panel-system"
+            onClick={() => setSettingsTab("system")}
+          >
+            <Settings2 size={14} />
+            {t("systemSettings")}
           </button>
-          {checks ? (
-            <div className="home-checks">
-              {checks.map((check) => (
-                <div key={check.kind} className={`home-check ${check.ok ? "is-ok" : "is-bad"}`}>
-                  {check.ok ? <Check size={14} /> : <X size={14} />}
-                  <span>
-                    <strong>{outputLabel(check.kind)}</strong>
-                    <small>{check.ok ? t("accessOk") : check.message}</small>
-                  </span>
+          <button
+            id="settings-tab-runtime"
+            className={`home-settings-tab ${settingsTab === "runtime" ? "is-active" : ""}`}
+            role="tab"
+            aria-selected={settingsTab === "runtime"}
+            aria-controls="settings-panel-runtime"
+            onClick={() => setSettingsTab("runtime")}
+          >
+            <Cpu size={14} />
+            {t("runtimeComponents")}
+          </button>
+        </div>
+
+        <div className="home-settings-body">
+          {settingsTab === "system" ? (
+            <div
+              className="home-settings-panel"
+              id="settings-panel-system"
+              role="tabpanel"
+              aria-labelledby="settings-tab-system"
+            >
+              <section className="home-settings-section">
+                <div className="home-section-title">
+                  <FolderCog size={15} />
+                  {t("fileResults")}
                 </div>
-              ))}
-            </div>
-          ) : null}
-        </section>
+                <div className="home-segment">
+                  <button
+                    className={settings?.fileOutputMode !== "custom" ? "is-active" : ""}
+                    onClick={() => void applySettings(() => api.setFileOutputMode("alongside"))}
+                  >
+                    {t("nextToOriginal")}
+                  </button>
+                  <button
+                    className={settings?.fileOutputMode === "custom" ? "is-active" : ""}
+                    onClick={() => void applySettings(() => api.setFileOutputMode("custom"))}
+                  >
+                    {t("customFolder")}
+                  </button>
+                </div>
+                {settings?.fileOutputMode === "custom" ? (
+                  <OutputLocation
+                    label={t("fileResults")}
+                    path={settings.fileOutputDir}
+                    chooseLabel={t("chooseFolder")}
+                    revealLabel={t("revealFolder")}
+                    resetLabel={t("reset")}
+                    onChoose={() => void chooseFolder("files")}
+                    onReveal={() => void api.revealOutputDirectory("files")}
+                    onReset={() => void resetFolder("files")}
+                  />
+                ) : null}
+              </section>
 
-        {IS_MAC ? (
-          <section className="home-settings-section">
-            <div className="home-section-title">{t("permissions")}</div>
-            <div className="home-permission-row">
-              <button onClick={() => void api.openScreenRecordingSettings()}>
-                <ScanLine size={14} />
-                {t("screenPermission")}
-              </button>
-              <button onClick={() => void api.openFilesPermissionSettings()}>
-                <FolderOpen size={14} />
-                {t("filesPermission")}
-              </button>
-            </div>
-            <p className="home-settings-hint">{t("filesPermissionHint")}</p>
-          </section>
-        ) : null}
+              <section className="home-settings-section">
+                <div className="home-section-title">
+                  <ScanLine size={15} />
+                  {t("screenshots")}
+                </div>
+                <OutputLocation
+                  label={t("location")}
+                  path={settings?.screenshotDir ?? FALLBACK_SETTINGS.screenshotDir}
+                  chooseLabel={t("chooseFolder")}
+                  revealLabel={t("revealFolder")}
+                  resetLabel={t("reset")}
+                  onChoose={() => void chooseFolder("screenshot")}
+                  onReveal={() => void api.revealOutputDirectory("screenshot")}
+                  onReset={() => void resetFolder("screenshot")}
+                />
+              </section>
 
-        <section className="home-settings-section">
-          <div className="home-section-title">{t("language")}</div>
-          <div className="home-segment">
-            <button className={lang === "en" ? "is-active" : ""} onClick={() => setLang("en")}>
-              English
-            </button>
-            <button className={lang === "zh" ? "is-active" : ""} onClick={() => setLang("zh")}>
-              简体中文
-            </button>
-          </div>
-          <p className="home-settings-hint">{t("privacyBody")}</p>
-        </section>
+              <section className="home-settings-section">
+                <div className="home-section-title">
+                  <Circle size={14} />
+                  {t("recordings")}
+                </div>
+                <OutputLocation
+                  label={t("location")}
+                  path={settings?.recordingDir ?? FALLBACK_SETTINGS.recordingDir}
+                  chooseLabel={t("chooseFolder")}
+                  revealLabel={t("revealFolder")}
+                  resetLabel={t("reset")}
+                  onChoose={() => void chooseFolder("recording")}
+                  onReveal={() => void api.revealOutputDirectory("recording")}
+                  onReset={() => void resetFolder("recording")}
+                />
+              </section>
+
+              <section className="home-settings-section">
+                <label className="home-toggle-row">
+                  <strong>{t("dragRings")}</strong>
+                  <button
+                    className={`home-toggle ${settings?.dragEnabled ?? true ? "is-on" : ""}`}
+                    onClick={() =>
+                      void applyToggle(
+                        { dragEnabled: !(settings?.dragEnabled ?? true) },
+                        () => api.setDragEnabled(!(settings?.dragEnabled ?? true)),
+                      )
+                    }
+                    aria-pressed={settings?.dragEnabled ?? true}
+                  >
+                    <span />
+                  </button>
+                </label>
+                <label className="home-toggle-row home-toggle-divider">
+                  <strong>{t("shiftDrop")}</strong>
+                  <button
+                    className={`home-toggle ${settings?.shareEnabled ?? true ? "is-on" : ""}`}
+                    onClick={() =>
+                      void applyToggle(
+                        { shareEnabled: !(settings?.shareEnabled ?? true) },
+                        () => api.setShareEnabled(!(settings?.shareEnabled ?? true)),
+                      )
+                    }
+                    aria-pressed={settings?.shareEnabled ?? true}
+                  >
+                    <span />
+                  </button>
+                </label>
+                <label className="home-toggle-row home-toggle-divider">
+                  <strong>{t("autostart")}</strong>
+                  <button
+                    className={`home-toggle ${settings?.autostart ? "is-on" : ""}`}
+                    onClick={() =>
+                      void applyToggle(
+                        { autostart: !(settings?.autostart ?? false) },
+                        () => api.setAutostart(!(settings?.autostart ?? false)),
+                      )
+                    }
+                    aria-pressed={settings?.autostart ?? false}
+                  >
+                    <span />
+                  </button>
+                </label>
+              </section>
+
+              <section className="home-settings-section">
+                <label className="home-toggle-row">
+                  <strong>{t("showInFinder")}</strong>
+                  <button
+                    className={`home-toggle ${settings?.autoReveal ? "is-on" : ""}`}
+                    onClick={() =>
+                      void applyToggle(
+                        { autoReveal: !(settings?.autoReveal ?? true) },
+                        () => api.setAutoReveal(!(settings?.autoReveal ?? true)),
+                      )
+                    }
+                    aria-pressed={settings?.autoReveal ?? true}
+                  >
+                    <span />
+                  </button>
+                </label>
+              </section>
+
+              <section className="home-settings-section">
+                <div className="home-section-title">
+                  <ShieldCheck size={15} />
+                  {t("accessCheck")}
+                </div>
+                <button className="settings-wide-button" onClick={() => void runAccessCheck()}>
+                  {checking ? (
+                    <LoaderCircle size={14} className="spin" />
+                  ) : (
+                    <RefreshCw size={14} />
+                  )}
+                  {checking ? t("checking") : t("checkAccess")}
+                </button>
+                {checks ? (
+                  <div className="home-checks">
+                    {checks.map((check) => (
+                      <div
+                        key={check.kind}
+                        className={`home-check ${check.ok ? "is-ok" : "is-bad"}`}
+                      >
+                        {check.ok ? <Check size={14} /> : <X size={14} />}
+                        <span>
+                          <strong>{outputLabel(check.kind)}</strong>
+                          <small>{check.ok ? t("accessOk") : check.message}</small>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </section>
+
+              {IS_MAC ? (
+                <section className="home-settings-section">
+                  <div className="home-section-title">{t("permissions")}</div>
+                  <div className="home-permission-row">
+                    <button onClick={() => void api.openScreenRecordingSettings()}>
+                      <ScanLine size={14} />
+                      {t("screenPermission")}
+                    </button>
+                    <button onClick={() => void api.openFilesPermissionSettings()}>
+                      <FolderOpen size={14} />
+                      {t("filesPermission")}
+                    </button>
+                  </div>
+                </section>
+              ) : null}
+
+              <section className="home-settings-section">
+                <div className="home-section-title">{t("language")}</div>
+                <div className="home-segment">
+                  <button
+                    className={lang === "en" ? "is-active" : ""}
+                    onClick={() => void changeLanguage("en")}
+                  >
+                    English
+                  </button>
+                  <button
+                    className={lang === "zh" ? "is-active" : ""}
+                    onClick={() => void changeLanguage("zh")}
+                  >
+                    简体中文
+                  </button>
+                </div>
+                {languageError ? (
+                  <div className="runtime-error">
+                    <span>{languageError}</span>
+                  </div>
+                ) : null}
+              </section>
+            </div>
+          ) : (
+            <div
+              className="home-settings-panel"
+              id="settings-panel-runtime"
+              role="tabpanel"
+              aria-labelledby="settings-tab-runtime"
+            >
+              <section className="home-settings-section">
+                <div className="runtime-section-head">
+                  <div className="home-section-title">
+                    <Cpu size={15} />
+                    {t("runtimeComponents")}
+                  </div>
+                  <button
+                    className="settings-link runtime-refresh"
+                    onClick={() => void refreshRuntime()}
+                    disabled={runtimeLoading || runtimeInstalling !== null}
+                  >
+                    <RefreshCw size={12} className={runtimeLoading ? "spin" : ""} />
+                    {runtimeLoading ? t("runtimeChecking") : t("runtimeRefresh")}
+                  </button>
+                </div>
+                <p className="runtime-summary">{t("runtimeSummary")}</p>
+                {runtimeError ? (
+                  <div className="runtime-error">
+                    <span>{runtimeError}</span>
+                    {runtimeInstallHelp ? (
+                      <button
+                        className="runtime-error-link"
+                        onClick={() =>
+                          void openUrl(
+                            runtimeInstallHelp === "homebrew"
+                              ? "https://brew.sh/"
+                              : "https://learn.microsoft.com/windows/package-manager/winget/",
+                          )
+                        }
+                      >
+                        {t(
+                          runtimeInstallHelp === "homebrew"
+                            ? "runtimeOpenHomebrew"
+                            : "runtimeOpenWinget",
+                        )}
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+                {runtimeLoading && !runtimeInfo ? (
+                  <div className="runtime-loading">
+                    <LoaderCircle size={14} className="spin" />
+                    {t("runtimeChecking")}
+                  </div>
+                ) : null}
+                {runtimeGroups.map((group) => (
+                  <div className="runtime-group" key={group.id}>
+                    <div className="runtime-group-title">{group.label}</div>
+                    {group.components.map((component) => (
+                      <div
+                        className={`runtime-component ${component.available ? "is-available" : "is-missing"}`}
+                        key={component.id}
+                      >
+                        <div className="runtime-component-head">
+                          <strong>{component.name}</strong>
+                          <span className={`runtime-source is-${component.source}`}>
+                            {t(`runtimeSource_${component.source}`)}
+                          </span>
+                        </div>
+                        <div className="runtime-component-meta">
+                          <span className="runtime-status">
+                            {component.available ? <Check size={11} /> : <X size={11} />}
+                            {component.available ? t("runtimeAvailable") : t("runtimeMissing")}
+                          </span>
+                          {component.version ? (
+                            <span className="runtime-version" title={component.version}>
+                              {component.version}
+                            </span>
+                          ) : null}
+                        </div>
+                        {component.path ? (
+                          <code className="runtime-path" title={component.path}>
+                            {component.path}
+                          </code>
+                        ) : component.source === "bundled" ? (
+                          <span className="runtime-bundled">{t("runtimeBundledInApp")}</span>
+                        ) : null}
+                        {!component.available && component.installable ? (
+                          <button
+                            className="runtime-install"
+                            onClick={() => void installRuntimeComponent(component)}
+                            disabled={runtimeInstalling !== null || runtimeLoading}
+                          >
+                            {runtimeInstalling === component.id ? (
+                              <LoaderCircle size={12} className="spin" />
+                            ) : (
+                              <Download size={12} />
+                            )}
+                            {runtimeInstalling === component.id
+                              ? t("runtimeInstalling")
+                              : t("runtimeInstall")}
+                          </button>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </section>
+            </div>
+          )}
+        </div>
       </aside>
+
+      {sharePaths ? (
+        <SharePanel
+          paths={sharePaths}
+          onClose={() => setSharePaths(null)}
+          onNotice={(message) => flash(message, 3600)}
+        />
+      ) : null}
 
       {toast ? <div className="main-toast">{toast}</div> : null}
     </div>

@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default permissions for Shift windows.",
-  "windows": ["main", "radial", "capture", "recorder", "editor", "pin-*"],
+  "windows": ["main", "radial", "capture", "recorder", "editor", "pin"],
   "permissions": [
     "core:default",
     "core:window:allow-show",

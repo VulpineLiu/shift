@@ -27,7 +27,9 @@ func cursorLocation() -> NSPoint {
 let dragPasteboard = NSPasteboard(name: .drag)
 var mouseWasDown = false
 var pickerShown = false
+var cancelled = false
 var toolsMode = false
+var missingDragFiles = 0
 var changeCountAtMouseDown = dragPasteboard.changeCount
 var lastX = Double.nan
 var lastY = Double.nan
@@ -46,9 +48,10 @@ func tick() {
     }
     let mouseDown = NSEvent.pressedMouseButtons & 1 != 0
     let point = cursorLocation()
-
     if !mouseDown {
         changeCountAtMouseDown = dragPasteboard.changeCount
+        cancelled = false
+        missingDragFiles = 0
     }
 
     if !mouseDown && mouseWasDown && pickerShown {
@@ -64,6 +67,7 @@ func tick() {
     let option = flags.contains(.option)
 
     if !pickerShown {
+        guard !cancelled else { return }
         guard shift, dragPasteboard.changeCount != changeCountAtMouseDown else { return }
         let files = draggedFileURLs()
         guard !files.isEmpty else { return }
@@ -79,6 +83,19 @@ func tick() {
         toolsMode = option
         emit(Payload(type: "mode", x: point.x, y: point.y, files: nil, tools: option))
     }
+
+    // Some Finder versions also tear down the pasteboard during cancellation.
+    // Keep this as a fallback for drag sessions that disappear without a key event.
+    if draggedFileURLs().isEmpty {
+        missingDragFiles += 1
+        if missingDragFiles >= 6 {
+            pickerShown = false
+            cancelled = true
+            emit(Payload(type: "cancel", x: point.x, y: point.y, files: nil, tools: nil))
+        }
+        return
+    }
+    missingDragFiles = 0
 
     if abs(point.x - lastX) > 0.5 || abs(point.y - lastY) > 0.5 {
         lastX = point.x

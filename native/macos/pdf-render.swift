@@ -30,22 +30,33 @@ guard let document = PDFDocument(url: input) else {
 for index in 0..<document.pageCount {
     guard let page = document.page(at: index) else { continue }
     let bounds = page.bounds(for: .mediaBox)
-    let scale = min(2.0, 3000.0 / max(bounds.width, bounds.height, 1.0))
-    let size = NSSize(
-        width: max(1, bounds.width * scale),
-        height: max(1, bounds.height * scale)
-    )
-    let pageImage = page.thumbnail(of: size, for: .mediaBox)
-    let canvas = NSImage(size: size)
-    canvas.lockFocus()
-    NSColor.white.setFill()
-    NSRect(origin: .zero, size: size).fill()
-    pageImage.draw(in: NSRect(origin: .zero, size: size))
-    canvas.unlockFocus()
-
-    guard let tiff = canvas.tiffRepresentation,
-          let bitmap = NSBitmapImageRep(data: tiff),
-          let data = bitmap.representation(using: fileType, properties: [:]) else {
+    // Render into an explicit pixel buffer. NSImage.lockFocus() follows the
+    // Mac's Retina backing scale, which doubled both dimensions and made
+    // image-heavy PDF-to-Word conversions needlessly slow.
+    let scale = min(2.0, 1800.0 / max(bounds.width, bounds.height, 1.0))
+    let width = max(1, Int((bounds.width * scale).rounded()))
+    let height = max(1, Int((bounds.height * scale).rounded()))
+    guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+          let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+          ) else {
+        fail("could not create page canvas")
+    }
+    context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+    context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+    context.scaleBy(x: CGFloat(width) / bounds.width, y: CGFloat(height) / bounds.height)
+    page.draw(with: .mediaBox, to: context)
+    guard let image = context.makeImage(),
+          let data = NSBitmapImageRep(cgImage: image).representation(
+            using: fileType,
+            properties: [:]
+          ) else {
         fail("could not render page \(index + 1)")
     }
     let output = outputDirectory.appendingPathComponent(

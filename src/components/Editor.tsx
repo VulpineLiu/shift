@@ -30,6 +30,7 @@ export function Editor() {
   const [ocrProgress, setOcrProgress] = useState(0);
   const [ocrStatus, setOcrStatus] = useState("");
   const [ocrRunning, setOcrRunning] = useState(false);
+  const [pinBusy, setPinBusy] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   const [textContent, setTextContent] = useState("");
   const copyTimer = useRef<number | null>(null);
@@ -126,8 +127,8 @@ export function Editor() {
     setOcrProgress(0);
     setOcrStatus(t("ocrRunning"));
     try {
-      const dataUrl = await api.readFileDataUrl(current.path);
-      const result = await recognizeImage(dataUrl, (progress, status) => {
+      const source = isTauri() ? convertFileSrc(current.path) : current.path;
+      const result = await recognizeImage(source, (progress, status) => {
         setOcrProgress(progress);
         setOcrStatus(status || t("ocrRunning"));
       });
@@ -143,6 +144,19 @@ export function Editor() {
       setOcrStatus("");
     } finally {
       setOcrRunning(false);
+    }
+  }
+
+  async function pinToScreen() {
+    const current = sessionRef.current;
+    if (!current || pinBusy) return;
+    setPinBusy(true);
+    try {
+      await api.pinImage(current.path);
+    } catch (error) {
+      flashCopied(String(error).replace(/^Error:\s*/, ""));
+    } finally {
+      setPinBusy(false);
     }
   }
 
@@ -164,7 +178,7 @@ export function Editor() {
         <div className="editor-title" data-tauri-drag-region>
           {name}
         </div>
-        <button className="editor-close" onClick={() => void api.closeEditor()}>
+        <button className="home-icon-button editor-close" onClick={() => void api.closeEditor()}>
           <X size={16} />
         </button>
       </header>
@@ -186,8 +200,12 @@ export function Editor() {
             </button>
           ) : null}
           {session.kind === "image" ? (
-            <button className="editor-button" onClick={() => void api.pinImage(session.path)}>
-              <Pin size={16} />
+            <button
+              className="editor-button"
+              onClick={() => void pinToScreen()}
+              disabled={pinBusy}
+            >
+              {pinBusy ? <LoaderCircle size={16} className="spin" /> : <Pin size={16} />}
               {t("pin")}
             </button>
           ) : null}
@@ -234,7 +252,6 @@ export function Editor() {
               <div>
                 <span className="ocr-eyebrow">{t("ocr")}</span>
                 <h2>{t("ocrTitle")}</h2>
-                <p>{t("ocrHint")}</p>
               </div>
               <button className="editor-icon" onClick={() => setOcrOpen(false)}>
                 <X size={16} />

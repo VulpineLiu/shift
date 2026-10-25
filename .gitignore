@@ -5,3 +5,9 @@ src-tauri/gen/
 artifacts/
 FileFlipper/
 .DS_Store
+scripts/windows-debug/
+/codesign*
+*.dSYM/
+.env
+.env.*
+!.env.example

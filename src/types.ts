@@ -1,4 +1,4 @@
-export type View = "main" | "radial" | "capture" | "recorder" | "editor" | "pin";
+export type View = "main" | "radial" | "capture" | "recorder" | "editor" | "pin" | "share-notice";
 
 export interface FileInfo {
   path: string;
@@ -69,10 +69,22 @@ export interface AppSettings {
   recordingDir: string;
   autoReveal: boolean;
   dragEnabled: boolean;
+  shareEnabled: boolean;
   autostart: boolean;
+  /** "" until the user picks a language; the tray follows whatever is stored. */
+  language: string;
   defaultFileOutputDir: string;
   defaultScreenshotDir: string;
   defaultRecordingDir: string;
+}
+
+export interface SwitchState {
+  enabled: boolean;
+}
+
+export interface SwitchUpdate {
+  state: SwitchState;
+  autostart: boolean | null;
 }
 
 export interface HotkeyStatus {
@@ -88,4 +100,53 @@ export interface WriteCheck {
   path: string;
   ok: boolean;
   message: string;
+}
+
+export type RuntimeComponentCategory = "documents" | "graphics" | "video" | "capture" | "ocr";
+
+export interface RuntimeComponent {
+  id: string;
+  name: string;
+  category: RuntimeComponentCategory;
+  role: string;
+  source: "bundled" | "system" | "external";
+  available: boolean;
+  installable: boolean;
+  version?: string;
+  path?: string;
+}
+
+export interface RuntimeInfo {
+  platform: string;
+  architecture: string;
+  osVersion: string;
+  appVersion: string;
+  components: RuntimeComponent[];
+}
+
+/** Another Shift copy discovered on the local network. */
+export interface SharePeer {
+  id: string;
+  name: string;
+  platform: "macos" | "windows" | "linux" | string;
+  address: string;
+}
+
+/** An incoming LAN file the user has not answered yet. */
+export interface ShareOffer {
+  transferId: string;
+  fileName: string;
+  size: number;
+  peerName: string;
+  timeoutSeconds: number;
+}
+
+export interface ShareTransfer {
+  transferId: string;
+  fileName: string;
+  peerName: string;
+  sent: number;
+  total: number;
+  state: "sending" | "received" | "error";
+  path?: string | null;
 }

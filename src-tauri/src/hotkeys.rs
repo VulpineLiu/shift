@@ -104,10 +104,7 @@ pub fn other_pids() -> Vec<u32> {
     }
     #[cfg(unix)]
     {
-        let Ok(output) = std::process::Command::new("/usr/bin/pgrep")
-            .args(["-x", "shift"])
-            .output()
-        else {
+        let Ok(output) = crate::process::output("/usr/bin/pgrep", &["-x", "shift"]) else {
             return Vec::new();
         };
         other_instances(&String::from_utf8_lossy(&output.stdout), std::process::id())
@@ -138,10 +135,8 @@ fn is_installed(exe: &str) -> bool {
 
 #[cfg(unix)]
 fn command_path(pid: u32) -> Option<String> {
-    let output = std::process::Command::new("/bin/ps")
-        .args(["-p", &pid.to_string(), "-o", "comm="])
-        .output()
-        .ok()?;
+    let output =
+        crate::process::output("/bin/ps", &["-p", &pid.to_string(), "-o", "comm="]).ok()?;
     let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!path.is_empty()).then_some(path)
 }
@@ -153,7 +148,15 @@ fn command_path(_pid: u32) -> Option<String> {
 
 /// Ask the other copies to quit so this one can own the hotkeys.
 #[tauri::command]
-pub fn quit_other_instances() -> usize {
+// These two commands start `pgrep`/`ps` subprocesses, so they run on a blocking
+// thread: the UI polls them while settings toggles are being clicked.
+pub async fn quit_other_instances() -> usize {
+    tauri::async_runtime::spawn_blocking(stop_other_instances)
+        .await
+        .unwrap_or(0)
+}
+
+fn stop_other_instances() -> usize {
     let mut stopped = 0;
     for pid in other_pids() {
         #[cfg(unix)]
@@ -169,8 +172,10 @@ pub fn quit_other_instances() -> usize {
 }
 
 #[tauri::command]
-pub fn hotkey_status() -> HotkeyStatus {
-    status()
+pub async fn hotkey_status() -> HotkeyStatus {
+    tauri::async_runtime::spawn_blocking(status)
+        .await
+        .unwrap_or_else(|_| status())
 }
 
 #[cfg(test)]

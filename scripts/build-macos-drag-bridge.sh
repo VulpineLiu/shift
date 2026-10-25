@@ -30,6 +30,8 @@ for arch in arm64 x86_64; do
     -O \
     -target "$arch-apple-macosx13.0" \
     -framework AppKit \
+    -framework PDFKit \
+    -framework Vision \
     "$root_dir/native/macos/doc-render.swift" \
     -o "$tmp_dir/doc-render-$arch"
 done

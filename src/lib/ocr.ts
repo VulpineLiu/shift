@@ -20,11 +20,11 @@ async function getWorker(onProgress?: OcrProgress) {
 }
 
 export async function recognizeImage(
-  dataUrl: string,
+  imageSource: string,
   onProgress?: OcrProgress,
 ): Promise<{ text: string; confidence: number }> {
   const worker = await getWorker(onProgress);
-  const result = await worker.recognize(dataUrl);
+  const result = await worker.recognize(imageSource);
   return {
     text: String(result.data.text || "").trim(),
     confidence: Number(result.data.confidence || 0),

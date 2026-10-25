@@ -1,12 +1,19 @@
 use std::{
     collections::BTreeMap,
     fs,
+    io::Read,
     path::{Path, PathBuf},
-    process::Command,
+};
+#[cfg(not(target_os = "macos"))]
+use std::{
+    process::Stdio,
+    time::{Duration, Instant},
 };
 
+use image::GenericImageView;
 use lopdf::{Document, Object, ObjectId};
 use printpdf::{Mm, Op, PdfDocument, PdfPage, RawImage, XObjectTransform};
+use zip::ZipArchive;
 
 use crate::files::unique_output_in;
 
@@ -17,6 +24,34 @@ fn load(path: &Path) -> Result<Document, String> {
 fn page_numbers(doc: &Document) -> Vec<u32> {
     doc.get_pages().keys().copied().collect()
 }
+
+/// The JPEG pages are written by the renderer, so a failure here must be
+/// reported instead of leaving a body-less or zero-page DOCX behind.
+fn remove_on_error<T>(path: &Path, result: Result<T, String>) -> Result<T, String> {
+    if result.is_err() {
+        let _ = fs::remove_file(path);
+    }
+    result
+}
+
+/// Page content is normally only a few KiB even for an image-heavy page: the
+/// pixels live in XObjects, not in the content stream. A much larger stream is
+/// either malformed or a decompression bomb, and must not be inflated without
+/// a bound.
+const MAX_PAGE_CONTENT: usize = 16 * 1024 * 1024;
+/// Poppler opens the document once for a whole batch. The timeout therefore
+/// applies to a lack of new rendered pages, not to the entire document: a
+/// hundred-page scan is slow but healthy, while a renderer stuck on one page
+/// still fails without leaving the UI processing forever.
+#[cfg(not(target_os = "macos"))]
+const PDF_RENDER_STALL_TIMEOUT: Duration = Duration::from_secs(90);
+/// Longest rendered page edge in pixels. Poppler's `-scale-to` is an edge
+/// length, not a total-pixel budget: passing a pixel budget here would allow a
+/// single scan page to become tens of thousands of pixels wide and exhaust
+/// memory. 1800 px keeps Letter-sized pages at roughly 125-220 DPI while
+/// bounding pathological pages before they reach GDI.
+#[cfg(not(target_os = "macos"))]
+const PDF_RENDER_MAX_EDGE: &str = "1800";
 
 pub fn merge(paths: &[PathBuf], output_dir: Option<&Path>) -> Result<PathBuf, String> {
     if paths.len() < 2 {
@@ -187,15 +222,478 @@ pub fn rotate(input: &Path, degrees: i64, output_dir: Option<&Path>) -> Result<P
 pub fn text_of(input: &Path) -> Result<String, String> {
     let document = load(input)?;
     let pages = page_numbers(&document);
-    let text = document
-        .extract_text(&pages)
-        .map_err(|error| format!("Could not extract PDF text: {error}"))?;
+    let mut text = String::new();
+    for page in pages {
+        match document.extract_text_with_limit(&[page], MAX_PAGE_CONTENT) {
+            Ok(page_text) => {
+                text.push_str(&page_text);
+                if !page_text.ends_with('\n') {
+                    text.push('\n');
+                }
+            }
+            Err(lopdf::Error::Decompress(
+                lopdf::DecompressError::MemoryLimitExceeded { .. },
+            )) => {
+                return Err(
+                    "A page in this PDF is too large to extract safely. Convert it to Word to keep the page images."
+                        .into(),
+                )
+            }
+            Err(error) => {
+                return Err(format!("Could not extract PDF text: {error}"));
+            }
+        }
+    }
     if text.trim().is_empty() {
-        return Err(
-            "This PDF has no text layer. Use OCR instead for scanned PDFs.".into(),
-        );
+        return Err("This PDF has no text layer. Use OCR instead for scanned PDFs.".into());
     }
     Ok(text)
+}
+
+/// PDF-to-Word keeps text selectable unless the document actually contains
+/// raster content. Looking at the object graph first avoids running a text
+/// extraction over the large image streams that make scanned PDFs slow.
+pub fn has_embedded_images(input: &Path) -> Result<bool, String> {
+    #[cfg(not(target_os = "macos"))]
+    if let Some(pdfimages) = crate::files::resolve_tool("pdfimages") {
+        if let Ok(has_images) = pdfimages_has_images(&pdfimages, input) {
+            return Ok(has_images);
+        }
+    }
+
+    let document = load(input)?;
+    Ok(document.objects.values().any(|object| {
+        matches!(
+            object,
+            Object::Stream(stream)
+                if is_name(stream.dict.get(b"Subtype"), b"Image")
+        )
+    }))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn pdfimages_has_images(pdfimages: &Path, input: &Path) -> Result<bool, String> {
+    let output = crate::process::output_with_timeout(
+        pdfimages,
+        &["-list", input.to_string_lossy().as_ref()],
+        Duration::from_secs(15),
+    )?;
+    if !output.status.success() {
+        return Err("The PDF image listing command failed.".to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+        line.split_whitespace()
+            .next()
+            .is_some_and(|page| page.parse::<u32>().is_ok())
+    }))
+}
+
+/// Converts a PDF to DOCX by rendering complete pages. Keeping the page bitmap
+/// preserves diagrams, screenshots and vector artwork without first walking
+/// every image stream in the PDF, which is prohibitively slow for scan-heavy
+/// files on Windows. Pages stream into the package one at a time so a long
+/// document does not need a second full-size copy in memory.
+pub fn to_docx(input: &Path, output: &Path) -> Result<(), String> {
+    to_docx_with_progress(input, output, |_, _, _| {})
+}
+
+/// Page-level progress lets the ring say which page is running, so a long scan
+/// does not look frozen even though the work is already off the UI thread.
+pub fn to_docx_with_progress(
+    input: &Path,
+    output: &Path,
+    mut on_progress: impl FnMut(u32, u32, bool),
+) -> Result<(), String> {
+    let _ = fs::remove_file(output);
+    let work = std::env::temp_dir().join(format!("shift-pdf-docx-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&work).map_err(|error| error.to_string())?;
+    let result = (|| {
+        let pages = render_pdf_to_docx_pages(input, &work, &mut on_progress)?;
+        on_progress(pages.len() as u32, pages.len() as u32, true);
+        write_image_docx(input, &pages, output)?;
+        let file = fs::File::open(output)
+            .map_err(|error| format!("The converter did not create a document: {error}"))?;
+        let mut archive = ZipArchive::new(file)
+            .map_err(|error| format!("The Word document is invalid: {error}"))?;
+        archive
+            .by_name("word/document.xml")
+            .map_err(|_| "The Word document has no document body.".to_string())?;
+        Ok(())
+    })();
+    let _ = fs::remove_dir_all(&work);
+    remove_on_error(output, result)
+}
+
+fn render_pdf_to_docx_pages(
+    input: &Path,
+    folder: &Path,
+    on_page: &mut impl FnMut(u32, u32, bool),
+) -> Result<Vec<PathBuf>, String> {
+    let pages = to_docx_page_images(input, folder, on_page)?;
+    if pages.is_empty() {
+        return Err("No PDF pages were rendered.".into());
+    }
+    let mut stream = fs::File::open(&pages[0]).map_err(|error| error.to_string())?;
+    let mut signature = [0_u8; 2];
+    stream
+        .read_exact(&mut signature)
+        .map_err(|error| format!("The PDF renderer returned an unreadable page: {error}"))?;
+    if signature != [0xff, 0xd8] {
+        return Err("The PDF renderer did not return JPEG pages.".into());
+    }
+    Ok(pages)
+}
+
+/// Render the whole document with one renderer process. Poppler writes each
+/// page as it finishes, so progress can be read from the output folder without
+/// rasterising the entire document in memory. Restarting `pdftoppm` once per
+/// page reparses the same image-heavy PDF dozens of times and was the reason a
+/// scan-heavy PDF appeared to hang on Windows.
+fn to_docx_page_images(
+    input: &Path,
+    folder: &Path,
+    on_page: &mut impl FnMut(u32, u32, bool),
+) -> Result<Vec<PathBuf>, String> {
+    fs::create_dir_all(folder).map_err(|error| error.to_string())?;
+    let page_count = pdf_page_count(input)?;
+    if page_count == 0 {
+        return Err("No PDF pages were rendered.".into());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let pages = to_images_in(input, "jpg", folder)?;
+        for page in 1..=pages.len() as u32 {
+            on_page(page, pages.len() as u32, false);
+        }
+        return Ok(pages);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let pdftoppm = renderer_path().ok_or_else(|| {
+            "PDF page rendering needs Poppler (pdftoppm) on Windows and Linux.".to_string()
+        })?;
+        let prefix = folder.join("Page");
+        let mut command = crate::files::background_command(&pdftoppm);
+        command
+            .args([
+                "-jpeg",
+                "-r",
+                "120",
+                "-scale-to",
+                PDF_RENDER_MAX_EDGE,
+                input.to_string_lossy().as_ref(),
+                prefix.to_string_lossy().as_ref(),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("Could not start the PDF renderer: {error}"))?;
+        let mut reported = 0_u32;
+        let mut last_change = Instant::now();
+        // Keep trying to collect the renderer's exit status for a short while
+        // after killing it. On Windows a busy Poppler process can take a moment
+        // to disappear, and blocking forever in `wait` would freeze the worker.
+        let stop = |child: &mut std::process::Child| {
+            let _ = child.kill();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                match child.try_wait() {
+                    Ok(Some(_)) | Err(_) => break,
+                    Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+                }
+            }
+        };
+        loop {
+            let rendered = rendered_jpegs(folder);
+            if rendered.len() as u32 > reported {
+                reported = rendered.len() as u32;
+                last_change = Instant::now();
+                on_page(reported.min(page_count), page_count, false);
+            }
+            match child.try_wait() {
+                Ok(Some(status)) if status.success() => break,
+                Ok(Some(status)) => {
+                    stop(&mut child);
+                    return Err(format!(
+                        "PDF page rendering stopped after {reported} of {page_count} pages ({status})."
+                    ));
+                }
+                Ok(None)
+                    if last_change.elapsed() >= Duration::from_secs(15) && rendered.is_empty() =>
+                {
+                    stop(&mut child);
+                    return Err("PDF rendering did not start within 15 seconds.".into());
+                }
+                Ok(None) if last_change.elapsed() >= PDF_RENDER_STALL_TIMEOUT => {
+                    stop(&mut child);
+                    return Err(format!(
+                        "PDF rendering stopped responding after {reported} of {page_count} pages."
+                    ));
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                Err(error) => {
+                    stop(&mut child);
+                    return Err(format!("Could not monitor the PDF renderer: {error}"));
+                }
+            }
+        }
+        let mut pages = rendered_jpegs(folder);
+        if pages.len() != page_count as usize {
+            return Err(format!(
+                "The PDF renderer returned {} of {page_count} pages.",
+                pages.len()
+            ));
+        }
+        pages.sort_by_key(|path| page_number_in_name(path));
+        if reported < page_count {
+            on_page(page_count, page_count, false);
+        }
+        Ok(pages)
+    }
+}
+
+fn pdf_page_count(input: &Path) -> Result<u32, String> {
+    #[cfg(not(target_os = "macos"))]
+    if let Some(pdfinfo) = crate::files::resolve_tool("pdfinfo") {
+        if let Ok(output) = crate::process::output_with_timeout(
+            pdfinfo,
+            &[input.to_string_lossy().as_ref()],
+            Duration::from_secs(15),
+        ) {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout);
+                if let Some(pages) = parse_pdfinfo_pages(&text) {
+                    return Ok(pages);
+                }
+            }
+        }
+    }
+    Ok(load(input)?.get_pages().len() as u32)
+}
+
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn parse_pdfinfo_pages(output: &str) -> Option<u32> {
+    output.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("Pages:")
+            .and_then(|pages| pages.trim().parse().ok())
+            .filter(|pages| *pages > 0)
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn rendered_jpegs(folder: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(folder) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case("jpg"))
+        })
+        .collect()
+}
+
+fn write_image_docx(input: &Path, pages: &[PathBuf], output: &Path) -> Result<(), String> {
+    use std::io::Write as _;
+    use zip::{write::SimpleFileOptions, ZipWriter};
+
+    let dimensions: Vec<(u32, u32)> = pages
+        .iter()
+        .map(|path| {
+            let reader = image::ImageReader::open(path)
+                .map_err(|error| error.to_string())?
+                .with_guessed_format()
+                .map_err(|error| error.to_string())?;
+            let (width, height) = reader
+                .into_dimensions()
+                .or_else(|_| {
+                    let mut file = fs::File::open(path)?;
+                    let mut bytes = Vec::new();
+                    file.read_to_end(&mut bytes)?;
+                    let image = image::load_from_memory(&bytes)?;
+                    Ok::<_, image::ImageError>(image.dimensions())
+                })
+                .map_err(|error| error.to_string())?;
+            Ok((width, height))
+        })
+        .collect::<Result<_, String>>()?;
+    let first = *dimensions
+        .first()
+        .ok_or_else(|| "No PDF pages were rendered.".to_string())?;
+    let short_side = 11_906.0;
+    let ratio = first.1 as f64 / first.0 as f64;
+    let (page_width, page_height) = if ratio >= 1.0 {
+        let width = short_side as u32;
+        let height = (short_side * ratio).round() as u32;
+        (width, height)
+    } else {
+        let height = short_side as u32;
+        let width = (short_side / ratio).round() as u32;
+        (width, height)
+    };
+
+    let title = input
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("PDF");
+    let mut document = String::with_capacity(pages.len() * 2600);
+    document.push_str(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+         <w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" \
+         xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" \
+         xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" \
+         xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" \
+         xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\"><w:body>",
+    );
+    let orientation = if page_width > page_height {
+        "landscape"
+    } else {
+        "portrait"
+    };
+    let section = format!(
+        "<w:sectPr><w:type w:val=\"nextPage\"/>\
+         <w:pgSz w:w=\"{page_width}\" w:h=\"{page_height}\" w:orient=\"{orientation}\"/>\
+         <w:pgMar w:top=\"0\" w:right=\"0\" w:bottom=\"0\" w:left=\"0\" \
+         w:header=\"0\" w:footer=\"0\" w:gutter=\"0\"/>\
+         <w:cols w:space=\"0\"/></w:sectPr>"
+    );
+    for (index, (width, height)) in dimensions.into_iter().enumerate() {
+        // Leave a fraction of a point for Word's inline-image baseline so a
+        // full-page image cannot spill into and collapse the next section.
+        let usable_height = page_height.saturating_sub(4);
+        let scale = (page_width as f64 / width as f64).min(usable_height as f64 / height as f64);
+        let image_width = (width as f64 * scale).floor().max(1.0) as u64;
+        let image_height = (height as f64 * scale).floor().max(1.0) as u64;
+        let extent_x = image_width * 635;
+        let extent_y = image_height * 635;
+        let relationship = index + 1;
+        let page_number = index + 1;
+        let page_section = if page_number < pages.len() {
+            section.as_str()
+        } else {
+            ""
+        };
+        document.push_str(&format!(
+            "<w:p><w:pPr><w:spacing w:before=\"0\" w:after=\"0\" w:line=\"240\" \
+             w:lineRule=\"auto\"/>{page_section}</w:pPr><w:r><w:drawing>\
+             <wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\">\
+             <wp:extent cx=\"{extent_x}\" cy=\"{extent_y}\"/>\
+             <wp:effectExtent l=\"0\" t=\"0\" r=\"0\" b=\"0\"/>\
+             <wp:docPr id=\"{page_number}\" name=\"Page {page_number}\" \
+             descr=\"PDF page {page_number}\"/>\
+             <wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect=\"1\"/>\
+             </wp:cNvGraphicFramePr><a:graphic>\
+             <a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">\
+             <pic:pic><pic:nvPicPr><pic:cNvPr id=\"{page_number}\" name=\"Page {page_number}\"/>\
+             <pic:cNvPicPr/></pic:nvPicPr><pic:blipFill>\
+             <a:blip r:embed=\"rId{relationship}\"/><a:stretch><a:fillRect/></a:stretch>\
+             </pic:blipFill><pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/>\
+             <a:ext cx=\"{extent_x}\" cy=\"{extent_y}\"/></a:xfrm>\
+             <a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>\
+             </a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"
+        ));
+    }
+    document.push_str(&format!(
+        "<w:sectPr><w:pgSz w:w=\"{page_width}\" w:h=\"{page_height}\" w:orient=\"{}\"/>\
+         <w:pgMar w:top=\"0\" w:right=\"0\" w:bottom=\"0\" w:left=\"0\" \
+         w:header=\"0\" w:footer=\"0\" w:gutter=\"0\"/></w:sectPr></w:body></w:document>",
+        orientation
+    ));
+
+    let mut relationships = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+         <Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">",
+    );
+    for index in 0..pages.len() {
+        relationships.push_str(&format!(
+            "<Relationship Id=\"rId{}\" \
+             Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" \
+             Target=\"media/page-{:03}.jpg\"/>",
+            index + 1,
+            index + 1
+        ));
+    }
+    relationships.push_str("</Relationships>");
+
+    let content_types = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+        <Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\
+        <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\
+        <Default Extension=\"xml\" ContentType=\"application/xml\"/>\
+        <Default Extension=\"jpg\" ContentType=\"image/jpeg\"/>\
+        <Override PartName=\"/word/document.xml\" \
+        ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>\
+        <Override PartName=\"/docProps/core.xml\" \
+        ContentType=\"application/vnd.openxmlformats-package.core-properties+xml\"/>\
+        <Override PartName=\"/docProps/app.xml\" \
+        ContentType=\"application/vnd.openxmlformats-officedocument.extended-properties+xml\"/>\
+        </Types>";
+    let root_relationships = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+        <Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+        <Relationship Id=\"rId1\" \
+        Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" \
+        Target=\"word/document.xml\"/>\
+        <Relationship Id=\"rId2\" \
+        Type=\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties\" \
+        Target=\"docProps/core.xml\"/>\
+        <Relationship Id=\"rId3\" \
+        Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties\" \
+        Target=\"docProps/app.xml\"/></Relationships>";
+    let escaped_title = xml_escape(title);
+    let core = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+         <cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" \
+         xmlns:dc=\"http://purl.org/dc/elements/1.1/\" \
+         xmlns:dcterms=\"http://purl.org/dc/terms/\" \
+         xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\
+         <dc:title>{escaped_title}</dc:title><dc:creator>Shift</dc:creator>\
+         <cp:lastModifiedBy>Shift</cp:lastModifiedBy></cp:coreProperties>"
+    );
+    let app = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+        <Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\">\
+        <Application>Shift</Application></Properties>";
+
+    let file = fs::File::create(output).map_err(|error| error.to_string())?;
+    let mut zip = ZipWriter::new(file);
+    let options = SimpleFileOptions::default();
+    for (name, value) in [
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", root_relationships.as_bytes()),
+        ("word/document.xml", document.as_bytes()),
+        ("word/_rels/document.xml.rels", relationships.as_bytes()),
+        ("docProps/core.xml", core.as_bytes()),
+        ("docProps/app.xml", app.as_bytes()),
+    ] {
+        zip.start_file(name, options)
+            .map_err(|error| error.to_string())?;
+        zip.write_all(value).map_err(|error| error.to_string())?;
+    }
+    for (index, path) in pages.iter().enumerate() {
+        zip.start_file(format!("word/media/page-{:03}.jpg", index + 1), options)
+            .map_err(|error| error.to_string())?;
+        // Copy each rendered page straight into the ZIP. Reading every page
+        // into a Vec first doubles memory use on scans and can stall Windows.
+        let mut page = fs::File::open(path).map_err(|error| error.to_string())?;
+        std::io::copy(&mut page, &mut zip).map_err(|error| error.to_string())?;
+    }
+    zip.finish().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 pub fn extract_text_to(
@@ -331,7 +829,10 @@ fn rewrite_image(document: &mut Document, id: ObjectId) -> bool {
     dict.set("BitsPerComponent", 8_i64);
     // The JPEG is written with the same component count as the source, so the
     // declared colour space still matches the decoded samples.
-    dict.set("ColorSpace", if is_gray { "DeviceGray" } else { "DeviceRGB" });
+    dict.set(
+        "ColorSpace",
+        if is_gray { "DeviceGray" } else { "DeviceRGB" },
+    );
     true
 }
 
@@ -344,7 +845,11 @@ fn decode_image(document: &Document, id: ObjectId) -> Option<(image::DynamicImag
         return None;
     }
     // Masks carry alignment and colour-key semantics we would destroy.
-    for key in [b"SMask".as_slice(), b"Mask".as_slice(), b"Alternates".as_slice()] {
+    for key in [
+        b"SMask".as_slice(),
+        b"Mask".as_slice(),
+        b"Alternates".as_slice(),
+    ] {
         if stream.dict.get(key).is_ok() {
             return None;
         }
@@ -368,7 +873,9 @@ fn decode_image(document: &Document, id: ObjectId) -> Option<(image::DynamicImag
 
     match stream.filters().unwrap_or_default().as_slice() {
         // Already a JPEG: decode, shrink, re-encode.
-        [b"DCTDecode"] => image::load_from_memory(&stream.content).ok().map(|image| (image, is_gray)),
+        [b"DCTDecode"] => image::load_from_memory(&stream.content)
+            .ok()
+            .map(|image| (image, is_gray)),
         // Raw or deflate-packed samples: rebuild from the pixel array.
         [] | [b"FlateDecode"] => {
             let bytes_per_pixel = if is_gray { 1 } else { 3 };
@@ -377,9 +884,11 @@ fn decode_image(document: &Document, id: ObjectId) -> Option<(image::DynamicImag
                 return None;
             }
             let image = if is_gray {
-                image::GrayImage::from_raw(width, height, decoded).map(image::DynamicImage::ImageLuma8)
+                image::GrayImage::from_raw(width, height, decoded)
+                    .map(image::DynamicImage::ImageLuma8)
             } else {
-                image::RgbImage::from_raw(width, height, decoded).map(image::DynamicImage::ImageRgb8)
+                image::RgbImage::from_raw(width, height, decoded)
+                    .map(image::DynamicImage::ImageRgb8)
             }?;
             Some((image, is_gray))
         }
@@ -406,7 +915,7 @@ fn resolve_name(document: &Document, object: Object) -> Option<Vec<u8>> {
 }
 
 #[cfg(target_os = "macos")]
-fn pdf_render_bridge() -> Option<PathBuf> {
+pub(crate) fn pdf_render_bridge() -> Option<PathBuf> {
     let triple = match std::env::consts::ARCH {
         "aarch64" => "aarch64-apple-darwin",
         "x86_64" => "x86_64-apple-darwin",
@@ -427,6 +936,18 @@ fn pdf_render_bridge() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// The executable that provides PDF page rendering for the current platform.
+pub(crate) fn renderer_path() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        pdf_render_bridge()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        crate::files::resolve_tool("pdftoppm")
+    }
 }
 
 pub fn to_images(
@@ -461,17 +982,20 @@ pub fn to_images_in(input: &Path, extension: &str, folder: &Path) -> Result<Vec<
         "jpg" | "jpeg" => ("jpg", None),
         "png" => ("png", None),
         "tif" | "tiff" => ("tif", None),
-        "heic" | "heif" => ("png", Some(if requested == "heif" { "heif" } else { "heic" })),
+        "heic" | "heif" => (
+            "png",
+            Some(if requested == "heif" { "heif" } else { "heic" }),
+        ),
         other => return Err(format!("Unsupported PDF image format: {other}")),
     };
     fs::create_dir_all(folder).map_err(|error| error.to_string())?;
 
     #[cfg(target_os = "macos")]
     {
-        let bridge = pdf_render_bridge().ok_or_else(|| {
+        let bridge = renderer_path().ok_or_else(|| {
             "The PDF renderer is missing. Run pnpm mac:drag-bridge and rebuild.".to_string()
         })?;
-        let status = Command::new(bridge)
+        let status = crate::files::background_command(&bridge)
             .args([
                 input.to_string_lossy().as_ref(),
                 folder.to_string_lossy().as_ref(),
@@ -486,7 +1010,7 @@ pub fn to_images_in(input: &Path, extension: &str, folder: &Path) -> Result<Vec<
 
     #[cfg(not(target_os = "macos"))]
     {
-        let pdftoppm = crate::files::resolve_tool("pdftoppm").ok_or_else(|| {
+        let pdftoppm = renderer_path().ok_or_else(|| {
             "PDF page rendering needs Poppler (pdftoppm) on Windows and Linux.".to_string()
         })?;
         let flag = match extension {
@@ -495,16 +1019,19 @@ pub fn to_images_in(input: &Path, extension: &str, folder: &Path) -> Result<Vec<
             _ => "-png",
         };
         let prefix = folder.join("Page");
-        let status = Command::new(pdftoppm)
-            .args([
+        let status = crate::process::status_with_timeout(
+            pdftoppm,
+            &[
                 flag,
                 "-r",
                 "144",
+                "-scale-to",
+                PDF_RENDER_MAX_EDGE,
                 input.to_string_lossy().as_ref(),
                 prefix.to_string_lossy().as_ref(),
-            ])
-            .status()
-            .map_err(|error| format!("Could not run pdftoppm: {error}"))?;
+            ],
+            const { std::time::Duration::from_secs(60 * 8) },
+        )?;
         if !status.success() {
             return Err("PDF page rendering failed.".into());
         }
@@ -519,7 +1046,7 @@ pub fn to_images_in(input: &Path, extension: &str, folder: &Path) -> Result<Vec<
                     .unwrap_or(false)
             })
             .collect();
-        images.sort();
+        images.sort_by_key(|path| page_number_in_name(path));
         for (index, path) in images.iter().enumerate() {
             let target = folder.join(format!("Page {:03}.{extension}", index + 1));
             if path != &target {
@@ -539,7 +1066,7 @@ pub fn to_images_in(input: &Path, extension: &str, folder: &Path) -> Result<Vec<
                 .unwrap_or(false)
         })
         .collect();
-    images.sort();
+    images.sort_by_key(|path| page_number_in_name(path));
     if images.is_empty() {
         return Err("No PDF pages were rendered.".into());
     }
@@ -556,16 +1083,62 @@ pub fn to_images_in(input: &Path, extension: &str, folder: &Path) -> Result<Vec<
     Ok(images)
 }
 
+fn page_number_in_name(path: &Path) -> u32 {
+    path.file_stem()
+        .and_then(|value| value.to_str())
+        .and_then(|value| {
+            value
+                .rsplit(|character: char| !character.is_ascii_digit())
+                .next()
+        })
+        .and_then(|digits| digits.parse().ok())
+        .unwrap_or(u32::MAX)
+}
+
 pub fn images_to_pdf(paths: &[PathBuf], output_dir: Option<&Path>) -> Result<PathBuf, String> {
+    images_to_pdf_with_progress(paths, output_dir, |_, _| {})
+}
+
+fn image_for_pdf(path: &Path) -> Result<RawImage, String> {
+    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    match RawImage::decode_from_bytes(&bytes, &mut Vec::new()) {
+        Ok(image) => Ok(image),
+        Err(decode_error) => {
+            let converted =
+                std::env::temp_dir().join(format!("shift-pdf-image-{}.png", uuid::Uuid::new_v4()));
+            if let Err(convert_error) = crate::files::system_convert(path, &converted, "png") {
+                return Err(format!(
+                    "Could not decode {} ({decode_error}). {convert_error}",
+                    path.display()
+                ));
+            }
+            let result = fs::read(&converted)
+                .map_err(|error| error.to_string())
+                .and_then(|bytes| {
+                    RawImage::decode_from_bytes(&bytes, &mut Vec::new())
+                        .map_err(|error| format!("Could not decode {}: {error}", path.display()))
+                });
+            let _ = fs::remove_file(converted);
+            result
+        }
+    }
+}
+
+/// Builds a PDF page by page so every document path that already has page
+/// images can report the same progress event as PDF-to-Word.
+pub fn images_to_pdf_with_progress(
+    paths: &[PathBuf],
+    output_dir: Option<&Path>,
+    mut on_page: impl FnMut(u32, u32),
+) -> Result<PathBuf, String> {
     if paths.is_empty() {
         return Err("Select at least one image.".into());
     }
     let mut document = PdfDocument::new("Shift images");
     let mut pages = Vec::new();
-    for path in paths {
-        let bytes = fs::read(path).map_err(|error| error.to_string())?;
-        let image = RawImage::decode_from_bytes(&bytes, &mut Vec::new())
-            .map_err(|error| format!("Could not decode {}: {error}", path.display()))?;
+    let total = paths.len() as u32;
+    for (index, path) in paths.iter().enumerate() {
+        let image = image_for_pdf(path)?;
         let width_mm = image.width as f32 * 25.4 / 300.0;
         let height_mm = image.height as f32 * 25.4 / 300.0;
         let image_id = document.add_image(&image);
@@ -577,6 +1150,7 @@ pub fn images_to_pdf(paths: &[PathBuf], output_dir: Option<&Path>) -> Result<Pat
                 transform: XObjectTransform::default(),
             }],
         ));
+        on_page(index as u32 + 1, total);
     }
     document.with_pages(pages);
     let output = unique_output_in(&paths[0], output_dir, " (images)", "pdf")?;
@@ -631,8 +1205,8 @@ mod tests {
         document.save(path).unwrap();
     }
 
-    /// A one-page PDF embedding an uncompressed RGB image of the given size.
-    fn make_pdf_with_image(path: &Path, width: u32, height: u32) {
+    /// A PDF embedding an uncompressed RGB image on each page.
+    fn make_pdf_with_image(path: &Path, width: u32, height: u32, pages: usize) {
         let mut document = Document::new();
         let pixels: Vec<u8> = (0..width * height)
             .flat_map(|index| {
@@ -651,22 +1225,31 @@ mod tests {
             },
             pixels,
         ));
-        let content = "q 612 0 0 792 0 0 cm /Im0 Do Q".to_string();
-        let content_id =
-            document.add_object(lopdf::Stream::new(dictionary! {}, content.into_bytes()));
-        let page_id = document.add_object(dictionary! {
-            "Type" => "Page",
-            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
-            "Contents" => content_id,
-            "Resources" => dictionary! {
-                "XObject" => dictionary! { "Im0" => image_id },
-            },
-        });
-        let pages_id = document.add_object(dictionary! {
-            "Type" => "Pages",
-            "Kids" => vec![Object::Reference(page_id)],
-            "Count" => 1_i64,
-        });
+        let pages_id = document.new_object_id();
+        let mut kids = Vec::new();
+        for _ in 0..pages {
+            let content = "q 612 0 0 792 0 0 cm /Im0 Do Q".to_string();
+            let content_id =
+                document.add_object(lopdf::Stream::new(dictionary! {}, content.into_bytes()));
+            let page_id = document.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                "Contents" => content_id,
+                "Resources" => dictionary! {
+                    "XObject" => dictionary! { "Im0" => image_id },
+                },
+            });
+            kids.push(Object::Reference(page_id));
+        }
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => kids,
+                "Count" => pages as i64,
+            }),
+        );
         let catalog_id = document.add_object(dictionary! {
             "Type" => "Catalog",
             "Pages" => pages_id,
@@ -703,8 +1286,7 @@ mod tests {
         if pdf_render_bridge().is_none() {
             return;
         }
-        let directory =
-            std::env::temp_dir().join(format!("shift-heic-{}", uuid::Uuid::new_v4()));
+        let directory = std::env::temp_dir().join(format!("shift-heic-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();
         let input = directory.join("doc.pdf");
         make_pdf(&input, 2);
@@ -719,7 +1301,10 @@ mod tests {
                     assert!(brand.starts_with("ftyp"), "not a BMFF container: {brand}");
                     let heic_brand = String::from_utf8_lossy(&bytes[8..12]).to_string();
                     assert!(
-                        matches!(heic_brand.as_str(), "heic" | "heix" | "heim" | "heis" | "mif1" | "msf1"),
+                        matches!(
+                            heic_brand.as_str(),
+                            "heic" | "heix" | "heim" | "heis" | "mif1" | "msf1"
+                        ),
                         "unexpected HEIC brand: {heic_brand}"
                     );
                     assert_ne!(&bytes[0..4], b"\x89PNG", "output must not be a renamed PNG");
@@ -738,12 +1323,16 @@ mod tests {
         fs::create_dir_all(&directory).unwrap();
         let input = directory.join("scan.pdf");
         // 1800 px raw RGB is ~9.7 MB, far above the 1440 px cap.
-        make_pdf_with_image(&input, 1800, 1800);
+        make_pdf_with_image(&input, 1800, 1800, 1);
         assert_eq!(embedded_image(&input), (1800, 1800, None));
 
         let output = compress(&input, None).unwrap();
         let (width, height, filter) = embedded_image(&output);
-        assert_eq!(filter.as_deref(), Some("DCTDecode"), "rewritten image must be JPEG");
+        assert_eq!(
+            filter.as_deref(),
+            Some("DCTDecode"),
+            "rewritten image must be JPEG"
+        );
         assert_eq!(width, i64::from(IMAGE_MAX_SIDE));
         assert_eq!(height, i64::from(IMAGE_MAX_SIDE));
         assert!(
@@ -760,13 +1349,18 @@ mod tests {
             std::env::temp_dir().join(format!("shift-pdf-small-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();
         let input = directory.join("small.pdf");
-        make_pdf_with_image(&input, 64, 48);
+        make_pdf_with_image(&input, 64, 48, 1);
 
         // Below the cap: compress may still shrink the file structurally, but it
         // must not resample or re-encode an image that is already small.
-        let output = compress(&input, None).expect("structural compression should shrink raw pixels");
+        let output =
+            compress(&input, None).expect("structural compression should shrink raw pixels");
         let (width, height, filter) = embedded_image(&output);
-        assert_eq!((width, height), (64, 48), "small images must keep their dimensions");
+        assert_eq!(
+            (width, height),
+            (64, 48),
+            "small images must keep their dimensions"
+        );
         assert_ne!(
             filter.as_deref(),
             Some("DCTDecode"),
@@ -798,8 +1392,7 @@ mod tests {
 
     #[test]
     fn combines_images_into_pdf() {
-        let directory =
-            std::env::temp_dir().join(format!("shift-images-{}", uuid::Uuid::new_v4()));
+        let directory = std::env::temp_dir().join(format!("shift-images-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();
         let image_path = directory.join("image.png");
         image::RgbaImage::from_pixel(64, 48, image::Rgba([240, 90, 36, 255]))
@@ -836,8 +1429,7 @@ mod tests {
         if pdf_render_bridge().is_none() {
             return;
         }
-        let directory =
-            std::env::temp_dir().join(format!("shift-render-{}", uuid::Uuid::new_v4()));
+        let directory = std::env::temp_dir().join(format!("shift-render-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();
         let input = directory.join("render.pdf");
         make_pdf(&input, 2);
@@ -845,5 +1437,204 @@ mod tests {
         assert_eq!(pages.len(), 2);
         assert!(pages.iter().all(|page| page.exists()));
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn converts_heic_images_to_pdf() {
+        let directory =
+            std::env::temp_dir().join(format!("shift-heic-pdf-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let png = directory.join("source.png");
+        let image = image::RgbImage::from_pixel(32, 24, image::Rgb([30, 120, 210]));
+        image.save(&png).unwrap();
+        let heic = directory.join("source.heic");
+        if crate::files::system_convert(&png, &heic, "heic").is_err() {
+            fs::remove_dir_all(directory).unwrap();
+            return;
+        }
+
+        let output = images_to_pdf(&[heic], None).unwrap();
+        assert!(fs::read(&output).unwrap().starts_with(b"%PDF"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn converts_pdf_to_docx_with_rendered_page_images() {
+        use std::{fs::File, io::Read as _};
+
+        if renderer_path().is_none() {
+            return;
+        }
+        let directory = std::env::temp_dir().join(format!("shift-docx-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let input = directory.join("report.pdf");
+        let output = directory.join("report.docx");
+        make_pdf(&input, 2);
+        let mut progress = Vec::new();
+        to_docx_with_progress(&input, &output, |done, total, packaging| {
+            progress.push((done, total, packaging))
+        })
+        .unwrap();
+        assert_eq!(progress, vec![(1, 2, false), (2, 2, false), (2, 2, true)]);
+        let mut archive = ZipArchive::new(File::open(&output).unwrap()).unwrap();
+        let media_pages = (0..archive.len())
+            .filter(|index| {
+                archive
+                    .by_index(*index)
+                    .map(|entry| entry.name().starts_with("word/media/page-"))
+                    .unwrap_or(false)
+            })
+            .count();
+        let mut body = String::new();
+        archive
+            .by_name("word/document.xml")
+            .unwrap()
+            .read_to_string(&mut body)
+            .unwrap();
+        assert!(body.contains("Page"), "{body}");
+        assert!(body.contains("<wp:inline"), "{body}");
+        assert!(
+            !body.contains("w:lineRule=\"exact\""),
+            "full-page images need an automatic line height or Word clips them"
+        );
+        assert!(body.contains("w:lineRule=\"auto\""), "{body}");
+        assert_eq!(body.matches("<w:type w:val=\"nextPage\"/>").count(), 1);
+        assert_eq!(media_pages, 2);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn detects_whether_a_pdf_needs_page_rendering() {
+        let directory =
+            std::env::temp_dir().join(format!("shift-pdf-images-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+
+        let text = directory.join("text.pdf");
+        make_pdf(&text, 1);
+        assert!(!has_embedded_images(&text).unwrap());
+
+        let scan = directory.join("scan.pdf");
+        make_pdf_with_image(&scan, 40, 40, 1);
+        assert!(has_embedded_images(&scan).unwrap());
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn poppler_page_count_is_read_from_pdfinfo() {
+        let listing = "Title: report\nPages:          12\nEncrypted: no\n";
+        assert_eq!(parse_pdfinfo_pages(listing), Some(12));
+        assert_eq!(parse_pdfinfo_pages("Pages: 0\n"), None);
+        assert_eq!(parse_pdfinfo_pages("Title: report\n"), None);
+    }
+
+    #[test]
+    fn image_heavy_pdf_to_docx_completes_without_text_extraction() {
+        use std::time::{Duration, Instant};
+
+        if renderer_path().is_none() {
+            return;
+        }
+        let directory =
+            std::env::temp_dir().join(format!("shift-docx-image-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let input = directory.join("scan.pdf");
+        let output = directory.join("scan.docx");
+        // The page contains no text layer and a large embedded image. A text
+        // extractor would either return nothing or spend its time inflating the
+        // image stream; the page-rendering path must not depend on it.
+        make_pdf_with_image(&input, 900, 1200, 3);
+        let started = Instant::now();
+        let mut progress = Vec::new();
+        to_docx_with_progress(&input, &output, |done, total, packaging| {
+            progress.push((done, total, packaging))
+        })
+        .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "conversion took too long"
+        );
+        assert_eq!(
+            progress,
+            vec![(1, 3, false), (2, 3, false), (3, 3, false), (3, 3, true)]
+        );
+        assert!(output.exists());
+        let archive = ZipArchive::new(fs::File::open(&output).unwrap()).unwrap();
+        assert!(archive
+            .file_names()
+            .any(|name| name.starts_with("word/media/page-")));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn text_extraction_rejects_an_oversized_page_without_inflating_it() {
+        use std::io::Write as _;
+
+        let directory =
+            std::env::temp_dir().join(format!("shift-pdf-bomb-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let input = directory.join("bomb.pdf");
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        encoder
+            .write_all(&vec![0_u8; MAX_PAGE_CONTENT + 1])
+            .unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let mut document = Document::new();
+        let pages_id = document.new_object_id();
+        let content_id = document.add_object(lopdf::Stream::new(
+            dictionary! { "Filter" => "FlateDecode" },
+            compressed,
+        ));
+        let page_id = document.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content_id,
+        });
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => 1_i64,
+            }),
+        );
+        let catalog_id = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        document.trailer.set("Root", catalog_id);
+        document.save(&input).unwrap();
+
+        let error = text_of(&input).unwrap_err();
+        assert!(error.contains("too large"), "{error}");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rendered_page_names_sort_numerically_not_lexically() {
+        let mut pages = vec![
+            PathBuf::from("Page-1.jpg"),
+            PathBuf::from("Page-10.jpg"),
+            PathBuf::from("Page-2.jpg"),
+        ];
+        pages.sort_by_key(|path| page_number_in_name(path));
+        assert_eq!(pages[0], PathBuf::from("Page-1.jpg"));
+        assert_eq!(pages[1], PathBuf::from("Page-2.jpg"));
+        assert_eq!(pages[2], PathBuf::from("Page-10.jpg"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn renderer_limit_is_an_edge_length_not_a_pixel_count() {
+        let edge: u32 = PDF_RENDER_MAX_EDGE.parse().unwrap();
+        // Passing a total-pixel budget to `pdftoppm -scale-to` would allow one
+        // page edge to grow into the tens of thousands and exhaust memory.
+        assert!(
+            (1000..=4096).contains(&edge),
+            "unexpected renderer edge: {edge}"
+        );
     }
 }

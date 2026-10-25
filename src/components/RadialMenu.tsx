@@ -1,7 +1,8 @@
 import { listen } from "@tauri-apps/api/event";
-import { isTauri } from "@tauri-apps/api/core";
+import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
+  CircleAlert,
   Camera,
   Contrast,
   Crop,
@@ -28,19 +29,23 @@ import {
   ScanText,
   Scaling,
   Scissors,
+  Send,
   SlidersHorizontal,
   Tags,
   Video,
   Volume1,
   VolumeX,
+  X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { ComponentType } from "react";
 import { api } from "../lib/api";
+import { conversionFormats } from "../lib/conversionFormats";
 import { recognizeImage } from "../lib/ocr";
 import { basename, formatBytes, recentKind, rememberRecent } from "../lib/utils";
 import type { FileInfo, RadialContext } from "../types";
 import { useI18n } from "../i18n";
+import { SharePanel } from "./SharePanel";
 
 const SIZE = 760;
 const CENTER = SIZE / 2;
@@ -135,31 +140,6 @@ function fileGlyph(kind: FileInfo["kind"]): IconType {
   }
 }
 
-function formatSetFor(kind: FileInfo["kind"], extension: string): string[] {
-  switch (kind) {
-    case "image":
-      return ["PNG", "JPG", "WEBP", "HEIC", "TIFF", "BMP", "GIF", "PDF"];
-    case "video":
-      return ["MP4", "MOV", "GIF", "M4A"];
-    case "audio":
-      return ["M4A", "WAV", "MP3"];
-    case "pdf":
-      return ["PNG", "JPG", "TIFF", "HEIC", "TXT", "MD", "DOCX", "RTF"];
-    case "document":
-      return ["docx", "rtf", "odt", "txt", "md", "html", "htm"].includes(extension)
-        ? ["PDF", "DOCX", "MD", "TXT", "HTML", "RTF", "ODT"]
-        : [];
-    case "presentation":
-      return extension === "pptx" ? ["PDF", "MD"] : [];
-    case "spreadsheet":
-      return ["xlsx", "xls", "xlsb", "ods", "csv", "tsv"].includes(extension)
-        ? ["PDF", "MD"]
-        : [];
-    default:
-      return [];
-  }
-}
-
 function actionWedge(
   id: string,
   label: string,
@@ -167,6 +147,21 @@ function actionWedge(
   format?: string,
 ): Wedge {
   return { id, label, icon, format };
+}
+
+function messageOf(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/^Error:\s*/, "") || "Unknown error";
+}
+
+function waitForPaint() {
+  return new Promise<void>((resolve) => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        window.setTimeout(resolve, 0);
+      });
+    });
+  });
 }
 
 export function RadialMenu() {
@@ -177,11 +172,24 @@ export function RadialMenu() {
   const [pointer, setPointer] = useState<Point | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  // Files waiting for a peer to be picked; the ring stays open behind the panel.
+  const [sharePaths, setSharePaths] = useState<string[] | null>(null);
+  const sharePathsRef = useRef<string[] | null>(null);
+  // True once the send panel has reported an outcome; the ring then stays open
+  // just long enough to show the message.
+  const shareNoticeRef = useRef(false);
   const statusTimer = useRef<number | null>(null);
   const hoveredRef = useRef<number | null>(null);
   const ringRef = useRef<Ring>("actions");
   const contextRef = useRef<RadialContext | null>(null);
   const wedgesRef = useRef<Wedge[]>([]);
+  // Whether WebView2's OLE drag has contributed to the current Windows gesture.
+  const oleSeenRef = useRef(false);
+  // Whether OLE finished this gesture (drop or leave), so a release-based safety
+  // net knows to stand down. Cleared when the poller opens the next ring.
+  const oleSettledRef = useRef(false);
+  const releaseHideRef = useRef<number | null>(null);
 
   useEffect(() => {
     ringRef.current = ring;
@@ -194,7 +202,7 @@ export function RadialMenu() {
   }, [context]);
 
   const kind = context?.fileInfo[0]?.kind ?? "other";
-  const formats = formatSetFor(kind, context?.fileInfo[0]?.extension ?? "");
+  const formats = conversionFormats(kind, context?.fileInfo[0]?.extension ?? "");
 
   const actions: Wedge[] =
     kind === "image"
@@ -300,7 +308,9 @@ export function RadialMenu() {
               : [
                   actionWedge("open", t("open"), ExternalLink),
                   actionWedge("reveal", t("reveal"), FolderOpen),
-                ];
+              ];
+  // Sending works for any file, so the wedge joins every type's tool ring.
+  toolWedges.push(actionWedge("send", t("sendShort"), Send));
   const wedges =
     ring === "formats" ? formatWedges : ring === "tools" ? toolWedges : actions;
   wedgesRef.current = wedges;
@@ -309,20 +319,38 @@ export function RadialMenu() {
 
   function flash(message: string, duration = 1600) {
     if (statusTimer.current) window.clearTimeout(statusTimer.current);
+    setError(null);
     setStatus(message);
     statusTimer.current = window.setTimeout(() => setStatus(null), duration);
   }
 
+  function showError(reason: unknown) {
+    if (statusTimer.current) window.clearTimeout(statusTimer.current);
+    setStatus(null);
+    setError(messageOf(reason));
+  }
+
   function applyContext(next: RadialContext | null) {
     if (!next) return;
+    if (statusTimer.current) window.clearTimeout(statusTimer.current);
+    setStatus(null);
+    setError(null);
+    setSharePaths(null);
+    sharePathsRef.current = null;
+    shareNoticeRef.current = false;
     setContext(next);
+    contextRef.current = next;
     let nextRing: Ring =
       next.mode === "formats" ? "formats" : next.mode === "tools" ? "tools" : "actions";
     // Opening the format ring straight from the home panel must never land on an
     // empty wheel, so unsupported types fall back to their action list.
     if (
+      next.files.length > 0 &&
       nextRing === "formats" &&
-      formatSetFor(next.fileInfo[0]?.kind ?? "other", next.fileInfo[0]?.extension ?? "").length === 0
+      conversionFormats(
+        next.fileInfo[0]?.kind ?? "other",
+        next.fileInfo[0]?.extension ?? "",
+      ).length === 0
     ) {
       nextRing = "actions";
     }
@@ -337,9 +365,8 @@ export function RadialMenu() {
     let disposed = false;
     const unlisteners: Array<() => void> = [];
     if (!isTauri()) {
-      const demoMode = new URLSearchParams(window.location.search).get("mode") === "actions"
-        ? "actions"
-        : "formats";
+      const requested = new URLSearchParams(window.location.search).get("mode");
+      const demoMode = requested === "actions" || requested === "tools" ? requested : "formats";
       applyContext({
         files: ["/Users/demo/tangerine tree.png"],
         fileInfo: [
@@ -360,10 +387,33 @@ export function RadialMenu() {
     void api.getRadialContext().then((next) => {
       if (!disposed) applyContext(next);
     });
-    void listen<RadialContext>("radial://show", (event) => applyContext(event.payload)).then(
-      (unlisten) => unlisteners.push(unlisten),
-    );
+    void listen<RadialContext>("radial://show", (event) => {
+      // The poller opens a fresh ring at the start of every gesture, which is the
+      // boundary for "has OLE said anything about this drag yet?".
+      if (event.payload.dragging) {
+        oleSeenRef.current = false;
+        oleSettledRef.current = false;
+      }
+      applyContext(event.payload);
+    }).then((unlisten) => unlisteners.push(unlisten));
+    // The native poller saw the mouse button go up. OLE reports a drop *after*
+    // release, so this must only close a ring that OLE never touched; otherwise a
+    // real drop would be hidden before it is delivered.
+    void listen("radial://dragend", () => {
+      if (!contextRef.current?.dragging || oleSettledRef.current) return;
+      // A picker is open on top of the ring; the gesture ending must not close it.
+      if (sharePathsRef.current) return;
+      // OLE never spoke: nothing is coming, so close immediately. If it did speak,
+      // give it a moment to deliver the pending drop before assuming it went silent.
+      const delay = oleSeenRef.current ? 400 : 0;
+      if (releaseHideRef.current) window.clearTimeout(releaseHideRef.current);
+      releaseHideRef.current = window.setTimeout(() => {
+        releaseHideRef.current = null;
+        if (!oleSettledRef.current && contextRef.current?.dragging) void api.hideRadial();
+      }, delay);
+    }).then((unlisten) => unlisteners.push(unlisten));
     void listen<RadialEventPayload>("radial://move", (event) => {
+      if (sharePathsRef.current) return;
       setPointer({ x: event.payload.x, y: event.payload.y });
       const count = wedgesRef.current.length;
       if (count === 0) return;
@@ -374,6 +424,9 @@ export function RadialMenu() {
       }
     }).then((unlisten) => unlisteners.push(unlisten));
     void listen<RadialEventPayload>("radial://drop", (event) => {
+      // The picker already opened during the drag; the release that ends the
+      // gesture must not be read as a wedge choice.
+      if (sharePathsRef.current) return;
       const activeRing = ringRef.current;
       const activeWedges = wedgesRef.current;
       const index = sectorAt(event.payload.x, event.payload.y, Math.max(activeWedges.length, 1));
@@ -401,9 +454,25 @@ export function RadialMenu() {
       disposed = true;
       unlisteners.forEach((unlisten) => unlisten());
       if (statusTimer.current) window.clearTimeout(statusTimer.current);
+      if (releaseHideRef.current) window.clearTimeout(releaseHideRef.current);
     };
     // Geometry is recomputed from the current catalog; setup only needs to run once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      // Finder owns Escape during its own drag session; only the ring opened
+      // from a completed drop on the main panel should handle it.
+      if (event.key !== "Escape" || contextRef.current?.dragging) return;
+      // While the send picker is open its own Escape handler owns the key.
+      if (sharePathsRef.current) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void api.hideRadial();
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
   useEffect(() => {
@@ -414,11 +483,16 @@ export function RadialMenu() {
       .onDragDropEvent(async (event) => {
         if (disposed) return;
         const payload = event.payload;
+        // OLE owns this gesture now, so the poller's release signal must not
+        // hide the ring: OLE reports the drop after the button is already up.
+        oleSeenRef.current = true;
         if (payload.type === "leave") {
-          void api.hideRadial();
+          oleSettledRef.current = true;
+          if (!sharePathsRef.current) void api.hideRadial();
           return;
         }
         if (payload.type === "over") {
+          if (sharePathsRef.current) return;
           const scale = window.devicePixelRatio || 1;
           const count = wedgesRef.current.length;
           if (count > 0) {
@@ -435,12 +509,22 @@ export function RadialMenu() {
           return;
         }
         if (!payload.paths.length) {
-          void api.hideRadial();
+          oleSettledRef.current = true;
+          if (!sharePathsRef.current) void api.hideRadial();
           return;
         }
+        // A drop is terminal even while inspectFiles is still running. Mark it
+        // before awaiting so the release safety timer cannot hide the ring.
+        if (payload.type === "drop") oleSettledRef.current = true;
+        // The picker opened mid-gesture, so this drop has no wedge to run.
+        if (sharePathsRef.current) return;
         try {
           const fileInfo = await api.inspectFiles(payload.paths);
-          if (disposed || fileInfo.length === 0) return;
+          if (disposed) return;
+          if (fileInfo.length === 0) {
+            oleSettledRef.current = true;
+            return;
+          }
           const mode: "formats" | "tools" = ringRef.current === "formats" ? "formats" : "tools";
           const next: RadialContext = {
             files: payload.paths,
@@ -499,16 +583,28 @@ export function RadialMenu() {
     }
     setBusy(true);
     flash(t("processing"), 12000);
+    await waitForPaint();
     try {
-      const outcome = await api.performFileAction("convert", current.files, format.toLowerCase());
+      const outcome = await api.performFileAction(
+        "convert",
+        current.files,
+        format.toLowerCase(),
+        (done, total, packaging) => {
+          flash(
+            packaging
+              ? t("fileActionPackaging")
+              : t("fileActionPageProgress", { done, total }),
+            120000,
+          );
+        },
+      );
       for (const output of outcome.outputs) {
         rememberRecent({ path: output, kind: recentKind(output), at: Date.now() });
       }
       flash(outcome.message || t("saved"), 900);
       window.setTimeout(() => void api.hideRadial(), 850);
     } catch (error) {
-      flash(String(error), 2600);
-      window.setTimeout(() => void api.hideRadial(), 2600);
+      showError(error);
     } finally {
       setBusy(false);
     }
@@ -517,8 +613,14 @@ export function RadialMenu() {
   async function executeAction(id: string) {
     const current = contextRef.current;
     if (!current || busy) return;
+    if (id === "send") {
+      setSharePaths(current.files);
+      sharePathsRef.current = current.files;
+      shareNoticeRef.current = false;
+      return;
+    }
     if (id === "convert") {
-      const activeFormats = formatSetFor(
+      const activeFormats = conversionFormats(
         current.fileInfo[0]?.kind ?? "other",
         current.fileInfo[0]?.extension ?? "",
       );
@@ -536,30 +638,34 @@ export function RadialMenu() {
 
     if (id === "pdfOcr") {
       setBusy(true);
+      flash(t("processing"), 120000);
+      await waitForPaint();
       try {
         const pages = await api.renderPdfPages(current.files[0]);
         const chunks: string[] = [];
-        for (let index = 0; index < pages.length; index += 1) {
-          flash(
-            `${t("ocrRunning")} ${index + 1}/${pages.length}`,
-            120000,
-          );
-          const dataUrl = await api.readFileDataUrl(pages[index]);
-          const result = await recognizeImage(dataUrl, (progress) => {
+        try {
+          for (let index = 0; index < pages.length; index += 1) {
             flash(
-              `${t("ocrRunning")} ${index + 1}/${pages.length} · ${Math.round(progress * 100)}%`,
+              `${t("ocrRunning")} ${index + 1}/${pages.length}`,
               120000,
             );
-          });
-          chunks.push(`--- Page ${index + 1} ---\n${result.text}`);
+            const result = await recognizeImage(convertFileSrc(pages[index]), (progress) => {
+              flash(
+                `${t("ocrRunning")} ${index + 1}/${pages.length} · ${Math.round(progress * 100)}%`,
+                120000,
+              );
+            });
+            chunks.push(`--- Page ${index + 1} ---\n${result.text}`);
+          }
+        } finally {
+          void api.cleanupPdfPages(pages).catch(() => undefined);
         }
         const output = await api.saveTextNear(current.files[0], chunks.join("\n\n"), " (OCR)");
         rememberRecent({ path: output, kind: "text", at: Date.now() });
         await api.openInEditor(output);
         void api.hideRadial();
       } catch (error) {
-        flash(String(error), 3200);
-        window.setTimeout(() => void api.hideRadial(), 3200);
+        showError(error);
       } finally {
         setBusy(false);
       }
@@ -581,6 +687,7 @@ export function RadialMenu() {
     if (id === "extractAudio" || id === "plain") {
       setBusy(true);
       flash(t("processing"), 12000);
+      await waitForPaint();
       try {
         const outcome = await api.performFileAction(
           "convert",
@@ -593,8 +700,7 @@ export function RadialMenu() {
         flash(outcome.message || t("saved"), 900);
         window.setTimeout(() => void api.hideRadial(), 850);
       } catch (error) {
-        flash(String(error), 2600);
-        window.setTimeout(() => void api.hideRadial(), 2600);
+        showError(error);
       } finally {
         setBusy(false);
       }
@@ -625,6 +731,7 @@ export function RadialMenu() {
     }
     setBusy(true);
     flash(t("processing"), 12000);
+    await waitForPaint();
     try {
       const outcome = await api.performFileAction(action, current.files);
       for (const output of outcome.outputs) {
@@ -633,8 +740,7 @@ export function RadialMenu() {
       flash(outcome.message || t("saved"), 900);
       window.setTimeout(() => void api.hideRadial(), 850);
     } catch (error) {
-      flash(String(error), 2600);
-      window.setTimeout(() => void api.hideRadial(), 2600);
+      showError(error);
     } finally {
       setBusy(false);
     }
@@ -655,6 +761,24 @@ export function RadialMenu() {
       className={`radial-stage ${ring === "formats" ? "is-formats" : ""}`}
       onPointerDown={(event) => {
         if (event.target === event.currentTarget) void api.hideRadial();
+      }}
+      onPointerMove={(event) => {
+        if (context.dragging || busy || sharePaths) return;
+        const bounds = event.currentTarget.getBoundingClientRect();
+        const next = sectorAt(
+          event.clientX - bounds.left,
+          event.clientY - bounds.top,
+          wedgeCount,
+        );
+        if (next !== hoveredRef.current) {
+          hoveredRef.current = next;
+          setHovered(next);
+        }
+      }}
+      onPointerLeave={() => {
+        if (context.dragging) return;
+        hoveredRef.current = null;
+        setHovered(null);
       }}
     >
       <div className="radial-ambient" />
@@ -748,7 +872,7 @@ export function RadialMenu() {
         );
       })}
 
-      <div className="radial-center">
+      <div className={`radial-center ${busy ? "is-busy" : ""} ${error ? "has-error" : ""}`}>
         {context.fileInfo.length > 1 ? (
           <div
             className={`radial-file-stack stack-${Math.min(context.fileInfo.length, 3)}`}
@@ -782,6 +906,29 @@ export function RadialMenu() {
               : "—"}
           </div>
         </div>
+        {busy ? (
+          <div
+            className="radial-progress"
+            role="status"
+            aria-live="polite"
+            aria-label={status || t("processing")}
+          >
+            <span className="radial-progress-ring" aria-hidden="true" />
+            <div className="radial-progress-content">
+              <LoaderCircle size={22} className="spin" aria-hidden="true" />
+              <strong>{status || t("processing")}</strong>
+            </div>
+          </div>
+        ) : error ? (
+          <div className="radial-error" role="alert">
+            <CircleAlert size={24} strokeWidth={1.8} aria-hidden="true" />
+            <strong>{t("actionFailed")}</strong>
+            <span className="radial-error-message">{error}</span>
+            <button type="button" onClick={() => setError(null)} aria-label={t("close")}>
+              <X size={14} />
+            </button>
+          </div>
+        ) : null}
       </div>
 
       {context.dragging && pointer && first?.preview ? (
@@ -797,14 +944,9 @@ export function RadialMenu() {
         </div>
       ) : null}
 
-      {busy || status || context.dragging ? (
+      {!error && !busy && !sharePaths && (status || context.dragging) ? (
         <div className="radial-hint">
-          {busy ? (
-            <>
-              <LoaderCircle size={15} className="spin" />
-              {status || t("processing")}
-            </>
-          ) : hoveredWedge ? (
+          {hoveredWedge ? (
             ring === "formats" ? (
               <>
                 {t("chooseFormat")}
@@ -825,6 +967,24 @@ export function RadialMenu() {
             t("chooseAction")
           )}
         </div>
+      ) : null}
+
+      {sharePaths ? (
+        <SharePanel
+          paths={sharePaths}
+          onClose={() => {
+            setSharePaths(null);
+            sharePathsRef.current = null;
+            // A result is flashed inside the ring, so the ring has to survive
+            // long enough to show it; a plain close dismisses at once.
+            const delay = shareNoticeRef.current ? 2_800 : 0;
+            window.setTimeout(() => void api.hideRadial(), delay);
+          }}
+          onNotice={(message) => {
+            shareNoticeRef.current = true;
+            flash(message, 2_600);
+          }}
+        />
       ) : null}
     </div>
   );

@@ -37,7 +37,7 @@
         "transparent": true,
         "alwaysOnTop": true,
         "skipTaskbar": true,
-        "visible": false,
+        "visible": true,
         "focus": false,
         "shadow": false,
         "acceptFirstMouse": true
@@ -65,6 +65,24 @@
         "resizable": false,
         "decorations": false,
         "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "focus": false,
+        "shadow": false,
+        "acceptFirstMouse": true
+      },
+      {
+        "label": "pin",
+        "title": "Shift Pin",
+        "url": "index.html?view=pin",
+        "width": 360,
+        "height": 360,
+        "minWidth": 120,
+        "minHeight": 80,
+        "resizable": true,
+        "decorations": false,
+        "transparent": false,
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "visible": false,
@@ -111,7 +129,9 @@
     ],
     "macOS": {
       "minimumSystemVersion": "13.0",
-      "infoPlist": "Info.plist"
+      "infoPlist": "Info.plist",
+      "signingIdentity": "Shift Local Signing",
+      "hardenedRuntime": false
     }
   }
 }

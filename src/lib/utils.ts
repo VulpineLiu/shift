@@ -7,7 +7,7 @@ export function basename(path: string): string {
 
 export const IS_MAC = /Mac/i.test(navigator.platform) || /Mac OS X/i.test(navigator.userAgent);
 export const OPTION_LABEL = IS_MAC ? "⌥" : "Alt";
-export const MODIFIER_NAME = IS_MAC ? "Option" : "Ctrl";
+export const MODIFIER_NAME = IS_MAC ? "Option" : "Alt";
 
 export function dirname(path: string): string {
   const normalized = path.replace(/\\/g, "/");
@@ -84,6 +84,17 @@ export function normalizeSelection(
       height: height / viewportHeight,
     },
   };
+}
+
+/** Rust passes window arguments hex-encoded, so they survive a URL query. */
+export function decodeHexParam(value: string | null): string | null {
+  if (!value || value.length % 2 !== 0 || !/^[0-9a-f]+$/i.test(value)) return null;
+  try {
+    const bytes = new Uint8Array((value.match(/../g) ?? []).map((pair) => parseInt(pair, 16)));
+    return new TextDecoder().decode(bytes);
+  } catch {
+    return null;
+  }
 }
 
 export interface RecentItem {
