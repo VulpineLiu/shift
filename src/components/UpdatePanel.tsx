@@ -1,10 +1,11 @@
 import {
   Check,
-  Monitor,
   Download,
   LoaderCircle,
+  Monitor,
   PackageOpen,
   RefreshCw,
+  Rss,
   ShieldCheck,
   Sparkle,
   X,
@@ -31,6 +32,8 @@ export interface UpdateSystemInfo {
   platform: string;
   osVersion: string;
   architecture: string;
+  /** Version of the copy the user is looking at, so the header needs no check. */
+  appVersion: string;
 }
 
 /** Rust reports `std::env::consts::ARCH`; the channel names the same thing differently. */
@@ -50,8 +53,19 @@ export function UpdatePanel({ feedUrl, autoCheck, onAutoCheckChange, system }: P
   const { t } = useI18n();
   // One state machine shared with any other view of the channel, driven by the
   // events Rust already broadcasts, so two views cannot offer different actions.
-  const { status, checking, downloading, installing, progress, percent, check, download, install, clear } =
-    useUpdateFlow();
+  const {
+    status,
+    checking,
+    downloading,
+    installing,
+    installError,
+    progress,
+    percent,
+    check,
+    download,
+    install,
+    clear,
+  } = useUpdateFlow();
 
   const verified = status?.state === "ready";
   // Rust reports the key it resolved; the panel only repeats it.
@@ -61,6 +75,48 @@ export function UpdatePanel({ feedUrl, autoCheck, onAutoCheckChange, system }: P
 
   return (
     <section className="home-settings-section">
+      {/* The two facts an update answer has to be read against come first: which
+          machine and which Shift version is asking, then where updates come from.
+          Both precede the Updates heading so a screenshot of this panel already
+          says what was upgraded and from where. */}
+      <div className="update-meta">
+        <div className="update-meta-line">
+          <Monitor size={13} />
+          <span className="update-meta-label">{t("updateSystem")}</span>
+          {system ? (
+            <span className="update-system-host">
+              <strong>{system.osVersion || system.platform}</strong>
+              <small>{architectureLabel(system.architecture)}</small>
+              <em>Shift {system.appVersion}</em>
+            </span>
+          ) : (
+            <span className="update-system-pending">{t("updateSystemPending")}</span>
+          )}
+          {artifactKey ? (
+            <span className="update-system-key">
+              {t("updateSystemArtifact", { key: artifactKey })}
+            </span>
+          ) : status && status.state === "unavailable" ? (
+            <span className="update-system-key is-unknown">
+              {t("updateSystemArtifactUnknown")}
+            </span>
+          ) : null}
+        </div>
+        <div className="update-meta-line">
+          <Rss size={13} />
+          <span className="update-meta-label">{t("updateFeed")}</span>
+          {/* Only a status backed by a manifest may claim anything about trust: an
+              errored check has no manifest to have verified. */}
+          {status && status.state !== "error" ? (
+            <span className={`update-trust is-${status.signed ? "signed" : "unsigned"}`}>
+              <ShieldCheck size={11} />
+              {t(status.signed ? "updateSigned" : "updateUnsigned")}
+            </span>
+          ) : null}
+          <code title={feedUrl}>{feedUrl || t("updateFeedNone")}</code>
+        </div>
+      </div>
+
       <div className="runtime-section-head">
         <div className="home-section-title">
           <Sparkle size={15} />
@@ -76,44 +132,7 @@ export function UpdatePanel({ feedUrl, autoCheck, onAutoCheckChange, system }: P
         </button>
       </div>
 
-      <div className="update-feed">
-        <span className="update-feed-label">{t("updateFeed")}</span>
-        <code title={feedUrl}>{feedUrl || t("updateFeedNone")}</code>
-        {/* Only a status backed by a manifest may claim anything about trust: an
-            errored check has no manifest to have verified. */}
-        {status && status.state !== "error" ? (
-          <span className={`update-trust is-${status.signed ? "signed" : "unsigned"}`}>
-            <ShieldCheck size={11} />
-            {t(status.signed ? "updateSigned" : "updateUnsigned")}
-          </span>
-        ) : null}
-      </div>
-
-      {/* Which artifact the feed serves, and whether it can be installed at all,
-          are both decided by the host. Saying it here is what makes an "no artifact
-          for this platform" answer explain itself. */}
-      <div className="update-system">
-        <Monitor size={13} />
-        <span className="update-system-label">{t("updateSystem")}</span>
-        {system ? (
-          <span className="update-system-host">
-            <strong>{system.osVersion || system.platform}</strong>
-            <small>{architectureLabel(system.architecture)}</small>
-          </span>
-        ) : (
-          <span className="update-system-pending">{t("updateSystemPending")}</span>
-        )}
-        {artifactKey ? (
-          <span className="update-system-key">
-            {t("updateSystemArtifact", { key: artifactKey })}
-          </span>
-        ) : status && status.state === "unavailable" ? (
-          <span className="update-system-key is-unknown">{t("updateSystemArtifactUnknown")}</span>
-        ) : null}
-      </div>
-
       <div className="update-status-row">
-        <strong>{status?.currentVersion ?? "-"}</strong>
         {available && status ? (
           <span className="update-arrow">
             <span className="update-new">
@@ -172,6 +191,14 @@ export function UpdatePanel({ feedUrl, autoCheck, onAutoCheckChange, system }: P
         </div>
       ) : null}
 
+      {/* An install that could not run leaves the verified download in place, so it
+          is reported beside the button instead of rewriting the status. */}
+      {installError ? (
+        <div className="runtime-error">
+          <span>{installError}</span>
+        </div>
+      ) : null}
+
       <div className="update-actions">
         {available && !verified ? (
           <button className="runtime-install" onClick={() => void download()} disabled={downloading}>
@@ -182,7 +209,7 @@ export function UpdatePanel({ feedUrl, autoCheck, onAutoCheckChange, system }: P
         {verified ? (
           <button className="runtime-install" onClick={() => void install()} disabled={installing}>
             {installing ? <LoaderCircle size={12} className="spin" /> : <Check size={12} />}
-            {t("updateInstall")}
+            {installing ? t("updateInstalling") : t("updateInstall")}
           </button>
         ) : null}
         {verified ? (

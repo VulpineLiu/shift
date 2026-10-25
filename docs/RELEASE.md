@@ -180,7 +180,8 @@ guessing at one.
    installed: the byte length must equal the manifest's `size`, and the recomputed SHA256
    must equal the manifest's `sha256`. A mismatch deletes the file and reports the error,
    so a truncated or swapped installer never reaches the installer step.
-4. **Install** runs the verified artifact; **Discard** removes it. When an update is
+4. **Install & relaunch** applies the verified artifact and restarts Shift on it, as
+   described in the next section; **Discard** removes the download. When an update is
    available the tray menu gains a row that opens Settings on the Updates tab.
 
 Manifest `schema` is checked, and a newer schema than this build understands is refused
@@ -188,6 +189,41 @@ instead of being parsed optimistically. Unknown platform keys are ignored, so th
 manifest can name a platform an older app has never heard of. The Updates panel always
 states which of the two properties the current feed satisfies, so an unsigned channel
 never looks signed.
+
+## Applying an update
+
+Neither operating system lets a running program replace its own executable, so the work
+belongs to a helper that outlives the app. `update_install` writes a script into the
+download folder, starts it detached, and exits about half a second later; the script waits
+for that pid to disappear and only then touches the installed copy.
+
+| Platform | What the helper does |
+| --- | --- |
+| macOS | Mounts the downloaded `.dmg`, `ditto`s the new bundle next to the old one, swaps them with two `mv` calls, removes the quarantine flag, detaches the image, and `open`s the result |
+| Windows | Waits for `shift.exe` to leave the process table, runs the installer with `/S`, then starts the `shift.exe` the installer wrote |
+| Linux, and a macOS binary run outside a bundle | Nothing is replaced; the artifact is opened instead, and the panel says so |
+
+Both scripts are written so a failure cannot end with Shift simply closed: every macOS
+failure path still `open`s the bundle it had, and the swap is `move aside, move in`, so a
+copy that fails halfway leaves the previous version where it was. Before the handoff
+starts, macOS writes a probe file next to the bundle — a root-owned copy in
+`/Applications` is reported as "open the downloaded installer yourself" rather than
+quietly quitting on an update that could not be applied.
+
+The Windows installer is the same one a user runs by hand, so the update path cannot drift
+from the manual one. Because the silent install comes from Shift itself, `${Silent}` skips
+the interactive "Shift is running, close it?" box: the app already told the user it is
+about to restart, and a box nobody can answer would abort the update.
+
+This is not a delta update and not a signature check on the running binary: the same
+SHA256 gate that guards a manual install is the only integrity gate, and the manifest
+signature rules in "Signing the channel" apply unchanged.
+
+Replacing the bundle gives it a new code-signing hash, and macOS keys permissions such as
+Screen Recording to that hash. A release signed with the same identity as the copy it
+replaces normally keeps its approvals; a locally signed build, where every build has its
+own identity, can ask again after an update. That is the same consequence a manual
+reinstall has, and it is why the notarized-build item in the roadmap is worth closing.
 
 ## Trust boundary
 
@@ -230,13 +266,13 @@ test, which is the proof that the check is real and not a pass-through.
 
 Checked against the live `releases` branch of this repository:
 
-Version **0.1.1**, checked by downloading each artifact back from the raw endpoint rather
+Version **0.1.2**, checked by downloading each artifact back from the raw endpoint rather
 than trusting the local copy:
 
 | Key | Artifact | Verified from the remote |
 | --- | --- | --- |
-| `macos` | `Shift-macOS-universal.dmg` (55,479,751 B) | bytes downloaded, SHA256 matches the manifest |
-| `windows` | `Shift-Setup-0.1.1-win-x64.exe` (24,545,040 B) | bytes downloaded, SHA256 matches the manifest |
+| `macos` | `Shift-macOS-universal.dmg` (55,509,300 B) | bytes downloaded, SHA256 matches the manifest |
+| `windows` | `Shift-Setup-0.1.2-win-x64.exe` (24,524,080 B) | bytes downloaded, SHA256 matches the manifest |
 | `windows-arm64` | not published | by choice — see "Supported release targets" |
 | `linux` | not published | by choice: Linux is a build target here, not a shipped product |
 

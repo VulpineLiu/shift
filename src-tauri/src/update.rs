@@ -688,9 +688,163 @@ pub async fn update_download(app: AppHandle) -> Result<UpdateStatus, String> {
     .map_err(|error| format!("Update download failed: {error}"))?
 }
 
-/// Hand the verified installer to the system: mount the disk image on macOS, start
-/// the installer on Windows, open the AppImage or package on Linux. The app never
-/// replaces itself in place.
+/// The `.app` bundle a macOS build is running from, or None when the binary was
+/// started outside a bundle (a dev build, a raw `target/debug` run). The shape is
+/// fixed by the bundle layout: `<Name>.app/Contents/MacOS/<name>`.
+fn bundle_path(exe: &Path) -> Option<PathBuf> {
+    let contents = exe.parent()?.parent()?;
+    let bundle = contents.parent()?;
+    if contents.file_name()? != "Contents" {
+        return None;
+    }
+    bundle
+        .extension()
+        .filter(|ext| ext.eq_ignore_ascii_case("app"))?;
+    Some(bundle.to_path_buf())
+}
+
+#[cfg(target_os = "macos")]
+#[cfg(target_os = "macos")]
+/// Whether this copy can be replaced where it sits. The handoff moves the bundle
+/// aside and moves a new one in, which needs write access to the folder holding it
+/// rather than to the bundle: a copy in a root-owned folder is not replaceable, and
+/// finding that out after quitting would leave the user with a closed app and an
+/// update that did not happen.
+fn can_replace(bundle: &Path) -> bool {
+    let parent = match bundle.parent() {
+        Some(parent) => parent,
+        None => return false,
+    };
+    let probe = parent.join(format!(".shift-replace-{}", std::process::id()));
+    match fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
+/// The macOS handoff: wait for this process to quit, then replace the bundle with
+/// the one inside the downloaded disk image and open the new copy. Written as a
+/// script because the copy can only happen once this process is gone.
+///
+/// Every failure path ends with `open` on the bundle, so a handoff that cannot
+/// finish leaves the previous copy running rather than leaving Shift closed.
+fn macos_handoff(pid: u32, image: &Path, bundle: &Path, log: &Path) -> String {
+    format!(
+        r#"#!/bin/sh
+pid="{pid}"
+image="{image}"
+bundle="{bundle}"
+log="{log}"
+while kill -0 "$pid" 2>/dev/null; do sleep 0.2; done
+mount="$TMPDIR/Shift Updates/mount.$$"
+[ -n "$TMPDIR" ] || mount="/tmp/Shift Updates/mount.$$"
+mkdir -p "${{mount%/*}}"
+if ! /usr/bin/hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$image" >>"$log" 2>&1; then
+  echo "mount failed" >>"$log"
+  /usr/bin/open "$bundle"
+  exit 1
+fi
+status=0
+if ! /usr/bin/ditto "$mount/Shift.app" "$bundle.new" >>"$log" 2>&1; then
+  status=1
+else
+  # A DMG fetched by a browser carries a quarantine flag, and an app copied out of
+  # one is re-assessed on next launch. This build is signed but not notarized, so
+  # drop the flag the same way a manual drag out of the image would.
+  /usr/bin/xattr -dr com.apple.quarantine "$bundle.new" 2>/dev/null
+  if mv "$bundle" "$bundle.old" >>"$log" 2>&1 && mv "$bundle.new" "$bundle" >>"$log" 2>&1; then
+    /bin/rm -rf "$bundle.old"
+  else
+    status=1
+    [ -d "$bundle.old" ] && [ ! -d "$bundle" ] && mv "$bundle.old" "$bundle" >>"$log" 2>&1
+    /bin/rm -rf "$bundle.new"
+  fi
+fi
+/usr/bin/hdiutil detach "$mount" -quiet >>"$log" 2>&1
+[ "$status" -eq 0 ] || echo "handoff failed; reopening the previous copy" >>"$log"
+/usr/bin/open "$bundle"
+exit "$status"
+"#,
+        pid = pid,
+        image = image.display(),
+        bundle = bundle.display(),
+        log = log.display(),
+    )
+}
+
+/// The Windows handoff: wait for this process to exit, run the installer silently,
+/// then start the copy the installer wrote. The installer refuses to overwrite a
+/// running EXE, so the wait is the whole point of the script.
+#[cfg(target_os = "windows")]
+fn windows_handoff(pid: u32, installer: &Path, log: &Path) -> String {
+    format!(
+        r#"@echo off
+setlocal EnableExtensions
+set "WAIT_FOR={pid}"
+set "INSTALLER={installer}"
+set "LOG={log}"
+set /a TRIES=0
+:waitloop
+tasklist /FI "PID eq %WAIT_FOR%" /NH /FO CSV 2>nul | find /I "shift.exe" >nul || goto install
+set /a TRIES+=1
+if %TRIES% LSS 100 (ping -n 2 127.0.0.1 >nul & goto waitloop)
+:install
+rem The installer writes its own directory to the registry; fall back to its default.
+set "TARGET=%LOCALAPPDATA%\Programs\Shift\shift.exe"
+for /f "tokens=1,2,*" %%a in ('reg query "HKCU\Software\Shift" /v InstallDirectory 2^>nul ^| find "InstallDirectory"') do set "TARGET=%%c\shift.exe"
+start /wait "" "%INSTALLER%" /S
+if errorlevel 1 echo installer exited with %ERRORLEVEL% >> "%LOG%"
+if exist "%TARGET%" start "" "%TARGET%"
+"#,
+        pid = pid,
+        installer = installer.display(),
+        log = log.display(),
+    )
+}
+
+/// Write a handoff script and start it detached, so it is still alive when this
+/// process has exited. `name` is the file in the update directory.
+fn spawn_handoff(name: &str, script: &str) -> Result<(), String> {
+    let path = download_directory().join(name);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    // A previous attempt leaves its script behind, and a half-written one would be
+    // inherited by the next install.
+    let _ = fs::remove_file(&path);
+    fs::write(&path, script).map_err(|error| error.to_string())?;
+    #[cfg(target_os = "windows")]
+    let mut command = crate::process::command("cmd.exe");
+    #[cfg(target_os = "windows")]
+    command.args(["/D", "/C", &path.to_string_lossy().to_string()]);
+    #[cfg(not(target_os = "windows"))]
+    let mut command = crate::process::command("/bin/sh");
+    #[cfg(not(target_os = "windows"))]
+    command.arg(&path);
+    command
+        .spawn()
+        .map_err(|error| format!("Could not start the updater: {error}"))?;
+    Ok(())
+}
+
+/// Quit shortly after the handoff is scheduled. The delay lets the invoke resolve
+/// and the panel paint its installing state before the windows disappear.
+fn quit_for_update(app: &AppHandle) {
+    let app = app.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(600));
+        app.exit(0);
+    });
+}
+
+/// Install the verified artifact and restart on it. macOS replaces its own bundle
+/// and Windows runs its installer silently, both from a helper that starts once
+/// this process is gone, then opens the new copy. Anything else is handed to the
+/// system the way a double-click would.
 #[tauri::command]
 pub async fn update_install(app: AppHandle) -> Result<String, String> {
     let path = app
@@ -701,22 +855,54 @@ pub async fn update_install(app: AppHandle) -> Result<String, String> {
         .and_then(|guard| guard.as_ref().and_then(|status| status.path.clone()))
         .ok_or_else(|| "Download and verify an update first.".to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
+        let artifact = PathBuf::from(&path);
+        let log = download_directory().join("handoff.log");
+        let pid = std::process::id();
+
+        // A bundled macOS build replaces itself; `open`ing the disk image instead
+        // would leave the user dragging a window they were told to stop expecting.
+        #[cfg(target_os = "macos")]
+        {
+            let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+            if let Some(bundle) = bundle_path(&exe) {
+                if !can_replace(&bundle) {
+                    let folder = bundle
+                        .parent()
+                        .map_or_else(|| "its folder".to_string(), |parent| {
+                            parent.to_string_lossy().to_string()
+                        });
+                    return Err(format!(
+                        "Shift cannot replace itself in {folder}. Open the downloaded installer to update by hand."
+                    ));
+                }
+                let script = macos_handoff(pid, &artifact, &bundle, &log);
+                spawn_handoff("Shift-update.sh", &script)?;
+                quit_for_update(&app);
+                return Ok(path);
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let script = windows_handoff(pid, &artifact, &log);
+            spawn_handoff("Shift-update.cmd", &script)?;
+            quit_for_update(&app);
+            return Ok(path);
+        }
+        // Reaching here means the update cannot be applied in place: a Linux build
+        // has no in-place install, and a macOS binary run straight out of `target/`
+        // has no bundle to replace. Both get the artifact opened instead.
         #[cfg(target_os = "macos")]
         crate::process::command("/usr/bin/open")
-            .arg(&path)
+            .arg(&artifact)
             .status()
             .map_err(|error| format!("Could not open the update: {error}"))?;
-        #[cfg(target_os = "windows")]
-        crate::process::command(&path)
-            .spawn()
-            .map_err(|error| format!("Could not start the installer: {error}"))?;
         // Linux bundles are not installed in place. An AppImage carries its own runtime
         // but arrives without the executable bit, which is enough to make a double-click
         // fail, so set that bit and start it directly. A .deb means nothing on its own
         // and goes to whatever handler the desktop registered for the package format.
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
-            let bundle = PathBuf::from(&path);
+            let bundle = artifact.clone();
             if bundle
                 .extension()
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("appimage"))
@@ -994,6 +1180,79 @@ mod tests {
     fn a_newer_schema_is_not_guessed_at() {
         let error = parse_manifest(&SAMPLE.replace("\"schema\": 1", "\"schema\": 9")).unwrap_err();
         assert!(error.contains("schema"), "{error}");
+    }
+
+    #[test]
+    fn a_bundled_binary_finds_its_app_bundle() {
+        let exe = Path::new("/Applications/Shift.app/Contents/MacOS/shift");
+        assert_eq!(
+            bundle_path(exe),
+            Some(PathBuf::from("/Applications/Shift.app"))
+        );
+    }
+
+    #[test]
+    fn a_binary_outside_a_bundle_has_no_bundle_to_replace() {
+        // `target/debug/shift` and a relocated executable must not be mistaken for
+        // an installed copy, because the handoff would then replace nothing.
+        assert_eq!(bundle_path(Path::new("/repo/target/debug/shift")), None);
+        assert_eq!(bundle_path(Path::new("/tmp/shift")), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_macos_handoff_waits_for_this_process_before_it_touches_the_bundle() {
+        let script = macos_handoff(
+            4242,
+            Path::new("/tmp/Shift Updates/Shift.dmg"),
+            Path::new("/Applications/Shift.app"),
+            Path::new("/tmp/handoff.log"),
+        );
+        assert!(script.contains("pid=\"4242\""), "the script lost our pid");
+        // The wait must come before any write to the bundle, or the copy races the
+        // running executable.
+        let wait = script.find("kill -0 \"$pid\"").expect("no wait loop");
+        let replace = script
+            .find("mv \"$bundle\" \"$bundle.old\"")
+            .expect("no swap");
+        assert!(wait < replace);
+        // A failed mount or copy still reopens the old copy: an update attempt must
+        // never end with Shift simply gone.
+        assert_eq!(script.matches("/usr/bin/open \"$bundle\"").count(), 2);
+        assert!(script.contains("hdiutil attach"));
+        assert!(script.contains("hdiutil detach"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_windows_handoff_installs_only_after_this_process_is_gone() {
+        let script = windows_handoff(
+            4242,
+            Path::new("C:\\Users\\me\\Shift-Setup.exe"),
+            Path::new("C:\\tmp\\handoff.log"),
+        );
+        assert!(
+            script.contains("set \"WAIT_FOR=4242\""),
+            "the script lost our pid"
+        );
+        let wait = script
+            .find("tasklist /FI \"PID eq %WAIT_FOR%\"")
+            .expect("no wait");
+        let install = script.find("\"%INSTALLER\" /S").expect("no silent install");
+        assert!(wait < install);
+        assert!(script.contains("start \"\" \"%TARGET%\""), "never restarts");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_a_bundle_in_a_writable_folder_can_be_replaced() {
+        let dir = std::env::temp_dir().join(format!("shift-replace-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        assert!(can_replace(&dir.join("Shift.app")));
+        // A bundle whose folder does not exist, or cannot be written, must be refused
+        // before the app quits rather than after.
+        assert!(!can_replace(&dir.join("missing").join("Shift.app")));
+        let _ = fs::remove_dir(&dir);
     }
 
     #[test]

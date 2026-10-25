@@ -8,6 +8,10 @@ export interface UpdateFlow {
   checking: boolean;
   downloading: boolean;
   installing: boolean;
+  /** Why the last install attempt failed, or null. The verified download survives
+   * an install failure, so this is kept apart from the status rather than turning a
+   * "ready" status into an "error" one. */
+  installError: string | null;
   progress: UpdateProgress | null;
   /** Percent of the download, or null until the first byte-aligned report. */
   percent: number | null;
@@ -32,6 +36,7 @@ export function useUpdateFlow(): UpdateFlow {
   const [checking, setChecking] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [installing, setInstalling] = useState(false);
+  const [installError, setInstallError] = useState<string | null>(null);
   const [progress, setProgress] = useState<UpdateProgress | null>(null);
   const [percent, setPercent] = useState<number | null>(null);
   const mounted = useRef(true);
@@ -60,6 +65,7 @@ export function useUpdateFlow(): UpdateFlow {
   const download = useCallback(async () => {
     if (downloading) return;
     setDownloading(true);
+    setInstallError(null);
     setProgress(null);
     setPercent(null);
     try {
@@ -81,15 +87,19 @@ export function useUpdateFlow(): UpdateFlow {
     setInstalling(true);
     try {
       await api.updateInstall();
+      // Success means a helper is now waiting for this process to exit, so the
+      // button stays on "installing" instead of offering the action again in the
+      // moment before the windows close.
     } catch (error) {
-      const last = statusRef.current;
-      if (last) publish({ ...last, message: String(error) });
-    } finally {
-      if (mounted.current) setInstalling(false);
+      if (mounted.current) {
+        setInstallError(String(error).replace(/^Error:\s*/, ""));
+        setInstalling(false);
+      }
     }
   }, [installing, publish]);
 
   const clear = useCallback(async () => {
+    setInstallError(null);
     await api.updateClear().catch(() => undefined);
     publish(null);
   }, [publish]);
@@ -129,6 +139,7 @@ export function useUpdateFlow(): UpdateFlow {
     checking,
     downloading,
     installing,
+    installError,
     progress,
     percent,
     check,

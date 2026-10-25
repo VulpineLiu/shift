@@ -1023,6 +1023,7 @@ export function MainWindow() {
                         platform: runtimeInfo.platform,
                         osVersion: runtimeInfo.osVersion,
                         architecture: runtimeInfo.architecture,
+                        appVersion: runtimeInfo.appVersion,
                       }
                     : null
                 }

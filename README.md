@@ -296,6 +296,8 @@ The update channel is this repository: a `releases` branch holding the installer
 
 Once a day at startup, and on demand from Settings -> **Updates**, Shift reads the manifest, compares versions with semver rules including prereleases, and offers a download. A downloaded installer is checked twice before it can be installed: exact byte length, then a recomputed SHA256 that must match the manifest. A mismatch deletes the file and says so, so nothing half-downloaded launches. Publishing is one command, `scripts/publish-release.sh`, and `docs/RELEASE.md` covers the manifest format, the flags, and the difference between the integrity the hash proves and the authenticity a signed manifest adds (`--key` plus a key baked in with `SHIFT_UPDATE_PUBKEY`).
 
+**Install & relaunch** finishes the update without leaving the app. macOS replaces its own `.app` bundle from the downloaded disk image and Windows runs the same installer silently, both from a helper script that starts once Shift has quit and then opens the new copy - so a conversion is interrupted, but nothing is left half-installed and a failed swap reopens the copy you had. The tab states your operating system, architecture, running version and the feed it reads above everything else, so one screenshot explains any report about an update.
+
 ## External dependencies
 
 Core conversion, radial menu, capture, and OCR work with nothing installed. These extend coverage:

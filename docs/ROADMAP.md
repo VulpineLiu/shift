@@ -90,6 +90,14 @@ names what is still missing.
   `docs/RELEASE.md`.
 - Daily startup probe with a manual "check now", a progress readout, and a tray row that
   jumps to Settings → Updates.
+- Installing happens inside the app: after the SHA256 gate, macOS replaces its own bundle
+  from the downloaded disk image and Windows runs the same NSIS installer with `/S`, each
+  from a detached helper that waits for this process to exit and then opens the new copy.
+  macOS was exercised end to end — a 0.1.1 bundle swapped by the published 0.1.2 image,
+  `codesign --verify --deep --strict` clean afterwards — including the failure path, where
+  a busy image left the old copy running instead of leaving Shift closed. The Windows
+  script is cross-built and its `${Silent}` gate compiles, but the restart itself needs
+  real hardware. See "Applying an update" in `docs/RELEASE.md`.
 - Signed and notarized macOS package: pending (builds are signed with a local identity).
 - Signed Windows installer: pending.
 - Manifest signing is done. `scripts/release-key.py` mints the release key,
@@ -117,11 +125,11 @@ names what is still missing.
   nothing, so a stock Linux build still stops at "no artifact for this platform". No host
   here compiles the branch, so it was type-checked by temporarily disabling the other two
   arms; it has never run on a Linux desktop.
-- The published channel was re-verified by hand against the live `releases` branch for
-  every release since: the 0.1.1 manifest's signature checks out against the baked key and
-  both artifacts (`macos`, `windows`) match their published size and SHA256. The
-  `windows-arm64` and `linux` keys are absent because only those two platforms are shipped.
-  See "State of the published channel" in `docs/RELEASE.md`.
+- The published channel is re-verified by hand against the live `releases` branch with
+  every release: the 0.1.2 manifest's signature checks out against the baked key and both
+  artifacts (`macos`, `windows`) match their published size and SHA256 after being
+  downloaded back. The `windows-arm64` and `linux` keys are absent because only those two
+  platforms are shipped. See "State of the published channel" in `docs/RELEASE.md`.
 
 ## M6: Next desktop work
 

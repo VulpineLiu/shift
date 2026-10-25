@@ -2349,23 +2349,6 @@ kbd {
   background: #fff;
 }
 
-/* Host row in the Updates tab: which machine this is, and which artifact the
-   feed will therefore serve. */
-.update-system {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 7px;
-  margin-top: 10px;
-  color: #6b4f42;
-  font-size: 11.5px;
-}
-
-.update-system-label {
-  color: #9c7e6d;
-  font-weight: 600;
-}
-
 .update-system-host {
   display: inline-flex;
   align-items: baseline;
@@ -2382,6 +2365,14 @@ kbd {
   color: #9c7e6d;
   font-size: 10.5px;
   font-weight: 600;
+}
+
+.update-system-host em {
+  color: #3f2a20;
+  font-family: "SF Mono", "Cascadia Code", ui-monospace, monospace;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 620;
 }
 
 .update-system-key {
@@ -4430,26 +4421,40 @@ body[data-view="radial"] .share-backdrop {
 }
 
 /* Updates: git release branch, hash-verified download. */
-.update-feed {
+/* The two header lines above the Updates heading: the host and the feed. The
+   host line also carries the artifact the feed will install, so an "no artifact
+   for this platform" answer below explains itself. */
+.update-meta {
   display: grid;
-  gap: 4px;
-  margin: 10px 0 14px;
+  gap: 6px;
+  padding-bottom: 12px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid rgba(140, 92, 62, 0.12);
 }
 
-.update-feed-label {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: rgba(91, 55, 35, 0.55);
+.update-meta-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  color: #6b4f42;
+  font-size: 11.5px;
 }
 
-.update-feed code {
+.update-meta-line code {
+  flex: 1 1 240px;
+  min-width: 0;
   font-size: 11px;
-  padding: 6px 8px;
+  padding: 4px 8px;
   border-radius: 8px;
   background: rgba(240, 79, 36, 0.06);
   color: rgba(60, 34, 20, 0.8);
   word-break: break-all;
+}
+
+.update-meta-label {
+  color: #9c7e6d;
+  font-weight: 600;
 }
 
 .update-trust {
@@ -4470,10 +4475,6 @@ body[data-view="radial"] .share-backdrop {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-}
-
-.update-status-row > strong {
-  font-size: 15px;
 }
 
 .update-arrow {

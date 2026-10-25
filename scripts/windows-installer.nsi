@@ -120,11 +120,15 @@ Function .onInit
 
   ; Shift keeps a tray process alive and Windows refuses to overwrite a mapped
   ; EXE, so ask before closing a conversion the user may be waiting on.
+  ; A silent install comes from Shift itself, which has already said it is about to
+  ; restart, and nobody is there to answer a box: go straight to the taskkill.
   ${If} ${FileExists} "$INSTDIR\shift.exe"
     FindWindow $0 "" "${APP_NAME}"
     ${If} $0 != 0
-      MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "$(close_shift)" IDOK +2
-        Abort
+      ${IfNot} ${Silent}
+        MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "$(close_shift)" IDOK +2
+          Abort
+      ${EndIf}
     ${EndIf}
   ${EndIf}
 
