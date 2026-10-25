@@ -2375,20 +2375,6 @@ kbd {
   font-weight: 620;
 }
 
-.update-system-key {
-  padding: 2px 7px;
-  border-radius: 999px;
-  color: #12703f;
-  background: rgba(26, 162, 96, 0.1);
-  font-size: 10.5px;
-  font-weight: 620;
-}
-
-.update-system-key.is-unknown {
-  color: #a3401b;
-  background: rgba(242, 106, 51, 0.12);
-}
-
 .home-main {
   position: relative;
   z-index: 2;
@@ -4501,7 +4487,6 @@ body[data-view="radial"] .share-backdrop {
 }
 
 .update-state {
-  margin-left: auto;
   font-size: 12px;
   font-weight: 600;
   color: rgba(91, 55, 35, 0.6);

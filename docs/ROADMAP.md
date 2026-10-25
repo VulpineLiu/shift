@@ -98,6 +98,12 @@ names what is still missing.
   a busy image left the old copy running instead of leaving Shift closed. The Windows
   script is cross-built and its `${Silent}` gate compiles, but the restart itself needs
   real hardware. See "Applying an update" in `docs/RELEASE.md`.
+- An update no longer costs the user the Recent list. That library lives in the app data
+  directory rather than in the bundle, and since the move out of the webview's own storage
+  it had no bridge from the old store: `history_import` adopts those rows on the first
+  launch after an upgrade, re-deriving each entry's kind from the file rather than trusting
+  the older store's guess, then the legacy key is dropped so a later upgrade cannot
+  resurrect rows the user has since removed.
 - Signed and notarized macOS package: pending (builds are signed with a local identity).
 - Signed Windows installer: pending.
 - Manifest signing is done. `scripts/release-key.py` mints the release key,

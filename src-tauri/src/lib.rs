@@ -391,6 +391,7 @@ pub fn run() {
             history::history_record,
             history::history_set_pinned,
             history::history_remove,
+            history::history_import,
             history::history_clear,
             settings::get_app_settings,
             settings::set_output_directory,

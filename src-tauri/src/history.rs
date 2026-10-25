@@ -26,8 +26,12 @@ const CAPACITY: usize = 300;
 pub struct HistoryEntry {
     pub path: String,
     /// "image" | "video" | "text" | "file", matching the editor's own kinds.
+    /// Defaults so a row imported from an older store, which may not have recorded
+    /// it, still parses; every writer re-derives it from the path anyway.
+    #[serde(default)]
     pub kind: String,
     /// Milliseconds since the epoch, as the webview already reports them.
+    #[serde(default)]
     pub at: i64,
     /// Pinned entries survive both the capacity limit and a missing file.
     #[serde(default)]
@@ -107,6 +111,29 @@ fn publish(app: &AppHandle, entries: Vec<HistoryEntry>) {
         *guard = entries.clone();
     }
     let _ = app.emit("history://changed", entries);
+}
+
+/// Merge imported rows into the library. An entry the library already lists keeps
+/// its own timestamp, so an import cannot make yesterday's file look new.
+///
+/// The kind is re-derived from the path rather than taken from the store being
+/// imported from: that field is the importer's own opinion about a file it may not
+/// have been able to read, and the current classifier is the one the editor uses.
+fn merge(existing: Vec<HistoryEntry>, incoming: Vec<HistoryEntry>) -> Vec<HistoryEntry> {
+    let mut merged = existing;
+    for entry in incoming {
+        if entry.path.trim().is_empty() {
+            continue;
+        }
+        if merged.iter().any(|have| have.path == entry.path) {
+            continue;
+        }
+        merged.push(HistoryEntry {
+            kind: crate::files::editor_kind(Path::new(&entry.path)).to_string(),
+            ..entry
+        });
+    }
+    tidy(merged)
 }
 
 /// Record files that just became available. Called by the result pipeline rather
@@ -192,6 +219,25 @@ pub async fn history_remove(app: AppHandle, path: String) -> Result<Vec<HistoryE
     .map_err(|error| error.to_string())?
 }
 
+/// Adopt a list a previous version kept somewhere else. Until 0.1 the library lived
+/// in the webview's own storage, which a reinstall does not survive, so the first
+/// launch of a newer build would otherwise show an empty list over files that are
+/// all still on disk.
+#[tauri::command]
+pub async fn history_import(
+    app: AppHandle,
+    entries: Vec<HistoryEntry>,
+) -> Result<Vec<HistoryEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let entries = merge(snapshot(&app), entries);
+        write(&app, &entries)?;
+        publish(&app, entries.clone());
+        Ok(entries)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 pub async fn history_clear(app: AppHandle) -> Result<Vec<HistoryEntry>, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -220,6 +266,60 @@ mod tests {
             at,
             pinned,
         }
+    }
+
+    #[test]
+    fn a_row_from_the_older_webview_store_parses() {
+        // What 0.1.0 kept in localStorage: a path, a kind it guessed, and a
+        // timestamp. No pin, since that column did not exist yet.
+        let here = real_path();
+        let json = format!(r#"[{{"path":"{here}","kind":"image","at":1730000000000}}]"#);
+        let legacy: Vec<HistoryEntry> = serde_json::from_str(&json).unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert!(!legacy[0].pinned);
+        let merged = merge(vec![], legacy);
+        assert_eq!(merged.len(), 1);
+        // The importer's guess is replaced by what this build's classifier says.
+        assert_eq!(merged[0].kind, "file");
+        assert_eq!(merged[0].at, 1_730_000_000_000);
+    }
+
+    fn an_import_adds_unknown_paths_and_never_refreshes_a_timestamp() {
+        let here = real_path();
+        // The folder holding the test binary: a second path that really exists,
+        // since a tidy pass drops anything that does not.
+        let other = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let merged = merge(
+            vec![entry(&here, 500, false)],
+            vec![
+                // Same file, older stamp: the library's own row wins.
+                entry(&here, 100, false),
+                entry(&other, 400, false),
+            ],
+        );
+        assert_eq!(merged.len(), 2, "the imported path should have landed");
+        let kept = merged.iter().find(|e| e.path == here).unwrap();
+        assert_eq!(kept.at, 500, "an import must not refresh a timestamp");
+    }
+
+    #[test]
+    fn an_import_drops_entries_that_point_at_nothing() {
+        let missing = format!("/nonexistent/shift-import-{}.png", std::process::id());
+        let merged = merge(vec![], vec![entry(&missing, 100, false)]);
+        assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn an_import_keeps_a_pinned_flag_from_the_older_store() {
+        let here = real_path();
+        let merged = merge(vec![], vec![entry(&here, 100, true)]);
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].pinned);
     }
 
     #[test]

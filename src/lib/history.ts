@@ -3,9 +3,11 @@ import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import {
   announceRecentChange,
+  clearLegacyRecentItems,
   getLocalRecentItems,
   type RecentItem,
   setLocalRecentItems,
+  takeLegacyRecentItems,
 } from "./utils";
 
 /**
@@ -29,6 +31,25 @@ export const history = {
   async list(): Promise<RecentItem[]> {
     if (!isTauri()) return getLocalRecentItems();
     return request<RecentItem[]>("history_list");
+  },
+
+  /**
+   * Read the library, adopting the rows a 0.1 webview kept for itself if any are
+   * waiting. Rust merges them, so this is safe to call more than once and cannot
+   * reorder or re-date what the library already lists.
+   */
+  async adopt(): Promise<RecentItem[]> {
+    if (!isTauri()) return getLocalRecentItems();
+    const legacy = takeLegacyRecentItems();
+    if (legacy.length === 0) return request<RecentItem[]>("history_list");
+    try {
+      const merged = await request<RecentItem[]>("history_import", { entries: legacy });
+      // Only drop the old store once its rows are safe in the library.
+      clearLegacyRecentItems();
+      return merged;
+    } catch {
+      return request<RecentItem[]>("history_list");
+    }
   },
 
   /** Record paths that just became available, e.g. an editor save. */

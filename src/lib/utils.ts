@@ -130,6 +130,39 @@ export function setLocalRecentItems(items: RecentItem[]) {
   announceRecentChange();
 }
 
+/**
+ * Rows the 0.1 webview wrote for itself, before Rust owned the library.
+ *
+ * That list lived in `localStorage`, which a reinstall does not survive, so the
+ * first launch of a newer build shows an empty Recent list even though every file
+ * it names is still on disk. Read it once, hand it to Rust, then drop the key: the
+ * store keeps no authority after that, and dropping it means a later upgrade cannot
+ * resurrect rows the user has since removed.
+ */
+export function takeLegacyRecentItems(): RecentItem[] {
+  try {
+    const stored = localStorage.getItem(RECENT_KEY);
+    if (!stored) return [];
+    const parsed = JSON.parse(stored);
+    if (!Array.isArray(parsed)) return [];
+    const items = parsed.filter(
+      (entry: RecentItem) => typeof entry?.path === "string" && entry.path.length > 0,
+    );
+    return items;
+  } catch {
+    return [];
+  }
+}
+
+/** Forget the legacy key once its rows are safe in the Rust library. */
+export function clearLegacyRecentItems() {
+  try {
+    localStorage.removeItem(RECENT_KEY);
+  } catch {
+    // A store we cannot clear only risks a second harmless import.
+  }
+}
+
 /** Notify listeners in this window; other windows hear the Rust broadcast. */
 export function announceRecentChange() {
   window.dispatchEvent(new Event(RECENT_EVENT));

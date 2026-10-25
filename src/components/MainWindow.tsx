@@ -540,7 +540,7 @@ export function MainWindow() {
       .catch(() => setHotkeys(null));
     // Rust prunes entries whose file is gone as it reads the library, so there is
     // no separate sweep to run here.
-    void history.list().then(setRecent).catch(() => undefined);
+    void history.adopt().then(setRecent).catch(() => undefined);
     // Settings are loaded once when the main window starts.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

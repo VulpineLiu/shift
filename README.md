@@ -214,7 +214,7 @@ PDF→image and PDF split write into a new `Name pages` folder containing `Page 
 
 ## Capture history library
 
-Every capture, conversion result and received file is written by Rust into one library in the app data directory (`history.json`, capped at 300 entries), so all windows share a single list and a webview cache clear cannot throw it away. The main window's **Recent** card is that library:
+Every capture, conversion result and received file is written by Rust into one library in the app data directory (`history.json`, capped at 300 entries), so all windows share a single list and a webview cache clear cannot throw it away. Because it sits outside the bundle, **it survives an update and a reinstall**; the first launch after upgrading also adopts whatever the 0.1 webview had kept in its own store, so a list built before that change is not lost either. The main window's **Recent** card is that library:
 
 - **Search** once the list grows past a few rows; it filters on the file name.
 - **Pin** a row to keep it through the capacity limit, a deleted file, and Clear.

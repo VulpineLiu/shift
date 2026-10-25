@@ -68,8 +68,6 @@ export function UpdatePanel({ feedUrl, autoCheck, onAutoCheckChange, system }: P
   } = useUpdateFlow();
 
   const verified = status?.state === "ready";
-  // Rust reports the key it resolved; the panel only repeats it.
-  const artifactKey = status?.artifactKey ?? "";
   const available = status?.state === "available" || verified;
   const failed = status?.state === "error" || status?.state === "unavailable";
 
@@ -92,15 +90,6 @@ export function UpdatePanel({ feedUrl, autoCheck, onAutoCheckChange, system }: P
           ) : (
             <span className="update-system-pending">{t("updateSystemPending")}</span>
           )}
-          {artifactKey ? (
-            <span className="update-system-key">
-              {t("updateSystemArtifact", { key: artifactKey })}
-            </span>
-          ) : status && status.state === "unavailable" ? (
-            <span className="update-system-key is-unknown">
-              {t("updateSystemArtifactUnknown")}
-            </span>
-          ) : null}
         </div>
         <div className="update-meta-line">
           <Rss size={13} />
@@ -133,15 +122,6 @@ export function UpdatePanel({ feedUrl, autoCheck, onAutoCheckChange, system }: P
       </div>
 
       <div className="update-status-row">
-        {available && status ? (
-          <span className="update-arrow">
-            <span className="update-new">
-              <Sparkle size={11} />
-              {status.availableVersion}
-            </span>
-            <small>{status.date}</small>
-          </span>
-        ) : null}
         <span className={`update-state is-${status?.state ?? "idle"}`}>
           {status
             ? t(
@@ -155,6 +135,15 @@ export function UpdatePanel({ feedUrl, autoCheck, onAutoCheckChange, system }: P
               )
             : t("updateIdle")}
         </span>
+        {available && status ? (
+          <span className="update-arrow">
+            <span className="update-new">
+              <Sparkle size={11} />
+              {status.availableVersion}
+            </span>
+            <small>{status.date}</small>
+          </span>
+        ) : null}
       </div>
 
       {status?.notes ? <p className="update-notes">{status.notes}</p> : null}
