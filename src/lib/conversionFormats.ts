@@ -9,8 +9,8 @@ const SPREADSHEET_SOURCES = new Set(["xlsx", "xls", "xlsb", "ods", "csv", "tsv"]
 const IMAGE_FORMATS = ["PNG", "JPG", "WEBP", "HEIC", "TIFF", "BMP", "GIF", "PDF"];
 const VIDEO_FORMATS = ["MP4", "MOV", "GIF", "M4A"];
 const AUDIO_FORMATS = ["M4A", "WAV", "MP3"];
-const PDF_FORMATS = ["PNG", "JPG", "TIFF", "HEIC", "TXT", "MD", "DOCX", "RTF", "ODT"];
-const DOCUMENT_FORMATS = ["PDF", "DOCX", "MD", "TXT", "HTML", "RTF", "ODT"];
+const PDF_FORMATS = ["PNG", "JPG", "TIFF", "HEIC", "TXT", "MD", "DOCX", "RTF"];
+const DOCUMENT_FORMATS = ["PDF", "DOCX", "MD", "TXT", "HTML", "RTF"];
 
 const FORMAT_ALIASES: Record<string, string> = {
   jpeg: "jpg",

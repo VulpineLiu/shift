@@ -111,11 +111,11 @@ The format ring for a given file type. Every target below is wired in `src-tauri
 | Audio | `M4A` `WAV` `MP3` | FFmpeg | MP3 falls back to `lame` if FFmpeg lacks `libmp3lame` |
 | PDF | `TXT` `MD` | `lopdf` | Text-layer extraction; errors clearly when a PDF is scanned |
 | PDF | `DOCX` | Page rendering + native DOCX packaging | PDFKit on macOS, Poppler on Windows/Linux; preserves images, diagrams and page layout without Microsoft Word |
-| PDF | `RTF` `ODT` | `lopdf` + Pandoc | Text layer becomes the document body; needs Pandoc |
+| PDF | `RTF` | `lopdf` + Pandoc | Text layer becomes the document body; needs Pandoc |
 | PDF | `HEIC` | PDFKit / Poppler + `sips` | Pages render as PNG then transcode; needs a system HEIC codec |
 | PDF | `PNG` `JPG` `TIFF` | PDFKit / Poppler | One file per page into a `… pages` folder |
 | Document `docx` `rtf` `odt` `txt` `md` `html` | `PDF` | AppKit renderer (macOS) · Pandoc elsewhere | macOS path needs no LaTeX or wkhtmltopdf |
-| Document `docx` `rtf` `odt` `txt` `md` `html` | `DOCX` `RTF` `HTML` `TXT` `MD` `ODT` | Pandoc | The source format is omitted; Markdown writes as GFM, HTML and RTF as standalone documents |
+| Document `docx` `rtf` `odt` `txt` `md` `html` | `DOCX` `RTF` `HTML` `TXT` `MD` | Pandoc | The source format is omitted; Markdown writes as GFM. HTML is a self-contained file with embedded images |
 | Presentation `.pptx` | `MD` `PDF` | Pure Rust + Pandoc | Per-slide headings, bullet text and **tables as real Markdown tables**; PDF is a text summary, not a layout render |
 | Spreadsheet | `MD` `PDF` | `calamine` / Rust | One Markdown table per sheet; `csv`/`tsv` parsed directly |
 
@@ -265,7 +265,7 @@ Core conversion, radial menu, capture, and OCR work with nothing installed. Thes
 | Tool | Needed for | macOS | Windows | Linux |
 | --- | --- | --- | --- | --- |
 | FFmpeg | media convert/compress, 720p, mute, frame, mono; recording off-macOS | optional | **required** for recording | **required** |
-| Pandoc | document ↔ DOCX/RTF/ODT/HTML/TXT/MD | optional | needed | needed |
+| Pandoc | document ↔ DOCX/RTF/HTML/TXT/MD (ODT input only) | optional | needed | needed |
 | Typst | Pandoc document-to-PDF engine | not needed (AppKit) | needed | needed |
 | Poppler `pdftoppm` | PDF → images, PDF → Word, scanned-PDF OCR | not needed (PDFKit) | needed | needed |
 | ImageMagick `magick` | HEIC/HEIF/AVIF input plus HEIC output | not needed (`sips`) | needed | needed |

@@ -111,11 +111,11 @@ Shift 常驻菜单栏（macOS）与通知区域（Windows），同时也有普�
 | 音频 | `M4A` `WAV` `MP3` | FFmpeg | 若 FFmpeg 缺少 `libmp3lame`，MP3 回退到 `lame` |
 | PDF | `TXT` `MD` | `lopdf` | 抽取文字层；扫描件会明确报错并引导使用文字识别 |
 | PDF | `DOCX` | 页面渲染 + 原生 DOCX 封装 | macOS 用 PDFKit，Windows/Linux 用 Poppler；保留图片、图表和页面版式，不依赖 Microsoft Word |
-| PDF | `RTF` `ODT` | `lopdf` + Pandoc | 以文字层作为正文；需要 Pandoc |
+| PDF | `RTF` | `lopdf` + Pandoc | 以文字层作为正文；需要 Pandoc |
 | PDF | `HEIC` | PDFKit / Poppler + `sips` | 先渲染为 PNG 再转码；需要系统 HEIC 编码器 |
 | PDF | `PNG` `JPG` `TIFF` | PDFKit / Poppler | 每页一个文件，输出到 `… pages` 文件夹 |
 | 文档 `docx` `rtf` `odt` `txt` `md` `html` | `PDF` | AppKit 渲染器（macOS）· 其他系统 Pandoc | macOS 路径不需要 LaTeX 或 wkhtmltopdf |
-| 文档 `docx` `rtf` `odt` `txt` `md` `html` | `DOCX` `RTF` `HTML` `TXT` `MD` `ODT` | Pandoc | 自动省略源格式；Markdown 以 GFM 写出，HTML 与 RTF 写出完整独立文档 |
+| 文档 `docx` `rtf` `odt` `txt` `md` `html` | `DOCX` `RTF` `HTML` `TXT` `MD` | Pandoc | 自动省略源格式；Markdown 以 GFM 写出。HTML 为图片内嵌的独立单文件 |
 | 演示文稿 `.pptx` | `MD` `PDF` | 纯 Rust + Pandoc | 按页生成标题、要点文字，**表格会输出为真正的 Markdown 表格**；PDF 仍是文字摘要版，非版面还原 |
 | 电子表格 | `MD` `PDF` | `calamine` / 纯 Rust | 每个工作表一张 Markdown 表；`csv`/`tsv` 直接解析 |
 
@@ -267,7 +267,7 @@ Shift 会持续维护局域网内其他 Shift 实例的列表，并据此提供 
 | 工具 | 用于 | macOS | Windows | Linux |
 | --- | --- | --- | --- | --- |
 | FFmpeg | 音视频转换/压缩、720p、静音、截帧、单声道；非 macOS 的录屏 | 可选 | 录屏**必需** | **必需** |
-| Pandoc | 文档 ↔ DOCX/RTF/ODT/HTML/TXT/MD | 可选 | 需要 | 需要 |
+| Pandoc | 文档 ↔ DOCX/RTF/HTML/TXT/MD（仅支持 ODT 输入） | 可选 | 需要 | 需要 |
 | Typst | Pandoc 文档转 PDF 引擎 | 不需要（AppKit） | 需要 | 需要 |
 | Poppler `pdftoppm` | PDF 转图片、PDF 转 Word、扫描件 OCR | 不需要（PDFKit） | 需要 | 需要 |
 | ImageMagick `magick` | HEIC/HEIF/AVIF 输入与 HEIC 输出 | 不需要（`sips`） | 需要 | 需要 |

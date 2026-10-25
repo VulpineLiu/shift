@@ -997,7 +997,7 @@ fn native_document_pdf(
 /// Converts through the built-in macOS text converter.
 ///
 /// Pandoc is an optional tool, and machines without it used to fail every
-/// Word/RTF/ODT request. `textutil` ships with macOS and writes the same
+/// Word/RTF request. `textutil` ships with macOS and writes the same
 /// formats, so Markdown is rendered to HTML first and handed over.
 #[cfg(target_os = "macos")]
 fn textutil_convert(
@@ -1008,7 +1008,6 @@ fn textutil_convert(
     let writer = match target.to_ascii_lowercase().as_str() {
         "docx" => "docx",
         "rtf" => "rtf",
-        "odt" => "odt",
         "html" | "htm" => "html",
         "txt" => "txt",
         _ => return Ok(None),
@@ -1130,7 +1129,6 @@ fn convert_document(
         "docx" => ("docx", None),
         "rtf" => ("rtf", None),
         "pdf" => ("pdf", None),
-        "odt" => ("odt", None),
         other => return Err(format!("Unsupported document format: {other}")),
     };
     let pandoc = match resolve_tool("pandoc") {
@@ -1154,6 +1152,11 @@ fn convert_document(
     }
     if matches!(target.as_str(), "html" | "rtf") {
         command.arg("--standalone");
+    }
+    if target == "html" {
+        // DOCX images otherwise become references to a media folder that
+        // Pandoc never writes. Inline them so the single HTML file is portable.
+        command.arg("--self-contained");
     }
     if let Some(engine) = pdf_engine {
         command.arg("--pdf-engine").arg(engine);
@@ -1620,7 +1623,7 @@ pub fn perform_action(
                     .unwrap_or_else(|| directory_of(input));
                 convert_document(input, "docx", Some(&target_dir), on_progress)?
             }
-            "convert" if is_pdf && matches!(target, Some("rtf" | "odt")) => {
+            "convert" if is_pdf && matches!(target, Some("rtf")) => {
                 // The text layer becomes a Markdown intermediate, then the same
                 // document writer produces the requested container.
                 let text = pdf::text_of(input)?;
@@ -1638,10 +1641,12 @@ pub fn perform_action(
                 let _ = fs::remove_file(&temporary);
                 result?
             }
-            "convert" if is_pdf => return Err(
-                "Pick a supported target for this PDF: an image format, TXT, MD, DOCX, RTF or ODT."
-                    .into(),
-            ),
+            "convert" if is_pdf => {
+                return Err(
+                    "Pick a supported target for this PDF: an image format, TXT, MD, DOCX or RTF."
+                        .into(),
+                )
+            }
             "convert"
                 if is_image
                     && target
@@ -2284,7 +2289,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn textutil_fallback_converts_markdown_to_word_formats() {
-        for target in ["docx", "rtf", "odt"] {
+        for target in ["docx", "rtf"] {
             let dir = scratch_dir();
             let input = dir.join("note.md");
             fs::write(&input, "# Shift\n\nLocal **documents**.\n").unwrap();
@@ -2451,37 +2456,50 @@ mod tests {
     }
 
     #[test]
-    fn converts_pdf_text_layer_to_rtf_and_odt_when_pandoc_is_available() {
+    fn converts_pdf_text_layer_to_rtf_when_pandoc_is_available() {
         if which::which("pandoc").is_err() {
             return;
         }
-        for target in ["rtf", "odt"] {
-            let dir = scratch_dir();
-            let input = dir.join("report.pdf");
-            write_text_pdf(&input, "Quarterly numbers");
+        let dir = scratch_dir();
+        let input = dir.join("report.pdf");
+        write_text_pdf(&input, "Quarterly numbers");
 
-            let outcome = perform_action(
-                "convert",
-                &[input.to_string_lossy().to_string()],
-                Some(target),
-                None,
-                None,
-            )
-            .unwrap_or_else(|error| panic!("PDF to {target} failed: {error}"));
-            assert_eq!(outcome.outputs.len(), 1);
-            assert!(
-                outcome.outputs[0].ends_with(&format!("report.{target}")),
-                "output must follow the requested format: {:?}",
-                outcome.outputs[0]
-            );
-            assert!(Path::new(&outcome.outputs[0]).exists());
-            if target == "rtf" {
-                assert!(fs::read_to_string(&outcome.outputs[0])
-                    .unwrap()
-                    .starts_with("{\\rtf1"));
-            }
-            fs::remove_dir_all(dir).unwrap();
-        }
+        let outcome = perform_action(
+            "convert",
+            &[input.to_string_lossy().to_string()],
+            Some("rtf"),
+            None,
+            None,
+        )
+        .expect("PDF to RTF failed");
+        assert_eq!(outcome.outputs.len(), 1);
+        assert!(
+            outcome.outputs[0].ends_with("report.rtf"),
+            "output must follow the requested format: {:?}",
+            outcome.outputs[0]
+        );
+        assert!(fs::read_to_string(&outcome.outputs[0])
+            .unwrap()
+            .starts_with("{\\rtf1"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pdf_to_odt_is_rejected() {
+        let dir = scratch_dir();
+        let input = dir.join("report.pdf");
+        write_text_pdf(&input, "Quarterly numbers");
+
+        let error = perform_action(
+            "convert",
+            &[input.to_string_lossy().to_string()],
+            Some("odt"),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("DOCX or RTF"), "{error}");
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -2570,6 +2588,33 @@ mod tests {
         let text = fs::read_to_string(output).unwrap();
         assert!(text.contains("Shift"));
         assert!(text.contains("Document round trip"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn image_bearing_docx_to_html_embeds_images() {
+        if which::which("pandoc").is_err() {
+            return;
+        }
+        let dir = scratch_dir();
+        let image = dir.join("sample.png");
+        sample_image(&image);
+        let source = dir.join("sample.md");
+        fs::write(&source, "![Sample](sample.png)\n").unwrap();
+        let docx = dir.join("sample.docx");
+        let status = Command::new("pandoc")
+            .current_dir(&dir)
+            .arg("sample.md")
+            .args(["-o", "sample.docx"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let output = convert_document(&docx, "html", None, None).unwrap();
+        let html = fs::read_to_string(output).unwrap();
+        assert!(html.contains("<img"), "{html}");
+        assert!(html.contains("src=\"data:image/"), "{html}");
+        assert!(!html.contains("src=\"media/"), "{html}");
         fs::remove_dir_all(dir).unwrap();
     }
 

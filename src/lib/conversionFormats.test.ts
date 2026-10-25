@@ -5,17 +5,30 @@ import { conversionFormats } from "./conversionFormats.ts";
 
 test("document conversion never offers the source format again", () => {
   const cases = {
-    docx: ["PDF", "MD", "TXT", "HTML", "RTF", "ODT"],
-    rtf: ["PDF", "DOCX", "MD", "TXT", "HTML", "ODT"],
+    docx: ["PDF", "MD", "TXT", "HTML", "RTF"],
+    rtf: ["PDF", "DOCX", "MD", "TXT", "HTML"],
     odt: ["PDF", "DOCX", "MD", "TXT", "HTML", "RTF"],
-    txt: ["PDF", "DOCX", "MD", "HTML", "RTF", "ODT"],
-    md: ["PDF", "DOCX", "TXT", "HTML", "RTF", "ODT"],
-    html: ["PDF", "DOCX", "MD", "TXT", "RTF", "ODT"],
-    htm: ["PDF", "DOCX", "MD", "TXT", "RTF", "ODT"],
+    txt: ["PDF", "DOCX", "MD", "HTML", "RTF"],
+    md: ["PDF", "DOCX", "TXT", "HTML", "RTF"],
+    html: ["PDF", "DOCX", "MD", "TXT", "RTF"],
+    htm: ["PDF", "DOCX", "MD", "TXT", "RTF"],
   };
 
   for (const [extension, expected] of Object.entries(cases)) {
     assert.deepEqual(conversionFormats("document", extension), expected, extension);
+  }
+});
+
+test("ODT is never offered as an output format", () => {
+  for (const [kind, extension] of [
+    ["document", "docx"],
+    ["document", "rtf"],
+    ["document", "txt"],
+    ["document", "md"],
+    ["document", "html"],
+    ["pdf", "pdf"],
+  ] as const) {
+    assert.ok(!conversionFormats(kind, extension).includes("ODT"), extension);
   }
 });
 
@@ -55,7 +68,6 @@ test("PDF conversion includes every implemented document target", () => {
     "MD",
     "DOCX",
     "RTF",
-    "ODT",
   ]);
 });
 
