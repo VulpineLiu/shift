@@ -81,14 +81,23 @@ machine says depends on how the binary is signed:
 | Self-signed certificate | "cannot be opened because it is damaged" / reported as malware, with **only 移至废纸篓** — no override, no pane entry to approve |
 | Developer ID + notarized | Opens on double-click, no prompt |
 
-The middle row is the trap that cost a release. Signing with a locally created
-certificate ("Shift Local Signing") *looks* better — `codesign` on the build machine reports
-`valid on disk` and `satisfies its Designated Requirement`, and `spctl` even accepts it — but
-the certificate lives only in that one Mac's keychain, is self-issued, and is `CA:FALSE`, so
-on any other machine it cannot chain to a trusted root. Sequoia turns an unchainable
-signature on a quarantined download into a hard refusal, which is strictly worse than no
-certificate at all. If the identity is used again it must be installed **and trusted** on
-every machine, which is not something to ask of a user.
+The middle row is what a release shipped with, and it is a trap because it looks healthy
+locally: `codesign` reports `valid on disk` and `satisfies its Designated Requirement`, and
+`spctl` accepts it on the build host. The certificate ("Shift Local Signing") is self-issued,
+`CA:FALSE`, and present in only that one Mac's keychain, so on any other machine it cannot
+chain to a trusted root — and an unchainable signature on a quarantined download is a hard
+refusal rather than a prompt.
+
+One correction worth keeping, because the obvious story is wrong: every DMG this channel has
+ever published carries that same `Authority=Shift Local Signing`, including the earliest 0.1.0
+ones, because Tauri picks a keychain identity itself when `signingIdentity` is unset. So
+"older builds were ad-hoc" is **not** why one machine accepted them — a machine that had been
+shown the app before may already trust the certificate, and Gatekeeper's own heuristics have
+changed across macOS versions. What is verified is the direction of the fix: an ad-hoc binary
+is reported as an unidentified developer with a way through, which is the behaviour this
+project wants, and no release is worse off for losing a certificate no other Mac can check.
+Reusing that identity again would mean installing it **and trusting it** on every machine,
+which is not something to ask of a user.
 
 So: ad-hoc, and the two containers each cover one job.
 
