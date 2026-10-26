@@ -39,7 +39,8 @@ not a code limit, and it decides what the channel may contain:
 
 | Key | Shipped | Notes |
 | --- | --- | --- |
-| `macos` | yes | One universal bundle, Apple silicon and Intel |
+| `macos` | yes | One universal bundle, Apple silicon and Intel. The DMG, because that is what the in-app updater mounts |
+| — | yes | `Shift-macOS-universal.pkg`, also macOS universal: the file to hand a machine installing Shift for the first time. It carries no manifest key — see "macOS packaging" |
 | `windows` | yes | x64, which is also what an ARM machine falls back to |
 | `windows-arm64` | no | Buildable — `build-windows-release.sh --arch arm64` still works — just not published |
 | `linux` | no | Build target, not a product; see below |
@@ -67,10 +68,53 @@ by a test rather than by a comment.
 The branch is rebuilt as a fresh root commit on every publish and force-pushed, so it
 never accumulates gigabytes of installer history while `main` stays clean.
 
+## macOS packaging
+
+Shift builds are signed with a **self-signed** identity ("Shift Local Signing") and are
+**not notarized** — notarization needs an Apple Developer ID account. Gatekeeper therefore
+calls any Shift build an unidentified developer, and how annoying that is depends entirely
+on the container:
+
+| Container | What a fresh machine does |
+| --- | --- |
+| DMG, app dragged into /Applications | The app itself carries the quarantine flag from the browser, so **the first launch of Shift** is refused: *"无法打开，因为来自身份不明的开发者"*. The user approves in 系统设置 → 隐私与安全性 (允许 / 仍要打开), or right-clicks the app and chooses 打开. |
+| `.pkg`, installed with Installer.app or `installer` | The approval moves to the package, once, before anything is installed (double-click reports it, right-click → 打开 passes it, `installer` from a terminal needs nothing). `installer` does not propagate quarantine onto what it installs, so **the installed app launches with no prompt at all** — verified: an installed copy carries only `com.apple.provenance`, no `com.apple.quarantine`. |
+
+Both containers hold the same signed universal bundle — `pkgbuild` neither re-signs nor
+strips the signature, and the payload passes `codesign --verify --deep --strict`.
+
+So the channel publishes both, for different jobs:
+
+- **`Shift-macOS-universal.pkg`** — first install on any machine. Build it with
+  `scripts/macos-pkg.sh <Shift.app> <out.pkg>`; it stages the bundle under a
+  `/Applications` root and runs `pkgbuild`, keeping the app's own signature.
+  The package itself is unsigned: `productsign` needs a certificate with the *Installer
+  Signing* purpose and this build has only a code-signing identity. A browser-downloaded
+  unsigned package is refused on a plain double-click, so the user approves it once —
+  right-click → 打开, or 仍要打开 in 系统设置 → 隐私与安全性. What the package changes is
+  *where* that single approval lands: on the download, before install, instead of on the
+  app every time it is opened.
+  `installer -pkg Shift-macOS-universal.pkg -target /` from a terminal needs no such
+  permission at all.
+- **`Shift-macOS-universal.dmg`** — the `macos` manifest key, because
+  `update_install`'s handoff mounts the image with `hdiutil` and copies the bundle out of
+  it. Pointing the key at a `.pkg` would make that mount fail, so the key stays a DMG
+  until the updater learns to run `installer`. A DMG Shift downloads itself arrives without
+  a quarantine flag (`curl` sets none, and the handoff strips it anyway), which is why
+  in-app updates never trigger the prompt — it is only the browser download on a new
+  machine that does.
+
+Closing this for good means an Apple Developer ID: sign with `Developer ID Application`,
+notarize with `notarytool`, and staple the ticket. Then both containers open on double-click
+with no pane to visit, and Screen Recording approval stops resetting between builds because
+the identity stops changing.
+
 ## Publishing
 
 ```bash
-pnpm tauri build …                                   # bundles land in artifacts/
+pnpm tauri build --target universal-apple-darwin --bundles app,dmg
+scripts/macos-pkg.sh src-tauri/target/universal-apple-darwin/release/bundle/macos/Shift.app \
+                     artifacts/Shift-macOS-universal.pkg   # the first-install container
 printf 'Fixes the ring on external displays.\n' > /tmp/notes.md
 scripts/publish-release.sh --notes /tmp/notes.md     # hash, commit, push
 ```
@@ -91,9 +135,11 @@ same Python pass that walks the files produces both.
 
 Recognised installers: `Shift-macOS-universal.dmg` (macOS), `Shift-Setup-<version>-win-x64.exe`
 and `Shift-Setup-<version>-win-arm64.exe` (Windows, keys `windows` and `windows-arm64`),
-`*.AppImage` / `*.deb` (Linux). Other files in `artifacts/` — the portable ZIPs,
-`SHA256SUMS.txt`, the `README-Windows-<arch>.txt` notes — travel with the branch but are
-not offered as installers. Dotfiles and an old manifest are skipped.
+`*.AppImage` / `*.deb` (Linux). Other files in `artifacts/` — the macOS `.pkg`, the portable
+ZIPs, `SHA256SUMS.txt`, the `README-Windows-<arch>.txt` notes — travel with the branch and
+are downloadable from it, but are not offered as installers by the manifest. The `.pkg`
+carries no key on purpose: the `macos` key must stay a DMG so the in-app handoff can mount
+it ("macOS packaging"). Dotfiles and an old manifest are skipped.
 
 Both Windows architectures come from one command, which cross-compiles each target,
 checks the PE machine field of the binary it just built (`0x8664` for x64, `0xAA64` for
@@ -275,6 +321,9 @@ than trusting the local copy:
 | `windows` | `Shift-Setup-0.1.3-win-x64.exe` (24,517,835 B) | bytes downloaded, SHA256 matches the manifest |
 | `windows-arm64` | not published | by choice — see "Supported release targets" |
 | `linux` | not published | by choice: Linux is a build target here, not a shipped product |
+
+`Shift-macOS-universal.pkg` sits on the same branch with no manifest key, for first installs
+("macOS packaging"); it was hashed the same way and downloaded back to check.
 
 `shift-update.sig` verifies over the manifest's exact bytes against the key baked into both
 artifacts. The channel's home is derived from `origin` at build time, and this forge is

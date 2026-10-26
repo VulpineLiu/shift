@@ -105,6 +105,12 @@ names what is still missing.
   the older store's guess, then the legacy key is dropped so a later upgrade cannot
   resurrect rows the user has since removed.
 - Signed and notarized macOS package: pending (builds are signed with a local identity).
+  Until then the channel also publishes `Shift-macOS-universal.pkg`, because Gatekeeper
+  refuses an unnotarized app on first launch and `installer` does not leave the installed
+  copy quarantined — so the prompt moves to the download, once, instead of the app. The
+  `macos` manifest key stays a DMG so the in-app handoff can keep mounting it; see
+  "macOS packaging" in `docs/RELEASE.md`. Notarization needs a Developer ID account, and
+  it would also stop Screen Recording approval from resetting between builds.
 - Signed Windows installer: pending.
 - Manifest signing is done. `scripts/release-key.py` mints the release key,
   `publish-release.sh --key` publishes a detached `shift-update.sig` over the manifest's

@@ -292,6 +292,8 @@ Each is overridable in Settings. File actions offer a *collect everything in one
 
 ## Updates
 
+A new macOS machine should install **`Shift-macOS-universal.pkg`**: builds are signed with a self-signed identity and not notarized, so Gatekeeper calls Shift an unidentified developer, and an installed package leaves the app free of the quarantine flag. If you install the disk image instead, the first launch needs one approval in System Settings → Privacy & Security. Details in `docs/RELEASE.md`.
+
 The update channel is this repository: a `releases` branch holding the installers plus `shift-update.json`, which names each artifact, its size and its SHA256. The feed URL is derived from the git remote at build time - Gitea, GitHub and GitLab forms are known, and `SHIFT_UPDATE_URL` overrides it - so no update service has to be deployed anywhere.
 
 Once a day at startup, and on demand from Settings -> **Updates**, Shift reads the manifest, compares versions with semver rules including prereleases, and offers a download. A downloaded installer is checked twice before it can be installed: exact byte length, then a recomputed SHA256 that must match the manifest. A mismatch deletes the file and says so, so nothing half-downloaded launches. Publishing is one command, `scripts/publish-release.sh`, and `docs/RELEASE.md` covers the manifest format, the flags, and the difference between the integrity the hash proves and the authenticity a signed manifest adds (`--key` plus a key baked in with `SHIFT_UPDATE_PUBKEY`).
