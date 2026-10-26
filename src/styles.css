@@ -4578,8 +4578,57 @@ body[data-view="radial"] .share-backdrop {
 .update-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   margin-top: 12px;
+}
+
+/* The two ways an update can end. They sit in a panel whose own text is 12px, so
+   they are sized to that rather than to the Runtime tab's 8.5px rows they were
+   borrowed from, and both take the same box so the pair reads as a choice
+   instead of a button with a stray link beside it. */
+.update-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 14px;
+  border: 1px solid rgba(91, 55, 35, 0.14);
+  border-radius: 9px;
+  color: #5f4437;
+  background: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+  font-weight: 640;
+  cursor: pointer;
+  transition:
+    border-color 0.16s ease,
+    background 0.16s ease,
+    box-shadow 0.16s ease;
+}
+
+.update-action:hover:not(:disabled) {
+  border-color: rgba(242, 106, 51, 0.26);
+  background: #fff;
+  box-shadow: 0 6px 14px rgba(96, 56, 33, 0.1);
+}
+
+.update-action:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
+.update-action.is-commit {
+  border-color: transparent;
+  color: #fff8f2;
+  background: linear-gradient(135deg, #ff8248, #eb5427);
+  box-shadow: 0 6px 16px rgba(228, 83, 39, 0.24);
+  font-weight: 700;
+}
+
+.update-action.is-commit:hover:not(:disabled) {
+  border-color: transparent;
+  background: linear-gradient(135deg, #ff8e59, #f05c2b);
+  box-shadow: 0 8px 20px rgba(228, 83, 39, 0.3);
 }
 
 /* Capture result card: the four things a screenshot raises, one click each. */

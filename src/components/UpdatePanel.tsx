@@ -190,20 +190,30 @@ export function UpdatePanel({ feedUrl, autoCheck, onAutoCheckChange, system }: P
 
       <div className="update-actions">
         {available && !verified ? (
-          <button className="runtime-install" onClick={() => void download()} disabled={downloading}>
-            {downloading ? <LoaderCircle size={12} className="spin" /> : <Download size={12} />}
+          <button
+            className="update-action is-commit"
+            onClick={() => void download()}
+            disabled={downloading}
+          >
+            {downloading ? <LoaderCircle size={13} className="spin" /> : <Download size={13} />}
             {downloading ? t("updateDownloading") : t("updateDownload")}
           </button>
         ) : null}
         {verified ? (
-          <button className="runtime-install" onClick={() => void install()} disabled={installing}>
-            {installing ? <LoaderCircle size={12} className="spin" /> : <Check size={12} />}
+          <button
+            className="update-action is-commit"
+            onClick={() => void install()}
+            disabled={installing}
+          >
+            {installing ? <LoaderCircle size={13} className="spin" /> : <Check size={13} />}
             {installing ? t("updateInstalling") : t("updateInstall")}
           </button>
         ) : null}
-        {verified ? (
-          <button className="settings-link" onClick={() => void clear()}>
-            <X size={12} />
+        {/* An install is a countdown to this process exiting, so the row drops the
+            choice that only resets what is already decided. */}
+        {verified && !installing ? (
+          <button className="update-action" onClick={() => void clear()}>
+            <X size={13} />
             {t("updateDiscard")}
           </button>
         ) : null}
