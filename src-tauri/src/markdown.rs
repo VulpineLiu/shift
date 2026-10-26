@@ -301,6 +301,12 @@ pub fn to_html(markdown: &str) -> String {
     }
     flush_paragraph(&mut paragraph, &mut body);
 
+    page(&body)
+}
+
+/// Wraps an HTML body in the document every renderer path prints from, so a
+/// Pandoc-produced body and a built-in Markdown body reach the page the same way.
+pub fn page(body: &str) -> String {
     format!(
         "<!doctype html>\n<html>\n<head>\n<meta charset=\"utf-8\" />\n<style>\n{}\n</style>\n</head>\n<body>\n{}\n</body>\n</html>\n",
         STYLE, body
@@ -321,6 +327,7 @@ blockquote { margin: 0 0 12px; padding-left: 12px; border-left: 3px solid rgba(2
 table { border-collapse: collapse; margin: 0 0 12px; }
 th, td { border: 1px solid rgba(90, 60, 40, 0.25); padding: 6px 10px; text-align: left; }
 th { background: rgba(120, 80, 55, 0.08); }
+img { max-width: 100%; height: auto; }
 hr { border: 0; border-top: 1px solid rgba(90, 60, 40, 0.2); margin: 18px 0; }
 a { color: #c8541f; }
 "#;

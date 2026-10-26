@@ -121,7 +121,7 @@ Shift 常驻菜单栏（macOS）与通知区域（Windows），同时也有普�
 | PDF | `RTF` | `lopdf` + Pandoc | 以文字层作为正文；需要 Pandoc |
 | PDF | `HEIC` | PDFKit / Poppler + `sips` | 先渲染为 PNG 再转码；需要系统 HEIC 编码器 |
 | PDF | `PNG` `JPG` `TIFF` | PDFKit / Poppler | 每页一个文件，输出到 `… pages` 文件夹 |
-| 文档 `docx` `rtf` `odt` `txt` `md` `html` | `PDF` | AppKit 渲染器（macOS）· 其他系统 Pandoc | macOS 路径不需要 LaTeX 或 wkhtmltopdf |
+| 文档 `docx` `rtf` `odt` `txt` `md` `html` | `PDF` | AppKit 渲染器（macOS）· 其他系统 Pandoc | macOS 路径不需要 LaTeX 或 wkhtmltopdf。带图片的 DOCX 会先经 Pandoc 转成 HTML，因为 AppKit 读取器会丢弃图片 |
 | 文档 `docx` `rtf` `odt` `txt` `md` `html` | `DOCX` `RTF` `HTML` `TXT` `MD` | Pandoc | 自动省略源格式；Markdown 以 GFM 写出。HTML 为图片内嵌的独立单文件 |
 | 演示文稿 `.pptx` | `MD` `PDF` | 纯 Rust + Pandoc | 按页生成标题、要点文字，**表格会输出为真正的 Markdown 表格**；PDF 仍是文字摘要版，非版面还原 |
 | 电子表格 | `MD` `PDF` | `calamine` / 纯 Rust | 每个工作表一张 Markdown 表；`csv`/`tsv` 直接解析 |

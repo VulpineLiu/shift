@@ -178,7 +178,7 @@ fn document_pdf_component() -> RuntimeComponent {
             "document-pdf",
             "AppKit document renderer",
             "documents",
-            "DOCX / RTF / ODT / TXT / MD / HTML -> PDF",
+            "DOCX / RTF / ODT / TXT / MD / HTML -> PDF (a DOCX with pictures also needs Pandoc, which keeps the images)",
             "bundled",
             true,
             None,

@@ -84,6 +84,23 @@ pub fn document_page_images(
     Ok(Some(images))
 }
 
+/// Whether the document body embeds at least one image.
+///
+/// Decides whether a DOCX can be handed to the native renderer, which drops
+/// every inline drawing, or has to travel through a reader that keeps them.
+pub fn contains_inline_images(input: &Path) -> Result<bool, String> {
+    let file = fs::File::open(input).map_err(|error| error.to_string())?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|error| format!("Could not read document: {error}"))?;
+    let mut xml = String::new();
+    archive
+        .by_name("word/document.xml")
+        .map_err(|error| format!("Could not read document body: {error}"))?
+        .read_to_string(&mut xml)
+        .map_err(|error| error.to_string())?;
+    Ok(!document_body_summary(&xml)?.0.is_empty())
+}
+
 fn document_image_links(xml: &str) -> Result<std::collections::BTreeMap<String, String>, String> {
     let mut reader = XmlReader::from_str(xml);
     let mut links = std::collections::BTreeMap::new();

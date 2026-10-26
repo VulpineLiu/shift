@@ -189,6 +189,45 @@ do {
     fail("could not parse document: \(error.localizedDescription)")
 }
 
+/// Fits every picture into the width of the printed page.
+///
+/// The layout sizes an attachment from the density header inside the file —
+/// 72 dpi is assumed when the file carries none — and the cell AppKit builds
+/// for an `<img>` honours neither `bounds` nor a CSS width, so a 1600 px
+/// screenshot saved at 96 dpi asks for 1200 points and prints as a cropped
+/// fragment of itself. A plain `NSTextAttachment` does honour `bounds`, and the
+/// print operation then scales it onto the page along with the text. Aspect
+/// ratio is kept and nothing is resampled: only the size the layout asks for
+/// changes.
+func fitAttachments(
+    _ source: NSAttributedString,
+    to containerWidth: CGFloat
+) -> NSMutableAttributedString {
+    let mutable = NSMutableAttributedString(attributedString: source)
+    let wanted = max(1, containerWidth)
+    mutable.enumerateAttribute(
+        .attachment,
+        in: NSRange(location: 0, length: mutable.length),
+        options: []
+    ) { value, range, _ in
+        guard let old = value as? NSTextAttachment,
+              let contents = old.fileWrapper?.regularFileContents,
+              let image = NSImage(data: contents),
+              image.size.width > wanted else { return }
+        let scale = wanted / image.size.width
+        let replacement = NSTextAttachment()
+        replacement.image = image
+        replacement.bounds = NSRect(
+            x: 0,
+            y: 0,
+            width: (image.size.width * scale).rounded(),
+            height: (image.size.height * scale).rounded()
+        )
+        mutable.addAttribute(.attachment, value: replacement, range: range)
+    }
+    return mutable
+}
+
 let printInfo = NSPrintInfo.shared.copy() as! NSPrintInfo
 printInfo.paperSize = NSSize(width: 595.2, height: 841.8)
 printInfo.topMargin = 42
@@ -203,6 +242,7 @@ printInfo.jobDisposition = .save
 printInfo.dictionary()[NSPrintInfo.AttributeKey.jobSavingURL] = output
 
 let printable = printInfo.imageablePageBounds
+let fitted = fitAttachments(attributed, to: printable.width)
 let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: printable.width, height: 1))
 textView.isEditable = false
 textView.isSelectable = false
@@ -214,7 +254,7 @@ textView.textContainer?.containerSize = NSSize(
     width: printable.width,
     height: .greatestFiniteMagnitude
 )
-textView.textStorage?.setAttributedString(attributed)
+textView.textStorage?.setAttributedString(fitted)
 
 guard let layoutManager = textView.layoutManager,
       let textContainer = textView.textContainer else {

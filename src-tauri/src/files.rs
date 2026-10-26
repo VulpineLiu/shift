@@ -962,10 +962,28 @@ fn native_document_pdf(
     let extension = extension_of(input);
     let mut source = input.to_path_buf();
     let mut temporary = None;
+    // A DOCX with pictures cannot reach the AppKit reader: it silently drops
+    // every inline drawing, so the PDF keeps the text and loses the figures.
+    // Pandoc reads the same file as HTML with the media extracted next to it.
+    let mut work_dir = None;
+    if extension == "docx" && office::contains_inline_images(input).unwrap_or(false) {
+        let work = std::env::temp_dir().join(format!("shift-docx-html-{}", uuid::Uuid::new_v4()));
+        if fs::create_dir_all(&work).is_ok() {
+            if let Some(html) = docx_html_via_pandoc(input, &work) {
+                source = html;
+                work_dir = Some(work);
+            } else {
+                let _ = fs::remove_dir_all(work);
+            }
+        }
+    }
     let mut base_dir = input
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
+    if let Some(work) = work_dir.as_ref() {
+        base_dir = work.clone();
+    }
     if matches!(extension.as_str(), "md" | "markdown") {
         // Markdown must never reach the renderer as plain text: without that
         // step the PDF is a printout of the markup. Pandoc is nicer when it is
@@ -1011,11 +1029,42 @@ fn native_document_pdf(
     if let Some(path) = temporary {
         let _ = fs::remove_file(path);
     }
+    if let Some(directory) = work_dir {
+        let _ = fs::remove_dir_all(directory);
+    }
     if !status.success() || !output.exists() {
         let _ = fs::remove_file(&output);
         return Err("Could not render this document to PDF.".into());
     }
     Ok(Some(output))
+}
+
+/// Renders a DOCX into the HTML document the macOS printer prints from.
+///
+/// Pandoc's reader keeps the pictures, tables and heading levels; the body is
+/// wrapped in the stylesheet the Markdown path already uses, and the media
+/// stays as files in `work` rather than base64 inside the HTML, which would
+/// bloat a document whose figures are photographs.
+#[cfg(target_os = "macos")]
+fn docx_html_via_pandoc(input: &Path, work: &Path) -> Option<PathBuf> {
+    let pandoc = resolve_tool("pandoc")?;
+    let html = work.join("document.html");
+    let status = background_command(&pandoc)
+        .arg(input)
+        .args(["-f", "docx", "-t", "html5"])
+        .arg("--extract-media")
+        .arg(work.join("media"))
+        .args(["-o", html.to_string_lossy().as_ref()])
+        .status()
+        .ok()?;
+    if !status.success() || !html.exists() {
+        return None;
+    }
+    let body = fs::read_to_string(&html).ok()?;
+    if fs::write(&html, crate::markdown::page(&body)).is_err() {
+        return None;
+    }
+    Some(html)
 }
 
 /// Converts through the built-in macOS text converter.
@@ -2428,6 +2477,130 @@ mod tests {
         assert_eq!(
             *progress.lock().unwrap(),
             vec![(1, 2, false), (2, 2, false)]
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The bug this pins: AppKit's OOXML reader keeps the text of a DOCX and
+    /// silently drops its pictures, so a report with figures printed as a text
+    /// document with no figures at all. The PDF must carry the image.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keeps_pictures_when_rendering_a_text_docx_to_pdf() {
+        if which::which("pandoc").is_err() {
+            return;
+        }
+        let dir = scratch_dir();
+        let picture = dir.join("figure.png");
+        sample_image(&picture);
+        // Pandoc writes the fixture so the DOCX is a file a real reader accepts,
+        // with text and a picture in the same body.
+        let markdown = dir.join("report.md");
+        fs::write(
+            &markdown,
+            format!(
+                "# Report\n\nArchitecture overview.\n\n![Figure]({})\n",
+                picture.display()
+            ),
+        )
+        .unwrap();
+        let input = dir.join("report.docx");
+        let status = background_command("pandoc")
+            .arg(&markdown)
+            .args(["-o", input.to_string_lossy().as_ref()])
+            .status()
+            .unwrap();
+        assert!(status.success() && input.exists());
+        assert!(office::contains_inline_images(&input).unwrap());
+
+        let output = convert_document(&input, "pdf", None, None).unwrap();
+        assert!(
+            pdf::has_embedded_images(&output).unwrap(),
+            "the figure was dropped from {}",
+            output.display()
+        );
+        let text = pdf::text_of(&output).unwrap_or_default();
+        assert!(text.contains("Architecture overview"), "{text}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The second half of the same bug. The layout sizes a picture from the
+    /// density header inside the file, so a screenshot saved at 96 dpi asks for
+    /// 1200 points and prints as a cropped fragment of itself. The renderer has
+    /// to fit it to the page; a Form XObject's `/BBox` reports that width
+    /// without needing the content stream decoded.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn fits_a_wide_picture_onto_the_page() {
+        use lopdf::Object;
+
+        if which::which("pandoc").is_err() {
+            return;
+        }
+        let dir = scratch_dir();
+        let picture = dir.join("screenshot.png");
+        // 1200 px, and 72 dpi is what the layout assumes for a file with none.
+        RgbaImage::from_pixel(1200, 400, Rgba([30, 120, 200, 255]))
+            .save_with_format(&picture, ImageFormat::Png)
+            .unwrap();
+        let markdown = dir.join("shot.md");
+        fs::write(
+            &markdown,
+            format!("# Shot\n\nbefore\n\n![S]({})\n\nafter\n", picture.display()),
+        )
+        .unwrap();
+        let input = dir.join("shot.docx");
+        assert!(background_command("pandoc")
+            .arg(&markdown)
+            .args(["-o", input.to_string_lossy().as_ref()])
+            .status()
+            .unwrap()
+            .success());
+
+        let output = convert_document(&input, "pdf", None, None).unwrap();
+        let document = lopdf::Document::load(&output).unwrap();
+        let page_id = *document.get_pages().values().next().expect("a page");
+        let page = document.get_object(page_id).unwrap().as_dict().unwrap();
+        let media = page.get(b"MediaBox").unwrap().as_array().unwrap();
+        let coordinate = |index: usize| match &media[index] {
+            Object::Integer(value) => *value as f64,
+            Object::Real(value) => f64::from(*value),
+            other => panic!("MediaBox entry is {other:?}"),
+        };
+        let page_width = coordinate(2) - coordinate(0);
+
+        let mut widest: f64 = 0.0;
+        for object in document.objects.values() {
+            let Object::Stream(stream) = object else {
+                continue;
+            };
+            if stream
+                .dict
+                .get(b"Subtype")
+                .ok()
+                .and_then(|name| name.as_name().ok())
+                != Some(b"Form")
+            {
+                continue;
+            }
+            let Ok(bbox) = stream.dict.get(b"BBox").and_then(|value| value.as_array()) else {
+                continue;
+            };
+            let edge = |index: usize| match &bbox[index] {
+                Object::Integer(value) => *value as f64,
+                Object::Real(value) => f64::from(*value),
+                _ => 0.0,
+            };
+            widest = widest.max(edge(2) - edge(0));
+        }
+        assert!(
+            widest > 1.0,
+            "no placed picture found in {}",
+            output.display()
+        );
+        assert!(
+            widest <= page_width,
+            "picture placed {widest}pt wide on a {page_width}pt page"
         );
         fs::remove_dir_all(dir).unwrap();
     }
