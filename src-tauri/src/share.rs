@@ -380,6 +380,169 @@ fn prepare(sock: &UdpSocket) {
     let _ = sock.set_read_timeout(Some(Duration::from_millis(400)));
 }
 
+/// Turn an interface address and mask into the broadcast address for that subnet.
+/// Loopback, link-local and unusable masks are excluded because sending there
+/// cannot reach another Shift instance.
+fn directed_broadcast(address: Ipv4Addr, netmask: Ipv4Addr) -> Option<Ipv4Addr> {
+    let mask = u32::from(netmask);
+    if mask == 0
+        || mask == u32::MAX
+        || address.is_unspecified()
+        || address.is_loopback()
+        || address.is_link_local()
+        || address.is_multicast()
+    {
+        return None;
+    }
+    Some(Ipv4Addr::from(u32::from(address) | !mask))
+}
+
+#[cfg(unix)]
+fn interface_broadcasts() -> Vec<Ipv4Addr> {
+    let mut head = std::ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut head) } != 0 {
+        return Vec::new();
+    }
+
+    let mut broadcasts = Vec::new();
+    let mut current = head;
+    while !current.is_null() {
+        let interface = unsafe { &*current };
+        current = interface.ifa_next;
+
+        let up = interface.ifa_flags & libc::IFF_UP as libc::c_uint != 0;
+        let supports_broadcast = interface.ifa_flags & libc::IFF_BROADCAST as libc::c_uint != 0;
+        if !up || !supports_broadcast {
+            continue;
+        }
+
+        let Some(address) = ipv4_from_sockaddr(interface.ifa_addr) else {
+            continue;
+        };
+        let Some(netmask) = ipv4_from_sockaddr(interface.ifa_netmask) else {
+            continue;
+        };
+        if let Some(broadcast) = directed_broadcast(address, netmask) {
+            broadcasts.push(broadcast);
+        }
+    }
+    unsafe { libc::freeifaddrs(head) };
+
+    broadcasts.sort_unstable();
+    broadcasts.dedup();
+    broadcasts
+}
+
+#[cfg(unix)]
+fn ipv4_from_sockaddr(address: *const libc::sockaddr) -> Option<Ipv4Addr> {
+    if address.is_null() || unsafe { (*address).sa_family } as i32 != libc::AF_INET {
+        return None;
+    }
+    let address = unsafe { &*(address as *const libc::sockaddr_in) };
+    Some(Ipv4Addr::from(address.sin_addr.s_addr.to_ne_bytes()))
+}
+
+#[cfg(target_os = "windows")]
+fn interface_broadcasts() -> Vec<Ipv4Addr> {
+    use windows_sys::Win32::{
+        Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR},
+        NetworkManagement::{
+            IpHelper::{
+                GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
+                GAA_FLAG_SKIP_MULTICAST, IP_ADAPTER_ADDRESSES_LH,
+            },
+            Ndis::IfOperStatusUp,
+        },
+        Networking::WinSock::{AF_INET, SOCKADDR_IN},
+    };
+
+    const FLAGS: u32 = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    let family = AF_INET as u32;
+    let mut size = 0;
+    let first = unsafe {
+        GetAdaptersAddresses(
+            family,
+            FLAGS,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            &mut size,
+        )
+    };
+    if first != ERROR_BUFFER_OVERFLOW {
+        return Vec::new();
+    }
+
+    let mut broadcasts = Vec::new();
+    loop {
+        // IP_ADAPTER_ADDRESSES_LH is 8-byte aligned, so backing the API's buffer
+        // with u64 avoids the unaligned pointer a Vec<u8> could produce.
+        let mut storage = vec![0_u64; size.div_ceil(8) as usize];
+        let status = unsafe {
+            GetAdaptersAddresses(
+                family,
+                FLAGS,
+                std::ptr::null(),
+                storage.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH,
+                &mut size,
+            )
+        };
+        if status == ERROR_BUFFER_OVERFLOW {
+            continue;
+        }
+        if status != NO_ERROR {
+            return Vec::new();
+        }
+
+        let mut adapter = storage.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+        while !adapter.is_null() {
+            let current = unsafe { &*adapter };
+            adapter = current.Next;
+            if current.OperStatus != IfOperStatusUp {
+                continue;
+            }
+
+            let mut unicast = current.FirstUnicastAddress;
+            while !unicast.is_null() {
+                let address = unsafe { &*unicast };
+                unicast = address.Next;
+                if address.Address.lpSockaddr.is_null() {
+                    continue;
+                }
+
+                let socket = unsafe { &*(address.Address.lpSockaddr as *const SOCKADDR_IN) };
+                if socket.sin_family != AF_INET as u16 {
+                    continue;
+                }
+                let ip = Ipv4Addr::from(unsafe { socket.sin_addr.S_un.S_addr }.to_ne_bytes());
+                let netmask = prefix_netmask(address.OnLinkPrefixLength.min(32));
+                if let Some(broadcast) = directed_broadcast(ip, netmask) {
+                    broadcasts.push(broadcast);
+                }
+            }
+        }
+        break;
+    }
+
+    broadcasts.sort_unstable();
+    broadcasts.dedup();
+    broadcasts
+}
+
+#[cfg(target_os = "windows")]
+fn prefix_netmask(prefix: u8) -> Ipv4Addr {
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    Ipv4Addr::from(mask)
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn interface_broadcasts() -> Vec<Ipv4Addr> {
+    Vec::new()
+}
+
 /// A discovery socket on the shared beacon port. SO_REUSEPORT must be set before
 /// bind, so unix builds create the raw socket with libc; Windows instances fall
 /// back to a plain bind (one listener per machine, which is also what the
@@ -432,14 +595,21 @@ fn discovery_socket() -> std::io::Result<UdpSocket> {
     }
 }
 
-/// Reach the subnet twice: multicast is the modern path, the legacy broadcast
-/// copy covers networks that drop multicast.
+/// Reach every attached subnet. Multicast covers modern networks; directed
+/// broadcast covers Wi-Fi and guest networks that filter multicast but still
+/// forward subnet broadcasts. The limited broadcast remains a last resort.
 fn announce(sock: &UdpSocket, payload: &[u8]) {
-    for destination in [
-        SocketAddr::from((IpAddr::V4(GROUP), BEACON_PORT)),
-        SocketAddr::from((IpAddr::V4(Ipv4Addr::BROADCAST), BEACON_PORT)),
-    ] {
-        let _ = sock.send_to(payload, destination);
+    let _ = sock.send_to(payload, SocketAddr::from((IpAddr::V4(GROUP), BEACON_PORT)));
+
+    let mut broadcasts = interface_broadcasts();
+    broadcasts.push(Ipv4Addr::BROADCAST);
+    broadcasts.sort_unstable();
+    broadcasts.dedup();
+    for address in broadcasts {
+        let _ = sock.send_to(
+            payload,
+            SocketAddr::from((IpAddr::V4(address), BEACON_PORT)),
+        );
     }
 }
 
@@ -577,15 +747,18 @@ fn probe_network(payload: &[u8]) -> (bool, bool, String) {
         false
     };
     let multicast = hears(SocketAddr::from((IpAddr::V4(GROUP), BEACON_PORT)));
-    let broadcast = hears(SocketAddr::from((
+    let directed = interface_broadcasts()
+        .into_iter()
+        .any(|address| hears(SocketAddr::from((IpAddr::V4(address), BEACON_PORT))));
+    let limited = hears(SocketAddr::from((
         IpAddr::V4(Ipv4Addr::BROADCAST),
         BEACON_PORT,
     )));
     (
         multicast,
-        broadcast,
+        directed || limited,
         format!(
-            "multicast={multicast} broadcast={broadcast} interface={}",
+            "multicast={multicast} directed={directed} limited={limited} interface={}",
             local_address()
         ),
     )
@@ -1212,6 +1385,51 @@ mod tests {
         assert!(state.is_enabled());
         state.enabled.store(false, Ordering::Relaxed);
         assert!(!state.is_enabled());
+    }
+
+    #[test]
+    fn directed_broadcasts_follow_the_interface_netmask() {
+        assert_eq!(
+            directed_broadcast(
+                Ipv4Addr::new(192, 168, 2, 34),
+                Ipv4Addr::new(255, 255, 255, 0)
+            ),
+            Some(Ipv4Addr::new(192, 168, 2, 255))
+        );
+        assert_eq!(
+            directed_broadcast(
+                Ipv4Addr::new(10, 20, 30, 40),
+                Ipv4Addr::new(255, 255, 240, 0)
+            ),
+            Some(Ipv4Addr::new(10, 20, 31, 255))
+        );
+        assert_eq!(
+            directed_broadcast(Ipv4Addr::new(127, 0, 0, 1), Ipv4Addr::new(255, 0, 0, 0)),
+            None
+        );
+        assert_eq!(
+            directed_broadcast(Ipv4Addr::new(169, 254, 1, 2), Ipv4Addr::new(255, 255, 0, 0)),
+            None
+        );
+        assert_eq!(
+            directed_broadcast(
+                Ipv4Addr::new(192, 168, 2, 34),
+                Ipv4Addr::new(255, 255, 255, 255)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn interface_broadcasts_are_unique_and_usable() {
+        let broadcasts = interface_broadcasts();
+        let mut unique = broadcasts.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(broadcasts, unique);
+        assert!(broadcasts
+            .iter()
+            .all(|address| !address.is_unspecified() && !address.is_loopback()));
     }
 
     #[test]

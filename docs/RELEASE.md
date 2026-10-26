@@ -329,13 +329,13 @@ test, which is the proof that the check is real and not a pass-through.
 
 Checked against the live `releases` branch of this repository:
 
-Version **0.1.5**, checked by downloading each artifact back from the raw endpoint rather
+Version **0.1.6**, checked by downloading each artifact back from the raw endpoint rather
 than trusting the local copy:
 
 | Key | Artifact | Verified from the remote |
 | --- | --- | --- |
-| `macos` | `Shift-macOS-universal.dmg` (55,504,368 B) | bytes downloaded, SHA256 matches the manifest |
-| `windows` | `Shift-Setup-0.1.5-win-x64.exe` (24,521,557 B) | bytes downloaded, SHA256 matches the manifest |
+| `macos` | `Shift-macOS-universal.dmg` (55,539,236 B) | bytes downloaded, SHA256 matches the manifest |
+| `windows` | `Shift-Setup-0.1.6-win-x64.exe` (24,494,638 B) | bytes downloaded, SHA256 matches the manifest |
 | `windows-arm64` | not published | by choice — see "Supported release targets" |
 | `linux` | not published | by choice: Linux is a build target here, not a shipped product |
 

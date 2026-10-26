@@ -1,6 +1,6 @@
 [package]
 name = "shift"
-version = "0.1.5"
+version = "0.1.6"
 description = "A radial file utility with screenshot, recording and OCR."
 authors = ["Shift Contributors"]
 edition = "2021"
@@ -53,6 +53,9 @@ windows-sys = { version = "0.59", features = [
   "Win32_UI_WindowsAndMessaging",
   "Win32_UI_Shell",
   "Win32_UI_Shell_Common",
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_NetworkManagement_Ndis",
+  "Win32_Networking_WinSock",
 ] }
 
 [target.'cfg(unix)'.dependencies]

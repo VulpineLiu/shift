@@ -238,7 +238,7 @@ Nothing lands without consent: the receiving machine shows a small card naming t
 
 How it finds peers, with no server and no configuration:
 
-- Every copy sends a small UDP beacon every two seconds to multicast group `239.255.77.88:47888`, plus a legacy broadcast copy for networks that drop multicast. Beacons carry the machine name, OS, and the ephemeral TCP port that will receive files.
+- Every copy sends a small UDP beacon every two seconds to multicast group `239.255.77.88:47888`, plus a directed broadcast to every active IPv4 subnet so networks that filter multicast still find peers. Beacons carry the machine name, OS, and the ephemeral TCP port that will receive files.
 - A beacon that has not been repeated for nine seconds drops the device from the list, so switching networks clears stale entries by itself.
 - File bytes move over a direct TCP connection: a `SHSF` handshake, a JSON header, the payload, then a one-byte acknowledgement, so a sender only reports success once the receiver has the whole file on disk.
 
