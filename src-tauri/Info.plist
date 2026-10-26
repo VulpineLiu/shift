@@ -4,6 +4,8 @@
 <dict>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>Shift captures the area you select for screenshots and screen recordings.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Shift looks for other Shift copies on the same network so you can send files between them.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Shift can include microphone audio in screen recordings when you enable it.</string>
 	<key>NSDesktopFolderUsageDescription</key>
