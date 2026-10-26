@@ -28,7 +28,19 @@ USAGE = __doc__
 
 
 def public_hex(path):
-    key = Ed25519PublicKey.from_public_bytes(path.read_bytes())
+    """Hex of the public half of a key file, whichever half was handed over.
+
+    A raw ed25519 private key is 32 bytes and so is its public half, so the two
+    cannot be told apart by content. Baking the private bytes as if they were a
+    public key produces a key no signature ever verifies against, and the build
+    accepts it without complaint, so the mistake only surfaces on a user's
+    machine as "this build cannot verify the manifest". Anything not named
+    ``*.pub`` is therefore read as the private key it came from and expanded.
+    """
+    if path.suffix == ".pub":
+        key = Ed25519PublicKey.from_public_bytes(path.read_bytes())
+    else:
+        key = Ed25519PrivateKey.from_private_bytes(path.read_bytes()).public_key()
     return key.public_bytes(
         serialization.Encoding.Raw, serialization.PublicFormat.Raw
     ).hex()
