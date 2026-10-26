@@ -113,8 +113,10 @@ names what is still missing.
   once accompanied it was dropped rather than kept as a second thing to maintain. The `macos`
   manifest key has to stay a DMG anyway, because the in-app handoff mounts it with `hdiutil`;
   see "macOS packaging" in `docs/RELEASE.md`. A Developer ID plus notarization removes the
-  prompt entirely and would also stop Screen Recording approval from resetting between
-  builds.
+  prompt entirely and would also stop Screen Recording and Local Network approval from
+  resetting between builds — both are keyed to the signing identity, so an ad-hoc rebuild
+  loses them, and a lost Local Network grant empties the device list with no message
+  anywhere in the UI.
 - Signed Windows installer: pending.
 - Manifest signing is done. `scripts/release-key.py` mints the release key,
   `publish-release.sh --key` publishes a detached `shift-update.sig` over the manifest's

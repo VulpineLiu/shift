@@ -375,7 +375,7 @@ PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH" \
 
 The result is one universal Mach-O including universal drag, PDF-render and doc-render sidecars. To produce the Windows installers and portable ZIPs — x64 and ARM64, both — from macOS, run `scripts/build-windows-release.sh`; full details are in `docs/BUILD_WINDOWS.md`.
 
-**Permissions (macOS).** Screen Recording for capture, Files & Folders for the output folders you choose, Microphone when recording with audio. Shift checks Screen Recording before opening the overlay, so a denial surfaces an actionable error rather than a black screenshot. Dev builds signed with a local certificate keep those grants stable across rebuilds; distribution needs Developer ID plus notarization.
+**Permissions (macOS).** Screen Recording for capture, Files & Folders for the output folders you choose, Microphone when recording with audio, and Local Network for **Send to a device**. Shift checks Screen Recording before opening the overlay, so a denial surfaces an actionable error rather than a black screenshot. A denied Local Network grant is quieter: Shift still sends its beacons and still answers anyone who addresses it directly, but it receives no group traffic, so the device list simply stays empty. Ad-hoc signed builds get a new code identity on every rebuild and macOS keys these grants to that identity, so an upgrade can ask again; distribution with Developer ID keeps them stable.
 
 ## Architecture
 

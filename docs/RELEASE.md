@@ -117,8 +117,10 @@ with no manifest key, and the DMG covers the first install anyway.
 
 Closing this for good means an Apple Developer ID: `Developer ID Application` +
 `notarytool` + `stapler staple`. Then the DMG opens on double-click with no pane to visit,
-and Screen Recording approval stops resetting between builds because the identity stops
-changing.
+and the privacy grants keyed to that identity — Screen Recording, and Local Network, which
+is what device discovery needs — stop resetting between builds. That reset is not
+theoretical: a 0.1.4 user found the device list empty after upgrading, with nothing in the
+UI to say why.
 
 ## Publishing
 
@@ -327,13 +329,13 @@ test, which is the proof that the check is real and not a pass-through.
 
 Checked against the live `releases` branch of this repository:
 
-Version **0.1.4**, checked by downloading each artifact back from the raw endpoint rather
+Version **0.1.5**, checked by downloading each artifact back from the raw endpoint rather
 than trusting the local copy:
 
 | Key | Artifact | Verified from the remote |
 | --- | --- | --- |
-| `macos` | `Shift-macOS-universal.dmg` (54,220,806 B) | bytes downloaded, SHA256 matches the manifest |
-| `windows` | `Shift-Setup-0.1.4-win-x64.exe` (23,237,844 B) | bytes downloaded, SHA256 matches the manifest |
+| `macos` | `Shift-macOS-universal.dmg` (55,504,368 B) | bytes downloaded, SHA256 matches the manifest |
+| `windows` | `Shift-Setup-0.1.5-win-x64.exe` (24,521,557 B) | bytes downloaded, SHA256 matches the manifest |
 | `windows-arm64` | not published | by choice — see "Supported release targets" |
 | `linux` | not published | by choice: Linux is a build target here, not a shipped product |
 
