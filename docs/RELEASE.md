@@ -146,10 +146,18 @@ same Python pass that walks the files produces both.
 Recognised installers: `Shift-macOS-universal.dmg` (macOS), `Shift-Setup-<version>-win-x64.exe`
 and `Shift-Setup-<version>-win-arm64.exe` (Windows, keys `windows` and `windows-arm64`),
 `*.AppImage` / `*.deb` (Linux). Other files in `artifacts/` — the macOS `.pkg`, the portable
-ZIPs, `SHA256SUMS.txt`, the `README-Windows-<arch>.txt` notes — travel with the branch and
-are downloadable from it, but are not offered as installers by the manifest. The `.pkg`
-carries no key on purpose: the `macos` key must stay a DMG so the in-app handoff can mount
-it ("macOS packaging"). Dotfiles and an old manifest are skipped.
+ZIPs, `SHA256SUMS.txt`, the `README-Windows-<arch>.txt` notes and
+`README-macOS-universal.txt` — the packaging note that explains the ad-hoc signature, what a
+fresh machine does with each container, and how to verify a download — travel with the
+branch and are downloadable from it, but are not offered as installers by the manifest. The
+`.pkg` carries no key on purpose: the `macos` key must stay a DMG so the in-app handoff can
+mount it ("macOS packaging"). Dotfiles and an old manifest are skipped.
+
+`README-macOS-universal.txt` is tracked in the repository as well as pushed to the channel,
+so the scheme is documented where a contributor reads it and not only next to a build
+product. Every claim in it was checked against the shipped artifacts: the installed
+`.pkg`'s payload is `Signature=adhoc`, `pkgutil --check-signature` reports `no signature`
+for the package itself, and `shasum -a 256 -c SHA256SUMS.txt` passes on the published set.
 
 Both Windows architectures come from one command, which cross-compiles each target,
 checks the PE machine field of the binary it just built (`0x8664` for x64, `0xAA64` for
