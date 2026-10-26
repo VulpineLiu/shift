@@ -294,7 +294,7 @@ Shift 会持续维护局域网内其他 Shift 实例的列表，并据此提供 
 
 ## 软件更新
 
-新的 macOS 机器请安装 **`Shift-macOS-universal.pkg`**：本项目的构建使用自签名身份且未做公证，Gatekeeper 会把 Shift 判为身份不明的开发者，而通过安装包安装不会把隔离属性带给应用。若改用磁盘镜像安装，首次打开需要在「系统设置 → 隐私与安全性」里允许一次。详见 `docs/RELEASE.md`。
+新的 macOS 机器请安装 **`Shift-macOS-universal.pkg`**：本项目的构建采用 ad-hoc 签名且未做公证，Gatekeeper 会把 Shift 判为身份不明的开发者，而通过安装包安装不会把隔离属性带给应用，装好后打开不会再有提示。若改用磁盘镜像安装，首次打开需要允许一次（右键 → 打开，或在「系统设置 → 隐私与安全性」中点「允许」）。详见 `docs/RELEASE.md`。
 
 更新通道就是这个仓库：一条 `releases` 分支保存安装包以及 `shift-update.json` 清单，清单写明每个安装包的名称、体积与 SHA256。更新源地址在构建时由 git 远端推导——已适配 Gitea、GitHub、GitLab 三种形式，也可用 `SHIFT_UPDATE_URL` 覆盖——因此无需额外部署任何更新服务。
 

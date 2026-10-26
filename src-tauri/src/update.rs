@@ -753,8 +753,8 @@ if ! /usr/bin/ditto "$mount/Shift.app" "$bundle.new" >>"$log" 2>&1; then
   status=1
 else
   # A DMG fetched by a browser carries a quarantine flag, and an app copied out of
-  # one is re-assessed on next launch. This build is signed but not notarized, so
-  # drop the flag the same way a manual drag out of the image would.
+  # one is re-assessed on next launch. This build is ad-hoc signed and not notarized,
+  # so drop the flag the same way a manual drag out of the image would.
   /usr/bin/xattr -dr com.apple.quarantine "$bundle.new" 2>/dev/null
   if mv "$bundle" "$bundle.old" >>"$log" 2>&1 && mv "$bundle.new" "$bundle" >>"$log" 2>&1; then
     /bin/rm -rf "$bundle.old"

@@ -130,7 +130,7 @@
     "macOS": {
       "minimumSystemVersion": "13.0",
       "infoPlist": "Info.plist",
-      "signingIdentity": "Shift Local Signing",
+      "signingIdentity": "-",
       "hardenedRuntime": false
     }
   }

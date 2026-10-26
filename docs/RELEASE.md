@@ -70,44 +70,45 @@ never accumulates gigabytes of installer history while `main` stays clean.
 
 ## macOS packaging
 
-Shift builds are signed with a **self-signed** identity ("Shift Local Signing") and are
-**not notarized** — notarization needs an Apple Developer ID account. Gatekeeper therefore
-calls any Shift build an unidentified developer, and how annoying that is depends entirely
-on the container:
+Shift builds are **ad-hoc signed** (`signingIdentity: "-"` in `tauri.conf.json`) and are
+**not notarized** — notarization needs an Apple Developer ID account, which this project
+does not have. Gatekeeper therefore cannot vouch for any Shift build, and what a fresh
+machine says depends on how the binary is signed:
 
-| Container | What a fresh machine does |
+| Signing | What a fresh machine says |
 | --- | --- |
-| DMG, app dragged into /Applications | The app itself carries the quarantine flag from the browser, so **the first launch of Shift** is refused: *"无法打开，因为来自身份不明的开发者"*. The user approves in 系统设置 → 隐私与安全性 (允许 / 仍要打开), or right-clicks the app and chooses 打开. |
-| `.pkg`, installed with Installer.app or `installer` | The approval moves to the package, once, before anything is installed (double-click reports it, right-click → 打开 passes it, `installer` from a terminal needs nothing). `installer` does not propagate quarantine onto what it installs, so **the installed app launches with no prompt at all** — verified: an installed copy carries only `com.apple.provenance`, no `com.apple.quarantine`. |
+| Ad-hoc (`Signature=adhoc`) — **current** | "cannot be opened because it is from an unidentified developer", and the box offers a way through: Cancel, then right-click → 打开, or 允许 in 系统设置 → 隐私与安全性 |
+| Self-signed certificate | "cannot be opened because it is damaged" / reported as malware, with **only 移至废纸篓** — no override, no pane entry to approve |
+| Developer ID + notarized | Opens on double-click, no prompt |
 
-Both containers hold the same signed universal bundle — `pkgbuild` neither re-signs nor
-strips the signature, and the payload passes `codesign --verify --deep --strict`.
+The middle row is the trap that cost a release. Signing with a locally created
+certificate ("Shift Local Signing") *looks* better — `codesign` on the build machine reports
+`valid on disk` and `satisfies its Designated Requirement`, and `spctl` even accepts it — but
+the certificate lives only in that one Mac's keychain, is self-issued, and is `CA:FALSE`, so
+on any other machine it cannot chain to a trusted root. Sequoia turns an unchainable
+signature on a quarantined download into a hard refusal, which is strictly worse than no
+certificate at all. If the identity is used again it must be installed **and trusted** on
+every machine, which is not something to ask of a user.
 
-So the channel publishes both, for different jobs:
+So: ad-hoc, and the two containers each cover one job.
 
-- **`Shift-macOS-universal.pkg`** — first install on any machine. Build it with
-  `scripts/macos-pkg.sh <Shift.app> <out.pkg>`; it stages the bundle under a
-  `/Applications` root and runs `pkgbuild`, keeping the app's own signature.
-  The package itself is unsigned: `productsign` needs a certificate with the *Installer
-  Signing* purpose and this build has only a code-signing identity. A browser-downloaded
-  unsigned package is refused on a plain double-click, so the user approves it once —
-  right-click → 打开, or 仍要打开 in 系统设置 → 隐私与安全性. What the package changes is
-  *where* that single approval lands: on the download, before install, instead of on the
-  app every time it is opened.
-  `installer -pkg Shift-macOS-universal.pkg -target /` from a terminal needs no such
-  permission at all.
-- **`Shift-macOS-universal.dmg`** — the `macos` manifest key, because
-  `update_install`'s handoff mounts the image with `hdiutil` and copies the bundle out of
-  it. Pointing the key at a `.pkg` would make that mount fail, so the key stays a DMG
-  until the updater learns to run `installer`. A DMG Shift downloads itself arrives without
-  a quarantine flag (`curl` sets none, and the handoff strips it anyway), which is why
-  in-app updates never trigger the prompt — it is only the browser download on a new
-  machine that does.
+| Container | First launch on a fresh machine |
+| --- | --- |
+| `.pkg`, via Installer.app or `installer` | `installer` does not propagate quarantine onto what it installs, so the app opens with **no prompt at all**. Verified: an installed copy carries `com.apple.provenance` and no `com.apple.quarantine`. The package itself is unsigned (`productsign` needs an *Installer Signing* certificate; a code-signing identity is rejected), so a browser-downloaded package may need right-click → 打开 once, before anything installs. `installer -pkg … -target /` needs nothing. |
+| `.dmg`, app dragged to /Applications | The app keeps the browser's quarantine flag, so the first launch needs the one approval above. Shift's own downloader sets no quarantine flag, which is why **in-app updates never prompt** — only a browser download on a new machine does. |
 
-Closing this for good means an Apple Developer ID: sign with `Developer ID Application`,
-notarize with `notarytool`, and staple the ticket. Then both containers open on double-click
-with no pane to visit, and Screen Recording approval stops resetting between builds because
-the identity stops changing.
+`scripts/macos-pkg.sh <Shift.app> <out.pkg>` builds the package: it stages the bundle under
+an `/Applications` root and runs `pkgbuild`, which neither re-signs nor strips the payload —
+the CDHash is identical in the built bundle, the DMG copy and the pkg copy.
+
+The `macos` manifest key stays a DMG on purpose: `update_install`'s handoff mounts the image
+with `hdiutil` and copies the bundle out of it, so pointing the key at a `.pkg` would make
+every in-app update fail to mount.
+
+Closing this for good means an Apple Developer ID: `Developer ID Application` +
+`notarytool` + `stapler staple`. Then both containers open on double-click with no pane to
+visit, and Screen Recording approval stops resetting between builds because the identity
+stops changing.
 
 ## Publishing
 

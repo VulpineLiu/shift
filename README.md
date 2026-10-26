@@ -292,7 +292,7 @@ Each is overridable in Settings. File actions offer a *collect everything in one
 
 ## Updates
 
-A new macOS machine should install **`Shift-macOS-universal.pkg`**: builds are signed with a self-signed identity and not notarized, so Gatekeeper calls Shift an unidentified developer, and an installed package leaves the app free of the quarantine flag. If you install the disk image instead, the first launch needs one approval in System Settings → Privacy & Security. Details in `docs/RELEASE.md`.
+A new macOS machine should install **`Shift-macOS-universal.pkg`**: builds are ad-hoc signed and not notarized, so Gatekeeper calls Shift an unidentified developer, and an installed package leaves the app free of the quarantine flag - it opens with no prompt. From the disk image, the first launch needs one approval (right-click → Open, or 允许 in System Settings → Privacy & Security). Details in `docs/RELEASE.md`.
 
 The update channel is this repository: a `releases` branch holding the installers plus `shift-update.json`, which names each artifact, its size and its SHA256. The feed URL is derived from the git remote at build time - Gitea, GitHub and GitLab forms are known, and `SHIFT_UPDATE_URL` overrides it - so no update service has to be deployed anywhere.
 
