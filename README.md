@@ -238,8 +238,8 @@ Nothing lands without consent: the receiving machine shows a small card naming t
 
 How it finds peers, with no server and no configuration:
 
-- Every copy sends a small UDP beacon every two seconds to multicast group `239.255.77.88:47888`, plus a directed broadcast to every active IPv4 subnet so networks that filter multicast still find peers. Beacons carry the machine name, OS, and the ephemeral TCP port that will receive files.
-- A beacon that has not been repeated for nine seconds drops the device from the list, so switching networks clears stale entries by itself.
+- Every copy sends a small UDP beacon every two seconds to multicast group `239.255.77.88:47888`, a directed broadcast to every active IPv4 subnet, and a unicast subnet sweep that still finds peers when both multicast and broadcast are filtered. Every regular beacon gets a unicast answer, so a peer stays visible instead of flashing once and expiring. Beacons carry the machine name, OS, and the ephemeral TCP port that will receive files.
+- A beacon that has not been repeated for fifteen seconds drops the device from the list, so switching networks clears stale entries by itself while older peers have time to answer again.
 - File bytes move over a direct TCP connection: a `SHSF` handshake, a JSON header, the payload, then a one-byte acknowledgement, so a sender only reports success once the receiver has the whole file on disk.
 
 Only the local network is involved — nothing reaches the internet. The receiver listens on all interfaces, so a macOS firewall prompt appears the first time Shift shares; allowing it enables both directions.

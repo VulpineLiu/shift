@@ -25,9 +25,14 @@ use tauri::{AppHandle, Emitter, Manager};
 /// same beacons; file transfers use the ephemeral TCP port carried in the beacon.
 const GROUP: Ipv4Addr = Ipv4Addr::new(239, 255, 77, 88);
 const BEACON_PORT: u16 = 47_888;
-/// A peer that has not been heard from for this long leaves the list.
-const PEER_TIMEOUT: Duration = Duration::from_secs(9);
+/// A peer that has not been heard from for this long leaves the list. Keep this
+/// longer than an old peer's own nine-second expiry plus our two-second unicast
+/// refresh, or a scan-only peer will flash and disappear between replies.
+const PEER_TIMEOUT: Duration = Duration::from_secs(15);
 const BEACON_INTERVAL: Duration = Duration::from_secs(2);
+/// A unicast sweep is a fallback for networks that drop both multicast and
+/// broadcast. Keep it infrequent; once one peer answers, unicast keeps it fresh.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 /// How long the receiving side may take to accept an incoming file. The sender
 /// blocks on its copy of this wait, so keep it short enough to notice by hand.
 pub const DECISION_TIMEOUT: Duration = Duration::from_secs(45);
@@ -57,6 +62,17 @@ struct Beacon {
     platform: String,
     /// TCP port of the file receiver.
     port: u16,
+    /// True on a unicast answer. It prevents two new copies from answering each
+    /// other forever while still refreshing peers on every regular beacon.
+    #[serde(default)]
+    reply: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ReceivedBeacon {
+    name: String,
+    fresh: bool,
+    reply: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -114,6 +130,8 @@ pub struct ShareState {
     accepted_batches: Mutex<HashMap<String, Instant>>,
     /// False means this copy stays silent on the discovery port.
     enabled: AtomicBool,
+    /// Set by the UI so the long-lived discovery thread can scan immediately.
+    refresh_requested: AtomicBool,
 }
 
 impl Default for ShareState {
@@ -124,6 +142,7 @@ impl Default for ShareState {
             pending: Mutex::new(HashMap::new()),
             accepted_batches: Mutex::new(HashMap::new()),
             enabled: AtomicBool::new(true),
+            refresh_requested: AtomicBool::new(false),
         }
     }
 }
@@ -131,6 +150,14 @@ impl Default for ShareState {
 impl ShareState {
     fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::Relaxed)
+    }
+
+    fn request_refresh(&self) {
+        self.refresh_requested.store(true, Ordering::Relaxed);
+    }
+
+    fn take_refresh_request(&self) -> bool {
+        self.refresh_requested.swap(false, Ordering::Relaxed)
     }
 
     fn peers_visible(&self) -> Vec<Peer> {
@@ -188,6 +215,18 @@ impl ShareState {
             .lock()
             .ok()
             .and_then(|peers| peers.get(id).map(|peer| (peer.name.clone(), peer.address)))
+    }
+
+    fn peer_destinations(&self) -> Vec<SocketAddr> {
+        self.peers
+            .lock()
+            .map(|peers| {
+                peers
+                    .values()
+                    .map(|peer| SocketAddr::new(peer.address.ip(), BEACON_PORT))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Drop stale peers; returns true when the visible list changed.
@@ -310,6 +349,7 @@ pub fn spawn(app: &AppHandle) {
         name: machine_name(),
         platform: platform_label(),
         port,
+        reply: false,
     };
     if let Ok(mut guard) = app.state::<ShareState>().local.lock() {
         *guard = local.clone();
@@ -397,14 +437,20 @@ fn directed_broadcast(address: Ipv4Addr, netmask: Ipv4Addr) -> Option<Ipv4Addr> 
     Some(Ipv4Addr::from(u32::from(address) | !mask))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct LocalNetwork {
+    address: Ipv4Addr,
+    netmask: Ipv4Addr,
+}
+
 #[cfg(unix)]
-fn interface_broadcasts() -> Vec<Ipv4Addr> {
+fn interface_networks() -> Vec<LocalNetwork> {
     let mut head = std::ptr::null_mut();
     if unsafe { libc::getifaddrs(&mut head) } != 0 {
         return Vec::new();
     }
 
-    let mut broadcasts = Vec::new();
+    let mut networks = Vec::new();
     let mut current = head;
     while !current.is_null() {
         let interface = unsafe { &*current };
@@ -422,15 +468,15 @@ fn interface_broadcasts() -> Vec<Ipv4Addr> {
         let Some(netmask) = ipv4_from_sockaddr(interface.ifa_netmask) else {
             continue;
         };
-        if let Some(broadcast) = directed_broadcast(address, netmask) {
-            broadcasts.push(broadcast);
+        if directed_broadcast(address, netmask).is_some() {
+            networks.push(LocalNetwork { address, netmask });
         }
     }
     unsafe { libc::freeifaddrs(head) };
 
-    broadcasts.sort_unstable();
-    broadcasts.dedup();
-    broadcasts
+    networks.sort_unstable();
+    networks.dedup();
+    networks
 }
 
 #[cfg(unix)]
@@ -443,7 +489,7 @@ fn ipv4_from_sockaddr(address: *const libc::sockaddr) -> Option<Ipv4Addr> {
 }
 
 #[cfg(target_os = "windows")]
-fn interface_broadcasts() -> Vec<Ipv4Addr> {
+fn interface_networks() -> Vec<LocalNetwork> {
     use windows_sys::Win32::{
         Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR},
         NetworkManagement::{
@@ -472,7 +518,7 @@ fn interface_broadcasts() -> Vec<Ipv4Addr> {
         return Vec::new();
     }
 
-    let mut broadcasts = Vec::new();
+    let mut networks = Vec::new();
     loop {
         // IP_ADAPTER_ADDRESSES_LH is 8-byte aligned, so backing the API's buffer
         // with u64 avoids the unaligned pointer a Vec<u8> could produce.
@@ -515,17 +561,20 @@ fn interface_broadcasts() -> Vec<Ipv4Addr> {
                 }
                 let ip = Ipv4Addr::from(unsafe { socket.sin_addr.S_un.S_addr }.to_ne_bytes());
                 let netmask = prefix_netmask(address.OnLinkPrefixLength.min(32));
-                if let Some(broadcast) = directed_broadcast(ip, netmask) {
-                    broadcasts.push(broadcast);
+                if directed_broadcast(ip, netmask).is_some() {
+                    networks.push(LocalNetwork {
+                        address: ip,
+                        netmask,
+                    });
                 }
             }
         }
         break;
     }
 
-    broadcasts.sort_unstable();
-    broadcasts.dedup();
-    broadcasts
+    networks.sort_unstable();
+    networks.dedup();
+    networks
 }
 
 #[cfg(target_os = "windows")]
@@ -539,8 +588,53 @@ fn prefix_netmask(prefix: u8) -> Ipv4Addr {
 }
 
 #[cfg(not(any(unix, target_os = "windows")))]
-fn interface_broadcasts() -> Vec<Ipv4Addr> {
+fn interface_networks() -> Vec<LocalNetwork> {
     Vec::new()
+}
+
+fn interface_broadcasts() -> Vec<Ipv4Addr> {
+    let mut broadcasts: Vec<Ipv4Addr> = interface_networks()
+        .into_iter()
+        .filter_map(|network| directed_broadcast(network.address, network.netmask))
+        .collect();
+    broadcasts.sort_unstable();
+    broadcasts.dedup();
+    broadcasts
+}
+
+/// Enumerate a small subnet by unicast. Broadcast and multicast are the efficient
+/// paths; this one still works when an access point drops both, which is common on
+/// guest Wi-Fi and some enterprise networks. Subnets larger than /24 are sampled
+/// from the /24 that contains this host so discovery cannot turn into a flood.
+fn subnet_scan_addresses(address: Ipv4Addr, netmask: Ipv4Addr) -> Vec<Ipv4Addr> {
+    if directed_broadcast(address, netmask).is_none() {
+        return Vec::new();
+    }
+    let mask = u32::from(netmask);
+    let host_bits = (!mask).count_ones();
+    let (first, count) = if host_bits <= 8 {
+        let network = u32::from(address) & mask;
+        (network + 1, (1_u32 << host_bits).saturating_sub(2))
+    } else {
+        (u32::from(address) & 0xffff_ff00 | 1, 254)
+    };
+    (0..count)
+        .map(|offset| Ipv4Addr::from(first + offset))
+        .filter(|candidate| *candidate != address)
+        .collect()
+}
+
+fn scan_destinations() -> Vec<SocketAddr> {
+    let mut addresses: Vec<Ipv4Addr> = interface_networks()
+        .into_iter()
+        .flat_map(|network| subnet_scan_addresses(network.address, network.netmask))
+        .collect();
+    addresses.sort_unstable();
+    addresses.dedup();
+    addresses
+        .into_iter()
+        .map(|address| SocketAddr::from((address, BEACON_PORT)))
+        .collect()
 }
 
 /// A discovery socket on the shared beacon port. SO_REUSEPORT must be set before
@@ -613,25 +707,42 @@ fn announce(sock: &UdpSocket, payload: &[u8]) {
     }
 }
 
-/// Register one received datagram as a peer. Returns the peer name when the beacon
-/// was usable and newly seen, which is when a reply and a log line are worthwhile.
+/// Last-resort discovery for networks that drop both multicast and broadcast.
+fn scan_subnet(sock: &UdpSocket, payload: &[u8]) {
+    for destination in scan_destinations() {
+        let _ = sock.send_to(payload, destination);
+    }
+}
+
+/// Register one received datagram. `fresh` only controls logging; every regular
+/// beacon gets an answer so a peer stays visible even when its own sends are
+/// filtered by the access point.
 fn register_beacon(
     state: &ShareState,
     bytes: &[u8],
     from: SocketAddr,
     local: &Beacon,
-) -> Option<String> {
+) -> Option<ReceivedBeacon> {
     let Ok(beacon) = serde_json::from_slice::<Beacon>(bytes) else {
         return None;
     };
     if beacon.id.is_empty() || beacon.port == 0 || beacon.id == local.id {
         return None;
     }
-    state.note(&beacon, from).then(|| beacon.name)
+    Some(ReceivedBeacon {
+        name: beacon.name.clone(),
+        fresh: state.note(&beacon, from),
+        reply: beacon.reply,
+    })
 }
 
 fn beacon_loop(app: &AppHandle, mut sock: UdpSocket, local: &Beacon) {
     let Ok(payload) = serde_json::to_vec(local) else {
+        return;
+    };
+    let mut reply_beacon = local.clone();
+    reply_beacon.reply = true;
+    let Ok(reply_payload) = serde_json::to_vec(&reply_beacon) else {
         return;
     };
     let mut buffer = [0u8; 2048];
@@ -642,34 +753,53 @@ fn beacon_loop(app: &AppHandle, mut sock: UdpSocket, local: &Beacon) {
         prepare(&sock);
         let opened = Instant::now();
         let mut last_announce = opened - BEACON_INTERVAL;
-        let mut last_sweep = opened;
+        let mut last_scan = opened - SWEEP_INTERVAL;
+        let mut last_peer_check = opened;
 
         while opened.elapsed() < SOCKET_LIFETIME {
-            let discoverable = app.state::<ShareState>().is_enabled();
-            if discoverable && last_announce.elapsed() >= BEACON_INTERVAL {
+            let state = app.state::<ShareState>();
+            let discoverable = state.is_enabled();
+            let refresh = state.take_refresh_request();
+            drop(state);
+            if discoverable && (refresh || last_announce.elapsed() >= BEACON_INTERVAL) {
                 announce(&sock, &payload);
+                let destinations = app.state::<ShareState>().peer_destinations();
+                for destination in destinations {
+                    let _ = sock.send_to(&payload, destination);
+                }
                 last_announce = Instant::now();
+            }
+            if discoverable && (refresh || last_scan.elapsed() >= SWEEP_INTERVAL) {
+                scan_subnet(&sock, &payload);
+                last_scan = Instant::now();
             }
 
             match sock.recv_from(&mut buffer) {
                 Ok((length, from)) => {
                     let state = app.state::<ShareState>();
-                    let fresh = register_beacon(&state, &buffer[..length], from, local);
+                    let received = register_beacon(&state, &buffer[..length], from, local);
                     drop(state);
-                    // A copy that just started gets an immediate unicast reply
-                    // instead of waiting for the next announce round.
-                    if let Some(name) = fresh {
-                        eprintln!("Shift share: found {} on {}", name, from.ip());
-                        if discoverable {
-                            let _ =
-                                sock.send_to(&payload, SocketAddr::from((from.ip(), BEACON_PORT)));
+                    if let Some(received) = received {
+                        if received.fresh {
+                            eprintln!("Shift share: found {} on {}", received.name, from.ip());
+                        }
+                        if discoverable && !received.reply {
+                            let _ = sock.send_to(
+                                &reply_payload,
+                                SocketAddr::from((from.ip(), BEACON_PORT)),
+                            );
                         }
                     }
                 }
                 Err(error)
                     if matches!(
                         error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::TimedOut
+                            // Scanning closed ports makes Windows surface queued
+                            // ICMP failures as WSAECONNRESET. They are not fatal.
+                            | std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::ConnectionAborted
                     ) => {}
                 Err(error) => {
                     eprintln!("Shift share beacon read failed: {error}");
@@ -686,8 +816,8 @@ fn beacon_loop(app: &AppHandle, mut sock: UdpSocket, local: &Beacon) {
                 }
             }
 
-            if last_sweep.elapsed() >= Duration::from_millis(600) {
-                last_sweep = Instant::now();
+            if last_peer_check.elapsed() >= Duration::from_millis(600) {
+                last_peer_check = Instant::now();
                 let state = app.state::<ShareState>();
                 state.expire();
                 // Push list changes so the panel needs no polling.
@@ -1162,18 +1292,18 @@ pub fn share_peers(state: tauri::State<'_, ShareState>) -> Vec<Peer> {
     state.peers_visible()
 }
 
-/// Ask the network for peers right away; the panel calls this when it opens.
-/// The announce runs on a blocking thread because a broadcast can wait on the
-/// system's packet filter.
+/// Ask the long-lived discovery socket for peers right away. A second socket on
+/// Windows cannot bind the shared port, and on unix it can steal the reply, so the
+/// panel wakes the existing thread instead.
 #[tauri::command]
 pub async fn share_refresh(app: AppHandle) -> Vec<Peer> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<ShareState>();
         if state.is_enabled() {
-            let local = state.local_beacon();
-            if let (Ok(sock), Ok(payload)) = (discovery_socket(), serde_json::to_vec(&local)) {
-                announce(&sock, &payload);
-            }
+            state.request_refresh();
+            // The discovery loop wakes from its 400 ms read timeout, answers, and
+            // emits peers while this command returns the refreshed snapshot.
+            thread::sleep(Duration::from_millis(700));
         }
         state.peers_visible()
     })
@@ -1313,6 +1443,7 @@ mod tests {
             name: "Mini".into(),
             platform: "macos".into(),
             port: 51_000,
+            reply: false,
         }
     }
 
@@ -1380,9 +1511,21 @@ mod tests {
     }
 
     #[test]
+    fn peer_timeout_covers_a_legacy_peers_reply_cycle() {
+        // Versions before the reply field answer once, forget this host after nine
+        // seconds, then answer the next unicast refresh two seconds later.
+        let legacy_expiry = Duration::from_secs(9);
+        assert!(PEER_TIMEOUT > legacy_expiry + BEACON_INTERVAL);
+    }
+
+    #[test]
     fn discovery_is_enabled_by_default_and_can_be_silenced() {
         let state = ShareState::default();
         assert!(state.is_enabled());
+        assert!(!state.take_refresh_request());
+        state.request_refresh();
+        assert!(state.take_refresh_request());
+        assert!(!state.take_refresh_request(), "a refresh is consumed once");
         state.enabled.store(false, Ordering::Relaxed);
         assert!(!state.is_enabled());
     }
@@ -1433,6 +1576,52 @@ mod tests {
     }
 
     #[test]
+    fn subnet_scan_skips_this_host_and_broadcast() {
+        let addresses = subnet_scan_addresses(
+            Ipv4Addr::new(192, 168, 2, 34),
+            Ipv4Addr::new(255, 255, 255, 0),
+        );
+        assert_eq!(addresses.len(), 253);
+        assert!(addresses.contains(&Ipv4Addr::new(192, 168, 2, 1)));
+        assert!(addresses.contains(&Ipv4Addr::new(192, 168, 2, 254)));
+        assert!(!addresses.contains(&Ipv4Addr::new(192, 168, 2, 34)));
+        assert!(!addresses.contains(&Ipv4Addr::BROADCAST));
+    }
+
+    #[test]
+    fn subnet_scan_bounds_a_large_network_to_this_twenty_four() {
+        let addresses =
+            subnet_scan_addresses(Ipv4Addr::new(10, 20, 30, 40), Ipv4Addr::new(255, 255, 0, 0));
+        assert_eq!(addresses.len(), 253);
+        assert!(addresses.contains(&Ipv4Addr::new(10, 20, 30, 1)));
+        assert!(addresses.contains(&Ipv4Addr::new(10, 20, 30, 254)));
+        assert!(!addresses.contains(&Ipv4Addr::new(10, 20, 31, 1)));
+    }
+
+    #[test]
+    fn reply_beacons_are_distinguished_from_regular_ones() {
+        let state = ShareState::default();
+        let local = Beacon {
+            id: "me".into(),
+            name: "Me".into(),
+            platform: "macos".into(),
+            port: 40_000,
+            reply: false,
+        };
+        let mut peer = beacon();
+        peer.reply = true;
+        let received = register_beacon(
+            &state,
+            &serde_json::to_vec(&peer).unwrap(),
+            SocketAddr::from(([192, 168, 1, 9], 55_999)),
+            &local,
+        )
+        .unwrap();
+        assert!(received.reply);
+        assert!(received.fresh);
+    }
+
+    #[test]
     fn both_readmes_document_the_real_discovery_address() {
         let expected = format!("{GROUP}:{BEACON_PORT}");
         for readme in ["../README.md", "../README.zh-CN.md"] {
@@ -1461,6 +1650,7 @@ mod tests {
             name: "Me".into(),
             platform: "macos".into(),
             port: 40_000,
+            reply: false,
         };
         let empty = peer_signature(&state);
         assert_eq!(
@@ -1469,8 +1659,10 @@ mod tests {
                 &serde_json::to_vec(&beacon()).unwrap(),
                 SocketAddr::from(([192, 168, 1, 9], 55_999)),
                 &local
-            ),
-            Some("Mini".into())
+            )
+            .map(|received| received.name)
+            .as_deref(),
+            Some("Mini")
         );
         let after = peer_signature(&state);
         assert_ne!(empty, after, "a new peer must change the signature");
@@ -1489,20 +1681,18 @@ mod tests {
             name: "Me".into(),
             platform: "macos".into(),
             port: 40_000,
+            reply: false,
         };
         let from = SocketAddr::from(([192, 168, 1, 9], 55_999));
         let bytes = serde_json::to_vec(&beacon()).unwrap();
 
-        assert_eq!(
-            register_beacon(&state, &bytes, from, &local).as_deref(),
-            Some("Mini")
-        );
+        let first = register_beacon(&state, &bytes, from, &local).unwrap();
+        assert_eq!(first.name, "Mini");
+        assert!(first.fresh);
+        assert!(!first.reply);
         assert_eq!(state.peers_visible().len(), 1);
-        assert_eq!(
-            register_beacon(&state, &bytes, from, &local),
-            None,
-            "a known peer must not log again"
-        );
+        let repeated = register_beacon(&state, &bytes, from, &local).unwrap();
+        assert!(!repeated.fresh, "a known peer must not log again");
         assert_eq!(state.peers_visible().len(), 1);
     }
 
@@ -1514,6 +1704,7 @@ mod tests {
             name: "Mini".into(),
             platform: "macos".into(),
             port: 40_000,
+            reply: false,
         };
         let from = SocketAddr::from(([192, 168, 1, 9], 55_999));
         let own = serde_json::to_vec(&beacon()).unwrap();
@@ -1611,12 +1802,14 @@ mod tests {
             name: "Left".into(),
             platform: "macos".into(),
             port: 40_001,
+            reply: false,
         };
         let right = Beacon {
             id: "right".into(),
             name: "Right".into(),
             platform: "windows".into(),
             port: 40_002,
+            reply: false,
         };
         let left_sock = discovery_socket().expect("left socket");
         let right_sock = discovery_socket().expect("right socket");
@@ -1649,8 +1842,8 @@ mod tests {
             };
             for _ in 0..40 {
                 if let Ok((length, from)) = sock.recv_from(&mut buffer) {
-                    if register_beacon(state, &buffer[..length], from, local).as_deref()
-                        == Some(want)
+                    if register_beacon(state, &buffer[..length], from, local)
+                        .is_some_and(|received| received.name == want)
                     {
                         return true;
                     }

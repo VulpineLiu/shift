@@ -119,7 +119,8 @@ const messages: Record<Lang, Record<string, string>> = {
     shareTitle: "Send to a device",
     shareRefresh: "Search again",
     shareSearching: "Looking for devices…",
-    shareNoPeers: "No other Shift found on this network.",
+    shareNoPeers:
+      "No other Shift found. Keep both devices on the same network and allow Shift through Local Network or Windows Firewall.",
     shareFiles: "Files",
     shareSelectAll: "Select all",
     shareSelectionCount: "{selected} of {total} selected",
@@ -391,7 +392,8 @@ const messages: Record<Lang, Record<string, string>> = {
     shareTitle: "发送到设备",
     shareRefresh: "重新搜索",
     shareSearching: "正在查找设备…",
-    shareNoPeers: "局域网内没有找到其他 Shift。",
+    shareNoPeers:
+      "局域网内没有找到其他 Shift。请确认两台设备在同一网络，并在「本地网络」或 Windows 防火墙中允许 Shift。",
     shareFiles: "文件",
     shareSelectAll: "全选",
     shareSelectionCount: "已选 {selected}/{total}",
