@@ -425,7 +425,7 @@ scripts/             OCR 资源准备、macOS 伴生进程、Windows 安装器�
 public/tesseract/    WASM 内核与语言模型，构建生成，不提交
 assets/              应用图标源文件
 src-tauri/icons/     各平台生成的应用图标
-docs/                Windows 构建指南、发布与更新通道、路线图、移动端规划
+docs/                Windows 构建指南、发布与更新通道、工程回归台账、路线图、移动端规划
 scripts/linux/       在 CI 之外构建 Linux deb/AppImage 的 Dockerfile
 .github/workflows/   macOS、Windows、Linux 的 CI 定义（见「参与贡献」）
 FileFlipper/         独立姊妹项目，拥有自己的仓库
@@ -447,7 +447,7 @@ Shift 对文件做的任何处理都不会发起互联网请求。文件在本�
 - Windows 的录屏与音视频转换要求 `PATH` 中存在 `ffmpeg`。Linux 的音视频转换同样需要它，区域录屏在 Wayland 下需要 `wf-recorder`、在 X11 下需要 `ffmpeg`；本仓库所在的代码托管平台不会执行这些路径，因此 Linux 的截图能力只能算「可编译」而非「已验证」。
 - Linux 是「可构建」而非「已发布」：不提供 deb 或 AppImage，更新通道里也没有 `linux` 键，因此 Linux 构建检查更新时会得到「没有对应产物」。想要自己动手的人，可照 `scripts/linux/Dockerfile` 或 CI 里的 `linux` 任务来做。
 - 把历史库的某一行拖出去依赖 Webview 对 file URL 拖拽的支持。载荷使用标准的 `text/uri-list`（内含 `file://` 条目）并附带纯文本路径，仍需在每个平台上做手势级验证；在此之前，**发送**、**在文件夹中显示**以及行内按钮是交付文件的确定路径。
-- 局域网分享依赖允许点对点流量的网络。部分访客网络与企业 Wi-Fi 会丢弃组播；这些网络仍可经由广播与单播回退路径工作，但若路由器隔离了客户端，两个实例便无法相遇。
+- 局域网分享依赖允许点对点流量的网络。部分访客网络与企业 Wi-Fi 会丢弃组播；这些网络仍可经由广播与单播回退路径工作，但若路由器隔离了客户端，两个实例便无法相遇。发现机制的不可回退约束、权限排查与回归矩阵见 `docs/ENGINEERING-NOTES.md`。
 - Windows 上每台电脑只有一个 Shift 实例能占用发现端口，因此额外实例不会出现在设备列表中。
 - Windows 与 Linux 代码路径在本机通过编译验证，而托管本仓库的平台并不运行 Actions，因此 CI 不会替你构建任何东西；手势层面的验证仍需真实 Windows 与 Linux 设备。
 - macOS 上签名身份变化后，可能需要重新授予「屏幕录制」与「辅助功能」权限。

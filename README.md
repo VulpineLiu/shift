@@ -429,7 +429,8 @@ scripts/            OCR staging, macOS sidecars, Windows installer, release buil
 public/tesseract/    WASM core + traineddata, generated, not committed
 assets/              app icon source
 src-tauri/icons/     generated app icons per platform
-docs/                Windows build guide, release/update channel, roadmap, mobile plan
+docs/                Windows build guide, release/update channel, engineering regression
+                     ledger, roadmap, mobile plan
 scripts/linux/       Dockerfile that builds the Linux deb/AppImage off CI
 .github/workflows/   CI definitions for macOS, Windows and Linux (see Contributing)
 FileFlipper/         separate companion project, its own repository
@@ -453,7 +454,7 @@ The one exception is opt-in by usage: **Send to a device** talks to your local n
 - Windows recording and media conversion require `ffmpeg` on `PATH`. On Linux media conversion also requires it, area recording needs `wf-recorder` under Wayland and `ffmpeg` under X11, and neither path is exercised by the forge this repository is hosted on, so treat Linux capture as build-verified only.
 - Linux is a build target, not a shipped product: no deb or AppImage is published, so the update channel carries no `linux` key and a Linux build finds nothing to download. `scripts/linux/Dockerfile` and the `linux` job in CI remain the recipe for anyone who wants one.
 - Dragging a library row out uses the webview's file-URL drag support. It is the standard `text/uri-list` payload with a `file://` entry plus the plain path, and it needs a gesture-level check on each platform; until then, **Send**, **Reveal** and the row's own buttons are the guaranteed paths for handing a file over.
-- LAN sharing needs a network that allows peer traffic. Multicast is skipped by some guest and corporate Wi-Fi; those networks still work over the broadcast and unicast fallbacks, but two copies cannot meet across a router that isolates clients.
+- LAN sharing needs a network that allows peer traffic. Multicast is skipped by some guest and corporate Wi-Fi; those networks still work over the broadcast and unicast fallbacks, but two copies cannot meet across a router that isolates clients. The discovery invariants, permission checks and regression matrix are in `docs/ENGINEERING-NOTES.md`.
 - On Windows only one Shift copy per machine can hold the discovery port, so extra instances do not appear as peers.
 - Windows and Linux paths are compile-verified here, and the forge hosting this repository runs no Actions, so nothing is ever built by CI on your behalf. Gesture-level QA needs real Windows and Linux hardware.
 - Signing identity changes on macOS may require re-approving Screen Recording and Accessibility.

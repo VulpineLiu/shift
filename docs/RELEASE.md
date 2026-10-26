@@ -48,6 +48,12 @@ Publishing an ARM64 Windows build later needs no code change: the ladder already
 `windows-arm64` and falls back to `windows`, so adding the file to `artifacts/` and
 re-publishing is enough.
 
+The incident history, failure signatures and non-negotiable implementation constraints
+behind the current Drop, conversion and macOS packaging behaviour are recorded in
+[`ENGINEERING-NOTES.md`](ENGINEERING-NOTES.md). Read the relevant section before changing
+those paths; this release guide defines the channel, while the engineering ledger explains
+why the current shape must not be simplified back into an earlier failure.
+
 Keys are platform, then platform and architecture where they differ. A build picks the
 first key its own architecture matches and never crosses operating systems:
 
@@ -114,6 +120,34 @@ constraint the container had to satisfy, and a DMG satisfies it.
 `scripts/macos-pkg.sh` — which staged the bundle under an `/Applications` root and ran
 `pkgbuild` — is kept in the tree but is no longer part of a release: it built a container
 with no manifest key, and the DMG covers the first install anyway.
+
+### macOS release gate
+
+Every macOS release must pass all of these before it goes into `artifacts/`:
+
+1. Rebuild the universal Swift sidecars with `pnpm mac:drag-bridge`, then build with
+   `pnpm tauri build --target universal-apple-darwin --bundles app,dmg`.
+2. Run `codesign --verify --deep --strict` on `Shift.app`, and confirm
+   `codesign -dv --verbose=2` reports `Signature=adhoc`. A local certificate name here is
+   a release blocker, not a stronger signature.
+3. Run `hdiutil verify Shift-macOS-universal.dmg` and verify `SHA256SUMS.txt` after copying
+   the final artifact into `artifacts/`.
+4. Confirm the release contains no `.pkg`, and that the manifest's `macos` entry points at
+   the DMG. The in-app helper mounts that exact container with `hdiutil`.
+5. Transfer the DMG to a different Mac, preferably one that has never installed Shift.
+   Download the final artifact through a browser from the release feed when possible so the
+   quarantine flag matches the real user path; if a USB or AirDrop transfer is used, confirm
+   the quarantine attribute is present, otherwise Gatekeeper was not exercised. Drag
+   `Shift.app` to `/Applications`, approve the first launch once, and verify the version.
+6. On that same machine, open Drop and confirm another Shift peer appears and stays in the
+   list. A packaging or signing change can invalidate Local Network approval even when the
+   app itself starts correctly.
+7. For an update release, install the previous version on that machine and run the in-app
+   update once. It must restart on the new version without a Gatekeeper prompt.
+
+The build host opening its own DMG proves neither cross-machine installation nor the
+quarantine behaviour. Step 5 is the hard release gate. The full incident record and the
+manual Drop matrix are in [`ENGINEERING-NOTES.md`](ENGINEERING-NOTES.md).
 
 Closing this for good means an Apple Developer ID: `Developer ID Application` +
 `notarytool` + `stapler staple`. Then the DMG opens on double-click with no pane to visit,
@@ -329,13 +363,13 @@ test, which is the proof that the check is real and not a pass-through.
 
 Checked against the live `releases` branch of this repository:
 
-Version **0.1.6**, checked by downloading each artifact back from the raw endpoint rather
+Version **0.1.7**, checked by downloading each artifact back from the raw endpoint rather
 than trusting the local copy:
 
 | Key | Artifact | Verified from the remote |
 | --- | --- | --- |
-| `macos` | `Shift-macOS-universal.dmg` (55,539,236 B) | bytes downloaded, SHA256 matches the manifest |
-| `windows` | `Shift-Setup-0.1.6-win-x64.exe` (24,494,638 B) | bytes downloaded, SHA256 matches the manifest |
+| `macos` | `Shift-macOS-universal.dmg` (55,585,331 B) | bytes downloaded, SHA256 matches the manifest |
+| `windows` | `Shift-Setup-0.1.7-win-x64.exe` (24,514,334 B) | bytes downloaded, SHA256 matches the manifest |
 | `windows-arm64` | not published | by choice — see "Supported release targets" |
 | `linux` | not published | by choice: Linux is a build target here, not a shipped product |
 

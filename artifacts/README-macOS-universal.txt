@@ -1,7 +1,8 @@
 Shift 0.1.7 - macOS 通用（universal）
 
 本文件说明 macOS 安装包是怎么打出来的、在其它机器上会遇到什么，以及如何自己校验。
-完整细节见仓库 docs/RELEASE.md 的「macOS packaging」。
+完整细节见仓库 docs/RELEASE.md 的「macOS packaging」和 docs/ENGINEERING-NOTES.md
+的「macOS DMG 打包与跨机器安装」。
 
 
 关于这个安装包
@@ -39,6 +40,14 @@ macOS 权限
   注意：ad-hoc 构建每次的代码签名哈希都不同，而 macOS 把「屏幕录制」「本地网络」
   这类授权绑在这个哈希上，所以一次升级后可能需要重新授权——这与手动重装是同一
   后果。要彻底消除它，需要 Developer ID 证书加公证（见仓库 docs/ROADMAP.md 的 M5）。
+
+发布前的硬性回归
+  构建机能够打开自己生成的 DMG，不代表发布包合格。每次发版前必须通过发布源在另
+  一台 Mac（最好从未安装过 Shift）用浏览器下载最终 DMG，以保留真实用户会遇到的
+  quarantine 标记；然后挂载、拖入 Applications、完成首次授权并启动，确认版本号
+  正确。随后打开 Drop，确认能看到另一台 Shift 终端且不会很快消失。若该版本同时
+  提供软件内升级，还要从上一版实际升级一次，确认不会出现 Gatekeeper 提示。任何
+  一项未通过都不得上传 DMG。
 
 软件内升级
   设置 → 软件更新 里检查并安装：Shift 自己下载 .dmg，先核对字节数与 SHA256，

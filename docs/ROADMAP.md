@@ -57,6 +57,15 @@ names what is still missing.
   thread to per-monitor-v2 DPI awareness so a mixed-DPI or multi-monitor desktop cannot
   shift the image out from under the overlay. PowerShell is nowhere in the capture path; it
   is used only as the HTTP client for the update download.
+- LAN Drop discovery is working again in 0.1.7: the shared discovery socket now combines
+  multicast, per-interface directed broadcast, limited broadcast and a bounded `/24`
+  unicast sweep; ordinary beacons receive one marked reply, and peer expiry is long enough
+  for older copies to answer. The user-observed acceptance run covered one Mac and one
+  Windows x64 machine after an upgrade. Unit tests cover the scan bounds, timeout and reply
+  semantics, but the live two-host check is manual because this forge runs no CI and the
+  repository has no second-machine fixture. Client-isolated Wi-Fi remains outside the app's
+  control, and Windows still permits only one listener per machine. The exact invariants
+  and manual matrix are in `docs/ENGINEERING-NOTES.md`.
 - Windows ARM64: `scripts/build-windows-release.sh` builds both architectures by
   default, checks each binary's PE machine field (`0x8664` / `0xAA64`) before packaging
   it, and gates each NSIS installer to the matching machine. The update manifest gained a
@@ -112,11 +121,13 @@ names what is still missing.
   fresh machine (drag to /Applications, one approval on first launch), so the `.pkg` that
   once accompanied it was dropped rather than kept as a second thing to maintain. The `macos`
   manifest key has to stay a DMG anyway, because the in-app handoff mounts it with `hdiutil`;
-  see "macOS packaging" in `docs/RELEASE.md`. A Developer ID plus notarization removes the
-  prompt entirely and would also stop Screen Recording and Local Network approval from
-  resetting between builds — both are keyed to the signing identity, so an ad-hoc rebuild
-  loses them, and a lost Local Network grant empties the device list with no message
-  anywhere in the UI.
+  see "macOS packaging" in `docs/RELEASE.md` and the packaging incident record in
+  `docs/ENGINEERING-NOTES.md`. The release gate deliberately requires installation from the
+  transferred DMG on a different Mac; opening the build host's own image is not evidence.
+  A Developer ID plus notarization removes the prompt entirely and would also stop Screen
+  Recording and Local Network approval from resetting between builds — both are keyed to the
+  signing identity, so an ad-hoc rebuild loses them, and a lost Local Network grant empties
+  the device list with no message anywhere in the UI.
 - Signed Windows installer: pending.
 - Manifest signing is done. `scripts/release-key.py` mints the release key,
   `publish-release.sh --key` publishes a detached `shift-update.sig` over the manifest's
