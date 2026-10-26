@@ -1220,6 +1220,13 @@ fn convert_document(
     let output = unique_output_in(input, output_dir, "", extension)?;
     let mut command = background_command(&pandoc);
     command.arg(input);
+    // Pandoc resolves an image path relative to its own working directory,
+    // which for a running Shift is nowhere near the document. Without this a
+    // Markdown image is reported as unfetchable and replaced by its alt text,
+    // so the DOCX/RTF/HTML output silently loses every figure.
+    if let Some(directory) = input.parent().filter(|value| !value.as_os_str().is_empty()) {
+        command.arg("--resource-path").arg(directory);
+    }
     if let Some(writer) = writer {
         command.args(["-t", writer]);
     }
@@ -2602,6 +2609,46 @@ mod tests {
             widest <= page_width,
             "picture placed {widest}pt wide on a {page_width}pt page"
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A Markdown image is stored as a path, so Pandoc has to fetch the file to
+    /// embed it. It resolves that path against its own working directory, which
+    /// for a running Shift is nowhere near the document, and a figure it cannot
+    /// read is quietly replaced by its alt text.
+    #[test]
+    fn keeps_markdown_images_when_converting_to_word() {
+        if which::which("pandoc").is_err() {
+            return;
+        }
+        let dir = scratch_dir();
+        let nested = dir.join("images");
+        fs::create_dir_all(&nested).unwrap();
+        let picture = nested.join("architecture.png");
+        sample_image(&picture);
+        let input = dir.join("report.md");
+        fs::write(
+            &input,
+            "# Report\n\n![Architecture](images/architecture.png)\n",
+        )
+        .unwrap();
+
+        for target in ["docx", "rtf"] {
+            let output = convert_document(&input, target, None, None).unwrap();
+            let bytes = fs::read(&output).unwrap();
+            let embedded = if target == "docx" {
+                let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+                let names: Vec<String> = archive.file_names().map(str::to_string).collect();
+                names.iter().any(|name| name.starts_with("word/media/"))
+            } else {
+                bytes.windows(7).any(|window| window == b"pngblip")
+            };
+            assert!(
+                embedded,
+                "{target} written from {} lost the picture",
+                input.display()
+            );
+        }
         fs::remove_dir_all(dir).unwrap();
     }
 
