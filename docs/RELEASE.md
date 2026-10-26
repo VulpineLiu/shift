@@ -327,19 +327,19 @@ test, which is the proof that the check is real and not a pass-through.
 
 Checked against the live `releases` branch of this repository:
 
-Version **0.1.3**, checked by downloading each artifact back from the raw endpoint rather
+Version **0.1.4**, checked by downloading each artifact back from the raw endpoint rather
 than trusting the local copy:
 
 | Key | Artifact | Verified from the remote |
 | --- | --- | --- |
-| `macos` | `Shift-macOS-universal.dmg` (55,528,662 B) | bytes downloaded, SHA256 matches the manifest |
-| `windows` | `Shift-Setup-0.1.3-win-x64.exe` (24,517,835 B) | bytes downloaded, SHA256 matches the manifest |
+| `macos` | `Shift-macOS-universal.dmg` (54,220,806 B) | bytes downloaded, SHA256 matches the manifest |
+| `windows` | `Shift-Setup-0.1.4-win-x64.exe` (23,237,844 B) | bytes downloaded, SHA256 matches the manifest |
 | `windows-arm64` | not published | by choice — see "Supported release targets" |
 | `linux` | not published | by choice: Linux is a build target here, not a shipped product |
 
-The 0.1.3 tree still carries the retired `Shift-macOS-universal.pkg`, because removing it
-means re-publishing; it has no manifest key, so no client can be served it, and it is simply
-not built any more ("macOS packaging"). macOS ships one artifact from the next publish on.
+The retired `Shift-macOS-universal.pkg` left the branch with this publish: the branch is
+rebuilt from `artifacts/` on every run, so dropping it from the build was enough. macOS now
+ships the one container ("macOS packaging").
 
 `shift-update.sig` verifies over the manifest's exact bytes against the key baked into both
 artifacts. The channel's home is derived from `origin` at build time, and this forge is
