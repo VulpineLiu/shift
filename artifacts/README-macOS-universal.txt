@@ -1,4 +1,4 @@
-Shift 0.1.3 - macOS 通用（universal）
+Shift 0.1.4 - macOS 通用（universal）
 
 本文件说明 macOS 安装包是怎么打出来的、在其它机器上会遇到什么，以及如何自己校验。
 完整细节见仓库 docs/RELEASE.md 的「macOS packaging」。
