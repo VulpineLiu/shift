@@ -1,47 +1,32 @@
 Shift 0.1.3 - macOS 通用（universal）
 
-本文件说明 macOS 安装包是怎么打出来的、两个安装包各自负责什么、在其它机器上
-会遇到什么，以及如何自己校验。完整细节见仓库 docs/RELEASE.md 的「macOS packaging」。
+本文件说明 macOS 安装包是怎么打出来的、在其它机器上会遇到什么，以及如何自己校验。
+完整细节见仓库 docs/RELEASE.md 的「macOS packaging」。
 
 
-为什么有两个安装包
-------------------
+关于这个安装包
+--------------
+
+Shift 的 macOS 产物只有一个：Shift-macOS-universal.dmg，通用二进制，Apple silicon 与
+Intel 都能用。它既是新机器的首次安装方式，也是软件内升级的载体（更新清单里的 macos
+键指向它）。清单的键必须是 .dmg，因为软件内升级的交接脚本要用 hdiutil 挂载镜像再
+取出应用包；早期曾随包发布的 .pkg 在验证过 DMG 可用后就撤掉了，不为它多维护一份
+产物。
 
 本项目的构建是 ad-hoc 签名（src-tauri/tauri.conf.json 里 signingIdentity 固定为
 "-"），且没有 Apple Developer ID 可做公证。Gatekeeper 因此无法为任何 Shift 构建背书，
-一台新机器上的表现取决于安装包的形式：
-
-| 安装包 | 用途 | 新机器上的表现 |
-| --- | --- | --- |
-| Shift-macOS-universal.pkg | 首次安装，交给任何新机器 | installer 不会把隔离属性带给装好的应用，装好后打开**完全没有提示**。已实测：装好的副本只带 com.apple.provenance，没有 com.apple.quarantine。 |
-| Shift-macOS-universal.dmg | 软件内升级通道（清单里的 macos 键） | 应用自己下载的副本不带隔离属性，所以软件内升级也不弹窗。若是从浏览器下载再拖进 /Applications，首次打开需要允许一次。 |
-
-所以：新机器装 .pkg，已在用的 Shift 走软件内升级（下载的是 .dmg）。清单的 macos
-键必须是 .dmg —— 软件内升级的交接脚本用 hdiutil 挂载镜像再取出应用包，指向 .pkg
-会让每次升级都挂载失败。
-
-pkg 里的应用与被拖出来的应用是同一份签名：pkgbuild 既不重新签名也不剥离签名，
-内置应用、DMG 内副本、pkg 内副本的 CDHash 完全一致（已核对）。
+一台新机器上会看到「身份不明的开发者」提示——这是可以放行的，见下节。
 
 
 在其它机器上安装
 ----------------
 
-安装包 .pkg（推荐，新机器）
-  1. 下载 Shift-macOS-universal.pkg。pkg 本身没有签名（productsign 需要一枚带
-     Installer Signing 用途的证书，本项目只有代码签名身份），因此浏览器下载后
-     双击可能被拦：右键 → 打开，或在「系统设置 → 隐私与安全性」中点「仍要打开」，
-     只需一次，发生在安装之前。
-  2. 之后按提示安装，载荷会落到 /Applications。
-  3. 启动 Shift，不会再有任何 Gatekeeper 提示。
-  终端安装连这一次都不需要：
-    sudo installer -pkg Shift-macOS-universal.pkg -target /
-
-磁盘镜像 .dmg（新机器，或想手动装）
-  1. 双击挂载，把 Shift.app 拖进 /Applications。
-  2. 首次启动被拦：「无法打开，因为来自身份不明的开发者」。点取消后，右键
-     Shift.app → 打开，或在「系统设置 → 隐私与安全性」中点「仍要打开」。
-  3. 只需允许一次，之后再打开正常。
+新机器首次安装
+  1. 下载并双击 Shift-macOS-universal.dmg 挂载镜像。
+  2. 把 Shift.app 拖进「应用程序」（或任何你有权限的位置）。
+  3. 首次启动会被拦：「无法打开，因为来自身份不明的开发者」。点取消，然后
+     右键 Shift.app → 打开，或在「系统设置 → 隐私与安全性」中点「仍要打开」。
+  4. 只需允许一次，之后再打开正常。
 
 macOS 权限
   截图与录屏需要「屏幕录制」，输出目录需要「文件与文件夹」，带声音录屏需要
@@ -68,16 +53,12 @@ macOS 权限
     pnpm install
     pnpm mac:drag-bridge
 
-生成通用应用与 DMG，再把应用包包成 .pkg：
+生成通用应用与 DMG：
 
     pnpm tauri build --target universal-apple-darwin --bundles app,dmg
-    scripts/macos-pkg.sh \
-      src-tauri/target/universal-apple-darwin/release/bundle/macos/Shift.app \
-      artifacts/Shift-macOS-universal.pkg
 
-scripts/macos-pkg.sh 把应用包暂存到一个 /Applications 根目录下，再用 pkgbuild 打包；
-install-location 指向 /Applications，所以这台机器上的每个用户都会装到那里。它用
-ditto 而不是 cp，以保留资源分支、符号链接与代码签名。
+产物在 src-tauri/target/universal-apple-darwin/release/bundle/macos/ 下：Shift.app
+与 Shift-macOS-universal.dmg。发布流程（清单、签名、推送）见仓库 docs/RELEASE.md。
 
 若希望更新通道能校验来源，构建时把 ed25519 公钥编进去（发布流程见仓库
 docs/RELEASE.md 的「Signing the channel」）：
@@ -100,14 +81,9 @@ docs/RELEASE.md 的「Signing the channel」）：
     #   Signature=adhoc
     #   Identifier=app.nex.shift
 
-安装包本体（pkg 未签名是已知状态，真正的签名在里面的应用上）：
-
-    pkgutil --check-signature Shift-macOS-universal.pkg   # Status: no signature
-    pkgutil --payload-files Shift-macOS-universal.pkg     # ./Shift.app/...
-
 镜像完整性：
 
     hdiutil verify Shift-macOS-universal.dmg
 
-校验后仍打不开的话，请确认不是在压缩包预览窗口里运行的，并优先使用 .pkg；若坚持用
-.dmg，按上面的「在其它机器上安装」处理首次允许。
+校验后仍打不开的话，请确认不是在压缩包预览窗口里运行的，并按上面的「新机器首次安装」
+处理首次允许：右键 → 打开，或在「系统设置 → 隐私与安全性」中点「仍要打开」。

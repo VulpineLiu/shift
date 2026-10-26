@@ -108,12 +108,13 @@ names what is still missing.
   signing with a locally created certificate made every other machine refuse the app as
   *damaged / malware* with no override, because that certificate cannot chain to a trusted
   root anywhere else, while an ad-hoc binary gets the softer "unidentified developer" box
-  the user can approve. The channel also publishes `Shift-macOS-universal.pkg`, since
-  `installer` does not leave the installed copy quarantined and the app then opens with no
-  prompt at all. The `macos` manifest key stays a DMG so the in-app handoff can keep
-  mounting it; see "macOS packaging" in `docs/RELEASE.md`. A Developer ID plus notarization
-  removes the prompt entirely and would also stop Screen Recording approval from resetting
-  between builds.
+  the user can approve. The channel ships one macOS container, the DMG: it was verified on a
+  fresh machine (drag to /Applications, one approval on first launch), so the `.pkg` that
+  once accompanied it was dropped rather than kept as a second thing to maintain. The `macos`
+  manifest key has to stay a DMG anyway, because the in-app handoff mounts it with `hdiutil`;
+  see "macOS packaging" in `docs/RELEASE.md`. A Developer ID plus notarization removes the
+  prompt entirely and would also stop Screen Recording approval from resetting between
+  builds.
 - Signed Windows installer: pending.
 - Manifest signing is done. `scripts/release-key.py` mints the release key,
   `publish-release.sh --key` publishes a detached `shift-update.sig` over the manifest's

@@ -39,8 +39,7 @@ not a code limit, and it decides what the channel may contain:
 
 | Key | Shipped | Notes |
 | --- | --- | --- |
-| `macos` | yes | One universal bundle, Apple silicon and Intel. The DMG, because that is what the in-app updater mounts |
-| — | yes | `Shift-macOS-universal.pkg`, also macOS universal: the file to hand a machine installing Shift for the first time. It carries no manifest key — see "macOS packaging" |
+| `macos` | yes | One universal bundle, Apple silicon and Intel, shipped as a DMG. Verified on a fresh machine by dragging it to /Applications — see "macOS packaging" |
 | `windows` | yes | x64, which is also what an ARM machine falls back to |
 | `windows-arm64` | no | Buildable — `build-windows-release.sh --arch arm64` still works — just not published |
 | `linux` | no | Build target, not a product; see below |
@@ -99,32 +98,32 @@ project wants, and no release is worse off for losing a certificate no other Mac
 Reusing that identity again would mean installing it **and trusting it** on every machine,
 which is not something to ask of a user.
 
-So: ad-hoc, and the two containers each cover one job.
+So: ad-hoc, and one container. The channel ships **`Shift-macOS-universal.dmg`** and nothing
+else on macOS — the earlier `.pkg` companion was dropped after the DMG was verified to work
+on a fresh machine, and one file per platform is less to keep straight.
 
-| Container | First launch on a fresh machine |
+| Situation | What happens |
 | --- | --- |
-| `.pkg`, via Installer.app or `installer` | `installer` does not propagate quarantine onto what it installs, so the app opens with **no prompt at all**. Verified: an installed copy carries `com.apple.provenance` and no `com.apple.quarantine`. The package itself is unsigned (`productsign` needs an *Installer Signing* certificate; a code-signing identity is rejected), so a browser-downloaded package may need right-click → 打开 once, before anything installs. `installer -pkg … -target /` needs nothing. |
-| `.dmg`, app dragged to /Applications | The app keeps the browser's quarantine flag, so the first launch needs the one approval above. Shift's own downloader sets no quarantine flag, which is why **in-app updates never prompt** — only a browser download on a new machine does. |
+| A machine installing Shift for the first time | Double-click the DMG, drag `Shift.app` to /Applications. The app keeps the browser's quarantine flag, so the **first launch** needs the one approval above: right-click → 打开, or 允许 in 系统设置 → 隐私与安全性. Every launch after that is normal. |
+| An installed Shift updating itself | `update_install`'s handoff downloads the DMG, mounts it with `hdiutil`, copies the bundle out and drops the quarantine flag. Shift's own downloader sets no quarantine flag (`curl` sets none, and the handoff strips it anyway), so **in-app updates never prompt**. |
 
-`scripts/macos-pkg.sh <Shift.app> <out.pkg>` builds the package: it stages the bundle under
-an `/Applications` root and runs `pkgbuild`, which neither re-signs nor strips the payload —
-the CDHash is identical in the built bundle, the DMG copy and the pkg copy.
+The `macos` manifest key is a DMG for the same reason: the in-app handoff mounts the image,
+so pointing the key at a package would break every in-app update. That was the one real
+constraint the container had to satisfy, and a DMG satisfies it.
 
-The `macos` manifest key stays a DMG on purpose: `update_install`'s handoff mounts the image
-with `hdiutil` and copies the bundle out of it, so pointing the key at a `.pkg` would make
-every in-app update fail to mount.
+`scripts/macos-pkg.sh` — which staged the bundle under an `/Applications` root and ran
+`pkgbuild` — is kept in the tree but is no longer part of a release: it built a container
+with no manifest key, and the DMG covers the first install anyway.
 
 Closing this for good means an Apple Developer ID: `Developer ID Application` +
-`notarytool` + `stapler staple`. Then both containers open on double-click with no pane to
-visit, and Screen Recording approval stops resetting between builds because the identity
-stops changing.
+`notarytool` + `stapler staple`. Then the DMG opens on double-click with no pane to visit,
+and Screen Recording approval stops resetting between builds because the identity stops
+changing.
 
 ## Publishing
 
 ```bash
 pnpm tauri build --target universal-apple-darwin --bundles app,dmg
-scripts/macos-pkg.sh src-tauri/target/universal-apple-darwin/release/bundle/macos/Shift.app \
-                     artifacts/Shift-macOS-universal.pkg   # the first-install container
 printf 'Fixes the ring on external displays.\n' > /tmp/notes.md
 scripts/publish-release.sh --notes /tmp/notes.md     # hash, commit, push
 ```
@@ -145,19 +144,17 @@ same Python pass that walks the files produces both.
 
 Recognised installers: `Shift-macOS-universal.dmg` (macOS), `Shift-Setup-<version>-win-x64.exe`
 and `Shift-Setup-<version>-win-arm64.exe` (Windows, keys `windows` and `windows-arm64`),
-`*.AppImage` / `*.deb` (Linux). Other files in `artifacts/` — the macOS `.pkg`, the portable
-ZIPs, `SHA256SUMS.txt`, the `README-Windows-<arch>.txt` notes and
-`README-macOS-universal.txt` — the packaging note that explains the ad-hoc signature, what a
-fresh machine does with each container, and how to verify a download — travel with the
-branch and are downloadable from it, but are not offered as installers by the manifest. The
-`.pkg` carries no key on purpose: the `macos` key must stay a DMG so the in-app handoff can
-mount it ("macOS packaging"). Dotfiles and an old manifest are skipped.
+`*.AppImage` / `*.deb` (Linux). Other files in `artifacts/` — the portable ZIPs,
+`SHA256SUMS.txt`, the `README-Windows-<arch>.txt` notes and `README-macOS-universal.txt`,
+the packaging note explaining the ad-hoc signature and how to verify a download — travel
+with the branch and are downloadable from it, but are not offered as installers by the
+manifest. Dotfiles and an old manifest are skipped.
 
 `README-macOS-universal.txt` is tracked in the repository as well as pushed to the channel,
 so the scheme is documented where a contributor reads it and not only next to a build
-product. Every claim in it was checked against the shipped artifacts: the installed
-`.pkg`'s payload is `Signature=adhoc`, `pkgutil --check-signature` reports `no signature`
-for the package itself, and `shasum -a 256 -c SHA256SUMS.txt` passes on the published set.
+product. Every claim in it was checked against the shipped artifacts: the bundle inside the
+published DMG is `Signature=adhoc`, and `shasum -a 256 -c SHA256SUMS.txt` passes on the
+published set.
 
 Both Windows architectures come from one command, which cross-compiles each target,
 checks the PE machine field of the binary it just built (`0x8664` for x64, `0xAA64` for
@@ -340,8 +337,9 @@ than trusting the local copy:
 | `windows-arm64` | not published | by choice — see "Supported release targets" |
 | `linux` | not published | by choice: Linux is a build target here, not a shipped product |
 
-`Shift-macOS-universal.pkg` sits on the same branch with no manifest key, for first installs
-("macOS packaging"); it was hashed the same way and downloaded back to check.
+The 0.1.3 tree still carries the retired `Shift-macOS-universal.pkg`, because removing it
+means re-publishing; it has no manifest key, so no client can be served it, and it is simply
+not built any more ("macOS packaging"). macOS ships one artifact from the next publish on.
 
 `shift-update.sig` verifies over the manifest's exact bytes against the key baked into both
 artifacts. The channel's home is derived from `origin` at build time, and this forge is
