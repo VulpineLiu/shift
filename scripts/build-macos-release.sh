@@ -12,6 +12,14 @@ cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
 export RUSTUP_TOOLCHAIN=stable-aarch64-apple-darwin
 
+# Keep the same trust anchor in both platform builds when the release key is
+# available. A keyless build still installs updates, but cannot verify the
+# manifest signature.
+if [ -z "${SHIFT_UPDATE_PUBKEY:-}" ] && [ -n "${SHIFT_RELEASE_KEY:-}" ]; then
+  SHIFT_UPDATE_PUBKEY=$(python3 scripts/release-key.py pubkey "${SHIFT_RELEASE_KEY%.ed25519}.pub")
+  export SHIFT_UPDATE_PUBKEY
+fi
+
 SKIP_BUILD=0
 usage() { echo "usage: $0 [--skip-build]" >&2 && exit 2; }
 while [ $# -gt 0 ]; do
@@ -28,6 +36,11 @@ APP="$BUNDLE_DIR/macos/Shift.app"
 OUTPUT="artifacts/Shift-$VERSION-macOS-universal.dmg"
 
 if [ "$SKIP_BUILD" != "1" ]; then
+  if [ -n "${SHIFT_UPDATE_PUBKEY:-}" ]; then
+    echo "== release key baked in: ${SHIFT_UPDATE_PUBKEY:0:12}… =="
+  else
+    echo "== no release key: this build will report the feed as unsigned =="
+  fi
   pnpm mac:drag-bridge
   pnpm tauri build --target universal-apple-darwin --bundles app,dmg
 fi

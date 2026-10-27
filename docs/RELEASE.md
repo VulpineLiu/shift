@@ -211,9 +211,9 @@ scripts/publish-release.sh --key "$SHIFT_RELEASE_KEY"
 ```
 
 Give the release build `SHIFT_UPDATE_PUBKEY` (the hex key) and it can verify the feed; give
-it `SHIFT_RELEASE_KEY` (the private key) and `build-windows-release.sh` derives the public
-key from it, so a cross-build can never be packaged with a key that does not match the
-signature `publish-release.sh --key` produces. Without either, the script prints
+it `SHIFT_RELEASE_KEY` (the private key) and both release scripts derive the public key from
+it, so a build can never be packaged with a key that does not match the signature
+`publish-release.sh --key` produces. Without either, the script prints
 `no release key: this build will report the feed as unsigned` rather than letting it pass
 for a quieter log.
 
