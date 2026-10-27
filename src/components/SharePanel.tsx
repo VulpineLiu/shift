@@ -16,6 +16,7 @@ import {
 import { useEffect, useRef, useState, type DragEvent } from "react";
 import { useI18n } from "../i18n";
 import { api } from "../lib/api";
+import { parseSharePaths, SHARE_PATHS_TYPE } from "../lib/dragOut";
 import { basename, dirname, formatBytes } from "../lib/utils";
 import type { SharePeer, ShareTransfer } from "../types";
 
@@ -177,17 +178,8 @@ export function SharePanel({ paths, onClose, onNotice }: SharePanelProps) {
   }
 
   function dragPaths(event: DragEvent, fallback: string[]) {
-    const raw = event.dataTransfer.getData("application/x-shift-share-paths");
-    if (!raw) return fallback;
-    try {
-      const parsed = JSON.parse(raw) as unknown;
-      if (Array.isArray(parsed) && parsed.every((path) => typeof path === "string")) {
-        return parsed;
-      }
-    } catch {
-      // Fall back to the current selection for malformed internal drags.
-    }
-    return fallback;
+    const raw = event.dataTransfer.getData(SHARE_PATHS_TYPE);
+    return parseSharePaths(raw) ?? fallback;
   }
 
   return (
@@ -259,7 +251,7 @@ export function SharePanel({ paths, onClose, onNotice }: SharePanelProps) {
                     const files = checked ? selectedPaths : [path];
                     event.dataTransfer.effectAllowed = "copy";
                     event.dataTransfer.setData(
-                      "application/x-shift-share-paths",
+                      SHARE_PATHS_TYPE,
                       JSON.stringify(files),
                     );
                   }}

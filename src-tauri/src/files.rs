@@ -636,10 +636,6 @@ fn video_encoder() -> &'static str {
     })
 }
 
-pub(crate) fn video_encoder_name() -> &'static str {
-    video_encoder()
-}
-
 fn video_encode_args(crf: &'static str, bitrate: &'static str) -> Vec<&'static str> {
     match video_encoder() {
         "libx264" => vec![
@@ -928,6 +924,59 @@ pub(crate) fn doc_render_bridge() -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
+fn quicklook_preview_html(work: &Path) -> Option<PathBuf> {
+    fs::read_dir(work)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join("Preview.html"))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Uses the same Quick Look preview Word documents show in Finder as the print
+/// source. AppKit's OOXML reader keeps only the body, so headers, footers and
+/// other page furniture disappear; the Quick Look HTML includes them.
+#[cfg(target_os = "macos")]
+fn docx_pdf_via_quicklook(
+    input: &Path,
+    renderer: &Path,
+    output_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let work = std::env::temp_dir().join(format!("shift-docx-quicklook-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&work).ok()?;
+    let result = (|| {
+        let input_arg = input.to_string_lossy();
+        let work_arg = work.to_string_lossy();
+        let status = crate::process::status_with_timeout(
+            "/usr/bin/qlmanage",
+            &["-p", input_arg.as_ref(), "-o", work_arg.as_ref()],
+            std::time::Duration::from_secs(30),
+        )
+        .ok()?;
+        if !status.success() {
+            return None;
+        }
+        let preview = quicklook_preview_html(&work)?;
+        let generated = work.join("preview.pdf");
+        let status = background_command(renderer)
+            .arg(&preview)
+            .arg(&generated)
+            .arg(preview.parent()?)
+            .arg("--webkit")
+            .status()
+            .ok()?;
+        if !status.success() || !generated.exists() {
+            return None;
+        }
+        let target_dir = output_dir
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| directory_of(input));
+        rename_office_output(generated, input, &target_dir).ok()
+    })();
+    let _ = fs::remove_dir_all(work);
+    result
+}
+
+#[cfg(target_os = "macos")]
 fn native_document_pdf(
     input: &Path,
     output_dir: Option<&Path>,
@@ -960,6 +1009,11 @@ fn native_document_pdf(
         return Ok(None);
     };
     let extension = extension_of(input);
+    if extension == "docx" {
+        if let Some(output) = docx_pdf_via_quicklook(input, &renderer, output_dir) {
+            return Ok(Some(output));
+        }
+    }
     let mut source = input.to_path_buf();
     let mut temporary = None;
     // A DOCX with pictures cannot reach the AppKit reader: it silently drops
@@ -1020,12 +1074,16 @@ fn native_document_pdf(
             .to_path_buf();
     }
     let output = unique_output_in(input, output_dir, "", "pdf")?;
-    let status = background_command(&renderer)
+    let rendered = background_command(&renderer)
         .arg(&source)
         .arg(&output)
         .arg(&base_dir)
-        .status()
+        .stderr(std::process::Stdio::piped())
+        .output()
         .map_err(|error| format!("Could not start the document renderer: {error}"))?;
+    let status = rendered.status;
+    let renderer_error = String::from_utf8_lossy(&rendered.stderr);
+    let renderer_error = renderer_error.trim();
     if let Some(path) = temporary {
         let _ = fs::remove_file(path);
     }
@@ -1034,7 +1092,14 @@ fn native_document_pdf(
     }
     if !status.success() || !output.exists() {
         let _ = fs::remove_file(&output);
-        return Err("Could not render this document to PDF.".into());
+        if !renderer_error.is_empty() {
+            return Err(format!(
+                "Could not render this document to PDF: {renderer_error}"
+            ));
+        }
+        return Err(format!(
+            "Could not render this document to PDF. Renderer exited with {status}."
+        ));
     }
     Ok(Some(output))
 }
@@ -1942,18 +2007,6 @@ pub async fn reveal_file(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn existing_files(paths: Vec<String>) -> Vec<String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        paths
-            .into_iter()
-            .filter(|path| Path::new(path).is_file())
-            .collect()
-    })
-    .await
-    .unwrap_or_default()
-}
-
-#[tauri::command]
 pub async fn open_file(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || open_path(Path::new(&path)))
         .await
@@ -2005,7 +2058,7 @@ pub async fn save_image_data(
             save_image_data_in(&source, &data_url, suffix.as_deref(), output_dir.as_deref())?;
         // Annotations saved from the editor are a result like any other, and this
         // path does not run through the action pipeline, so it records itself.
-        crate::history::record(&app, &[output.clone()]);
+        crate::history::record(&app, std::slice::from_ref(&output));
         Ok(output)
     })
     .await
@@ -2090,7 +2143,7 @@ pub async fn save_text_near(
     tauri::async_runtime::spawn_blocking(move || {
         let output_dir = settings::files_output_dir(&app)?;
         let output = save_text_near_in(&source, &text, suffix.as_deref(), output_dir.as_deref())?;
-        crate::history::record(&app, &[output.clone()]);
+        crate::history::record(&app, std::slice::from_ref(&output));
         Ok(output)
     })
     .await
@@ -2134,6 +2187,62 @@ mod tests {
     fn sample_image(path: &Path) {
         let image = RgbaImage::from_pixel(32, 20, Rgba([240, 100, 40, 255]));
         image.save_with_format(path, ImageFormat::Png).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn docx_with_header_and_footer(path: &Path) {
+        use std::io::Write as _;
+        use zip::{write::SimpleFileOptions, ZipWriter};
+
+        let entries = [
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
+<Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>
+</Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"#,
+            ),
+            (
+                "word/document.xml",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Body content that must survive.</w:t></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="rId1"/><w:footerReference w:type="default" r:id="rId2"/><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>"#,
+            ),
+            (
+                "word/_rels/document.xml.rels",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>
+</Relationships>"#,
+            ),
+            (
+                "word/header1.xml",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Shift Header Regression</w:t></w:r></w:p></w:hdr>"#,
+            ),
+            (
+                "word/footer1.xml",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Shift Footer Regression</w:t></w:r></w:p></w:ftr>"#,
+            ),
+        ];
+
+        let file = fs::File::create(path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        for (name, content) in entries {
+            zip.start_file(name, SimpleFileOptions::default()).unwrap();
+            zip.write_all(content.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
     }
 
     #[test]
@@ -2488,6 +2597,21 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keeps_docx_headers_and_footers_when_converting_to_pdf() {
+        let dir = scratch_dir();
+        let input = dir.join("header.docx");
+        docx_with_header_and_footer(&input);
+
+        let output = convert_document(&input, "pdf", None, None).unwrap();
+        let text = pdf::text_of(&output).unwrap_or_default();
+        assert!(text.contains("Shift Header Regression"), "{text}");
+        assert!(text.contains("Body content that must survive"), "{text}");
+        assert!(text.contains("Shift Footer Regression"), "{text}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     /// The bug this pins: AppKit's OOXML reader keeps the text of a DOCX and
     /// silently drops its pictures, so a report with figures printed as a text
     /// document with no figures at all. The PDF must carry the image.
@@ -2539,8 +2663,6 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn fits_a_wide_picture_onto_the_page() {
-        use lopdf::Object;
-
         if which::which("pandoc").is_err() {
             return;
         }
@@ -2565,49 +2687,21 @@ mod tests {
             .success());
 
         let output = convert_document(&input, "pdf", None, None).unwrap();
-        let document = lopdf::Document::load(&output).unwrap();
-        let page_id = *document.get_pages().values().next().expect("a page");
-        let page = document.get_object(page_id).unwrap().as_dict().unwrap();
-        let media = page.get(b"MediaBox").unwrap().as_array().unwrap();
-        let coordinate = |index: usize| match &media[index] {
-            Object::Integer(value) => *value as f64,
-            Object::Real(value) => f64::from(*value),
-            other => panic!("MediaBox entry is {other:?}"),
-        };
-        let page_width = coordinate(2) - coordinate(0);
-
-        let mut widest: f64 = 0.0;
-        for object in document.objects.values() {
-            let Object::Stream(stream) = object else {
-                continue;
-            };
-            if stream
-                .dict
-                .get(b"Subtype")
-                .ok()
-                .and_then(|name| name.as_name().ok())
-                != Some(b"Form")
-            {
-                continue;
+        let rendered = pdf::to_images_in(&output, "png", &dir.join("rendered")).unwrap();
+        assert_eq!(rendered.len(), 1, "the short report grew an extra page");
+        let page = image::open(&rendered[0]).unwrap().to_rgb8();
+        let mut blue_columns = Vec::new();
+        for (x, _y, pixel) in page.enumerate_pixels() {
+            if pixel[2] > 150 && pixel[1] > 70 && pixel[0] < 100 {
+                blue_columns.push(x);
             }
-            let Ok(bbox) = stream.dict.get(b"BBox").and_then(|value| value.as_array()) else {
-                continue;
-            };
-            let edge = |index: usize| match &bbox[index] {
-                Object::Integer(value) => *value as f64,
-                Object::Real(value) => f64::from(*value),
-                _ => 0.0,
-            };
-            widest = widest.max(edge(2) - edge(0));
         }
+        let left = *blue_columns.iter().min().expect("the picture disappeared");
+        let right = *blue_columns.iter().max().expect("the picture disappeared");
         assert!(
-            widest > 1.0,
-            "no placed picture found in {}",
-            output.display()
-        );
-        assert!(
-            widest <= page_width,
-            "picture placed {widest}pt wide on a {page_width}pt page"
+            left > 1 && right + 2 < page.width(),
+            "picture runs off the page: columns {left}..={right} of {}",
+            page.width()
         );
         fs::remove_dir_all(dir).unwrap();
     }
@@ -2637,7 +2731,7 @@ mod tests {
             let output = convert_document(&input, target, None, None).unwrap();
             let bytes = fs::read(&output).unwrap();
             let embedded = if target == "docx" {
-                let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+                let archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
                 let names: Vec<String> = archive.file_names().map(str::to_string).collect();
                 names.iter().any(|name| name.starts_with("word/media/"))
             } else {

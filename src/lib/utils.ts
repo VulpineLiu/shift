@@ -3,18 +3,11 @@ export function basename(path: string): string {
 }
 
 export const IS_MAC = /Mac/i.test(navigator.platform) || /Mac OS X/i.test(navigator.userAgent);
-export const OPTION_LABEL = IS_MAC ? "⌥" : "Alt";
-export const MODIFIER_NAME = IS_MAC ? "Option" : "Alt";
 
 export function dirname(path: string): string {
   const normalized = path.replace(/\\/g, "/");
   const index = normalized.lastIndexOf("/");
   return index > 0 ? normalized.slice(0, index) : normalized;
-}
-
-export function stripExtension(name: string): string {
-  const index = name.lastIndexOf(".");
-  return index > 0 ? name.slice(0, index) : name;
 }
 
 export function extensionOf(path: string): string {
@@ -51,10 +44,6 @@ export function timeAgo(
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return translate("agoHours", { count: hours });
   return translate("agoDays", { count: Math.floor(hours / 24) });
-}
-
-export function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
 }
 
 export function normalizeSelection(
@@ -176,19 +165,5 @@ export function subscribeRecent(listener: () => void) {
     window.removeEventListener(RECENT_EVENT, listener);
     window.removeEventListener("storage", listener);
   };
-}
-
-export function recentKind(path: string): RecentItem["kind"] {
-  const extension = extensionOf(path);
-  if (["png", "jpg", "jpeg", "webp", "tiff", "tif", "bmp", "gif", "heic", "avif"].includes(extension)) {
-    return "image";
-  }
-  if (["mp4", "mov", "m4v", "avi", "mkv", "webm"].includes(extension)) {
-    return "video";
-  }
-  if (["txt", "md", "csv", "tsv", "html", "htm"].includes(extension)) {
-    return "text";
-  }
-  return "file";
 }
 

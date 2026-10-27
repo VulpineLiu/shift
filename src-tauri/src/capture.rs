@@ -273,13 +273,22 @@ fn screenshot_directory(app: &AppHandle) -> Result<PathBuf, String> {
     settings::screenshot_dir(app)
 }
 
+/// Freeze the screen and raise the overlay for one capture mode.
+///
+/// The Shift windows go down before the grab so the frozen frame holds nothing of
+/// Shift, and come back whether the overlay ends in a file, a cancel, or a failure.
 pub fn begin_capture(app: &AppHandle, mode: &str) -> Result<CaptureSessionInfo, String> {
     ensure_screen_capture_access()?;
-    for label in ["main", "radial", "editor"] {
-        if let Some(window) = app.get_webview_window(label) {
-            let _ = window.hide();
-        }
+    hide_shift_windows(app);
+    let result = begin_overlay(app, mode);
+    if result.is_err() {
+        // A capture that never reached the screen must not leave the panel hidden.
+        restore_windows(app);
     }
+    result
+}
+
+fn begin_overlay(app: &AppHandle, mode: &str) -> Result<CaptureSessionInfo, String> {
     std::thread::sleep(std::time::Duration::from_millis(90));
     let monitor = monitor_at_cursor(app)?;
     let source = capture_screen(app, &monitor)?;
@@ -314,10 +323,85 @@ pub fn begin_capture(app: &AppHandle, mode: &str) -> Result<CaptureSessionInfo, 
     }
     window.show().map_err(|error| error.to_string())?;
     window.set_focus().map_err(|error| error.to_string())?;
+    // Showing the overlay is not the same as giving it the keyboard: see `focus_page`.
+    crate::focus_page(app, "capture");
     window
         .emit("capture://ready", info.clone())
         .map_err(|error| error.to_string())?;
     Ok(info)
+}
+
+/// True while a region recording is on screen. `recording::stop` holds the session
+/// lock while it finishes the file and restores the windows, so this reads the HUD
+/// rather than that mutex — locking it from here would self-deadlock.
+fn recording_active(app: &AppHandle) -> bool {
+    app.get_webview_window("recorder")
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false)
+}
+
+/// The labels a capture clears off the screen, so the grab holds nothing of Shift.
+const CAPTURE_COVERED: [&str; 3] = ["main", "radial", "editor"];
+
+/// Hide the Shift windows, remembering which ones were open. Without that record a
+/// capture could only guess on the way back, which is how "the panel was open, I
+/// took a screenshot, and the panel is gone" happens.
+fn hide_shift_windows(app: &AppHandle) {
+    let mut hidden = Vec::new();
+    for label in CAPTURE_COVERED {
+        if let Some(window) = app.get_webview_window(label) {
+            if window.is_visible().unwrap_or(false) {
+                hidden.push(label.to_string());
+            }
+            let _ = window.hide();
+        }
+    }
+    if let Some(state) = app.try_state::<AppState>() {
+        // Only a fresh capture writes the record. A second overlay raised on top of
+        // the first, or a shot taken mid-recording, must leave the pending one alone
+        // rather than trade the open panel for an empty list.
+        let overlay_up = app
+            .get_webview_window("capture")
+            .and_then(|window| window.is_visible().ok())
+            .unwrap_or(false);
+        if !overlay_up && !recording_active(app) {
+            if let Ok(mut restore) = state.capture_restore.lock() {
+                *restore = hidden;
+            }
+        }
+    }
+}
+
+/// Put back the windows this capture hid. Called when the capture overlay leaves,
+/// whether the shot was taken, cancelled, or handed to the recorder.
+pub fn restore_windows(app: &AppHandle) {
+    // Mid-recording the panel stays down, or it would appear inside the shot; the
+    // recorder restores it when the video is written.
+    if recording_active(app) {
+        return;
+    }
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let Ok(mut restore) = state.capture_restore.lock() else {
+        return;
+    };
+    let mut restored_main = false;
+    for label in restore.drain(..) {
+        restored_main |= label == "main";
+        if let Some(window) = app.get_webview_window(&label) {
+            let _ = window.show();
+        }
+    }
+    // The panel the capture came from is the thing the user was working in, so it
+    // takes the keyboard back. A result card or editor opened after this still
+    // focuses itself, so it wins when it is the more recent request.
+    if restored_main {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.set_focus();
+            crate::focus_page(app, "main");
+        }
+    }
 }
 
 pub fn crop_session(
@@ -352,6 +436,16 @@ pub fn crop_session(
 }
 
 pub fn dismiss_capture(app: &AppHandle) {
+    close_overlay(app, true)
+}
+
+/// End the overlay but leave the panel hidden, for the recorder: a restored window
+/// would land inside the region being filmed. `recording::stop` restores it instead.
+pub fn dismiss_capture_for_recording(app: &AppHandle) {
+    close_overlay(app, false)
+}
+
+fn close_overlay(app: &AppHandle, restore: bool) {
     let source = app
         .try_state::<AppState>()
         .and_then(|state| {
@@ -369,6 +463,9 @@ pub fn dismiss_capture(app: &AppHandle) {
     }
     if let Some(path) = source {
         let _ = fs::remove_file(path);
+    }
+    if restore {
+        restore_windows(app);
     }
 }
 
@@ -395,10 +492,6 @@ pub async fn start_capture(app: AppHandle, mode: String) -> Result<CaptureSessio
 #[tauri::command]
 pub fn cancel_capture(app: AppHandle) -> Result<(), String> {
     dismiss_capture(&app);
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
     Ok(())
 }
 
@@ -454,11 +547,7 @@ fn hand_off(app: &AppHandle, output: &Path) {
 
 pub fn capture_fullscreen_core(app: &AppHandle, state: &AppState) -> Result<String, String> {
     ensure_screen_capture_access()?;
-    for label in ["main", "radial", "editor"] {
-        if let Some(window) = app.get_webview_window(label) {
-            let _ = window.hide();
-        }
-    }
+    hide_shift_windows(app);
     std::thread::sleep(std::time::Duration::from_millis(90));
     let monitor = monitor_at_cursor(app)?;
     let source = capture_screen(app, &monitor)?;
@@ -484,10 +573,7 @@ pub async fn capture_fullscreen(app: AppHandle) -> Result<String, String> {
         let state = app.state::<AppState>();
         let result = capture_fullscreen_core(&app, &state);
         if result.is_err() {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            restore_windows(&app);
         }
         result
     })
@@ -522,9 +608,10 @@ fn open_screen_recording_settings_sync() -> Result<(), String> {
             .status()
             .map_err(|error| error.to_string())?;
         if status.success() {
-            return Ok(());
+            Ok(())
+        } else {
+            Err("Could not open Screen Recording settings.".into())
         }
-        return Err("Could not open Screen Recording settings.".into());
     }
     #[cfg(not(target_os = "macos"))]
     {

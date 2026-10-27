@@ -66,8 +66,6 @@ import type {
   SwitchUpdate,
   WriteCheck,
 } from "../types";
-import type { FileKind, RadialRing } from "../lib/radialOrder";
-
 const FALLBACK_SETTINGS: AppSettings = {
   fileOutputMode: "alongside",
   fileOutputDir: "~/Downloads/Shift",
@@ -247,6 +245,9 @@ export function MainWindow() {
   const [dropAction, setDropAction] = useState<DropAction | null>(null);
   const [hotkeys, setHotkeys] = useState<HotkeyStatus | null>(null);
   const dropTargets = useRef<Partial<Record<DropAction, HTMLElement | null>>>({});
+  // Recent rows can still be handed to other apps, but dropping one back onto
+  // Shift's own action buttons is intentionally unsupported.
+  const recentDragActive = useRef(false);
   const runtimeCheckStarted = useRef(false);
 
   async function finishSetup() {
@@ -592,6 +593,7 @@ export function MainWindow() {
     if (isTauri()) {
       void getCurrentWebview()
         .onDragDropEvent((event) => {
+          if (recentDragActive.current) return;
           if (event.payload.type === "enter") {
             setDragging(true);
             setDropAction(actionAt(event.payload.position));
@@ -883,17 +885,21 @@ export function MainWindow() {
                     onDragStart={(event) => {
                       // A row leaves Shift as the file itself: WebKit turns the file URL
                       // in text/uri-list into a real file drop for Finder and friends,
-                      // while the plain path keeps editors and our own drop zones happy.
+                      // while the plain path remains readable for editors.
                       event.dataTransfer.effectAllowed = "copy";
+                      recentDragActive.current = true;
                       for (const [type, value] of Object.entries(dragOutPayload(item.path))) {
                         event.dataTransfer.setData(type, value);
                       }
+                    }}
+                    onDragEnd={() => {
+                      recentDragActive.current = false;
                     }}
                   >
                     <button
                       className="home-recent-main"
                       onClick={() => void api.openInEditor(item.path)}
-                      title={t("dragOutHint")}
+                      title={t("open")}
                     >
                       <RecentThumb item={item} />
                       <span>
@@ -911,7 +917,7 @@ export function MainWindow() {
                           void history.setPinned(item.path, !item.pinned).catch(() => undefined)
                         }
                       >
-                        <Star size={13} />
+                        <Star size={13} fill={item.pinned ? "currentColor" : "none"} />
                       </button>
                       <button title={t("sendTo")} onClick={() => setSharePaths([item.path])}>
                         <Send size={13} />

@@ -140,11 +140,7 @@ pub fn manifest_url() -> String {
 }
 
 fn platform_key() -> &'static str {
-    match std::env::consts::OS {
-        "macos" => "macos",
-        "windows" => "windows",
-        other => other,
-    }
+    std::env::consts::OS
 }
 
 /// Manifest keys a build accepts, most specific first. An ARM64 Windows build
@@ -681,7 +677,7 @@ pub async fn update_download(app: AppHandle) -> Result<UpdateStatus, String> {
             remembered_signed(&reporter),
         );
         status.state = "ready".into();
-        status.message = format!("{actual}");
+        status.message = actual;
         Ok(publish(&reporter, status))
     })
     .await
@@ -888,42 +884,45 @@ pub async fn update_install(app: AppHandle) -> Result<String, String> {
             quit_for_update(&app);
             return Ok(path);
         }
-        // Reaching here means the update cannot be applied in place: a Linux build
-        // has no in-place install, and a macOS binary run straight out of `target/`
-        // has no bundle to replace. Both get the artifact opened instead.
-        #[cfg(target_os = "macos")]
-        crate::process::command("/usr/bin/open")
-            .arg(&artifact)
-            .status()
-            .map_err(|error| format!("Could not open the update: {error}"))?;
-        // Linux bundles are not installed in place. An AppImage carries its own runtime
-        // but arrives without the executable bit, which is enough to make a double-click
-        // fail, so set that bit and start it directly. A .deb means nothing on its own
-        // and goes to whatever handler the desktop registered for the package format.
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(target_os = "windows"))]
         {
-            let bundle = artifact.clone();
-            if bundle
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("appimage"))
+            // Reaching here means the update cannot be applied in place: a Linux build
+            // has no in-place install, and a macOS binary run straight out of `target/`
+            // has no bundle to replace. Both get the artifact opened instead.
+            #[cfg(target_os = "macos")]
+            crate::process::command("/usr/bin/open")
+                .arg(&artifact)
+                .status()
+                .map_err(|error| format!("Could not open the update: {error}"))?;
+            // Linux bundles are not installed in place. An AppImage carries its own runtime
+            // but arrives without the executable bit, which is enough to make a double-click
+            // fail, so set that bit and start it directly. A .deb means nothing on its own
+            // and goes to whatever handler the desktop registered for the package format.
+            #[cfg(not(target_os = "macos"))]
             {
-                use std::os::unix::fs::PermissionsExt;
-                let mode = fs::metadata(&bundle)
-                    .map_err(|error| format!("Could not read the update: {error}"))?
-                    .permissions()
-                    .mode()
-                    | 0o111;
-                fs::set_permissions(&bundle, fs::Permissions::from_mode(mode))
-                    .map_err(|error| format!("Could not make the update runnable: {error}"))?;
-                crate::process::command(&bundle)
-                    .spawn()
-                    .map_err(|error| format!("Could not start the update: {error}"))?;
-            } else {
-                crate::files::open_path(&bundle)
-                    .map_err(|error| format!("Could not open the update: {error}"))?;
+                let bundle = artifact.clone();
+                if bundle
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("appimage"))
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = fs::metadata(&bundle)
+                        .map_err(|error| format!("Could not read the update: {error}"))?
+                        .permissions()
+                        .mode()
+                        | 0o111;
+                    fs::set_permissions(&bundle, fs::Permissions::from_mode(mode))
+                        .map_err(|error| format!("Could not make the update runnable: {error}"))?;
+                    crate::process::command(&bundle)
+                        .spawn()
+                        .map_err(|error| format!("Could not start the update: {error}"))?;
+                } else {
+                    crate::files::open_path(&bundle)
+                        .map_err(|error| format!("Could not open the update: {error}"))?;
+                }
             }
+            Ok(path)
         }
-        Ok(path)
     })
     .await
     .map_err(|error| format!("Update install failed: {error}"))?
@@ -1123,7 +1122,7 @@ mod tests {
         // Three distinct states, because collapsing "unusable" into "absent" would
         // turn a signed channel into an unsigned one while the UI still claimed the
         // build verifies signatures.
-        assert_eq!(key_from_hex("").unwrap().is_none(), true, "absent");
+        assert!(key_from_hex("").unwrap().is_none(), "absent");
         assert!(key_from_hex(TEST_PUBKEY).unwrap().is_some(), "usable");
         // Not 32 bytes of hex.
         assert!(key_from_hex("deadbeef").unwrap_err().contains("32 bytes"));

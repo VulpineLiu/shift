@@ -182,7 +182,7 @@ impl ShareState {
                     .collect()
             })
             .unwrap_or_default();
-        peers.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        peers.sort_by_key(|peer| peer.name.to_lowercase());
         peers
     }
 
@@ -757,10 +757,10 @@ fn beacon_loop(app: &AppHandle, mut sock: UdpSocket, local: &Beacon) {
         let mut last_peer_check = opened;
 
         while opened.elapsed() < SOCKET_LIFETIME {
-            let state = app.state::<ShareState>();
-            let discoverable = state.is_enabled();
-            let refresh = state.take_refresh_request();
-            drop(state);
+            let (discoverable, refresh) = {
+                let state = app.state::<ShareState>();
+                (state.is_enabled(), state.take_refresh_request())
+            };
             if discoverable && (refresh || last_announce.elapsed() >= BEACON_INTERVAL) {
                 announce(&sock, &payload);
                 let destinations = app.state::<ShareState>().peer_destinations();
@@ -776,9 +776,10 @@ fn beacon_loop(app: &AppHandle, mut sock: UdpSocket, local: &Beacon) {
 
             match sock.recv_from(&mut buffer) {
                 Ok((length, from)) => {
-                    let state = app.state::<ShareState>();
-                    let received = register_beacon(&state, &buffer[..length], from, local);
-                    drop(state);
+                    let received = {
+                        let state = app.state::<ShareState>();
+                        register_beacon(&state, &buffer[..length], from, local)
+                    };
                     if let Some(received) = received {
                         if received.fresh {
                             eprintln!("Shift share: found {} on {}", received.name, from.ip());
@@ -1264,7 +1265,7 @@ fn receive_file(app: &AppHandle, mut stream: TcpStream) -> Result<(), String> {
         },
     );
     // Reuse the result pipeline so received files land in the history library.
-    crate::history::record(app, &[path.clone()]);
+    crate::history::record(app, std::slice::from_ref(&path));
     let _ = app.emit(
         "app://file-result",
         serde_json::json!({ "outputs": [path], "message": name }),
@@ -1285,11 +1286,6 @@ pub fn share_answer(
     accepted: bool,
 ) -> bool {
     state.resolve_pending(&transfer_id, accepted).is_some()
-}
-
-#[tauri::command]
-pub fn share_peers(state: tauri::State<'_, ShareState>) -> Vec<Peer> {
-    state.peers_visible()
 }
 
 /// Ask the long-lived discovery socket for peers right away. A second socket on
@@ -1362,6 +1358,7 @@ pub async fn share_send(
     .map_err(|error| format!("share send failed: {error}"))?
 }
 
+#[allow(clippy::too_many_arguments)]
 fn send_file(
     app: &AppHandle,
     transfer_id: &str,

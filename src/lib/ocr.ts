@@ -30,10 +30,3 @@ export async function recognizeImage(
     confidence: Number(result.data.confidence || 0),
   };
 }
-
-export async function disposeOcrWorker() {
-  if (!workerPromise) return;
-  const worker = await workerPromise.catch(() => null);
-  workerPromise = null;
-  await worker?.terminate?.();
-}

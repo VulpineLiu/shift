@@ -53,7 +53,12 @@ pub fn acquire_instance(app: &AppHandle) -> bool {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let Ok(file) = OpenOptions::new().create(true).write(true).open(&path) else {
+    let Ok(file) = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+    else {
         // An unreadable config folder must not stop the app from starting.
         return true;
     };
@@ -157,7 +162,10 @@ pub async fn quit_other_instances() -> usize {
 }
 
 fn stop_other_instances() -> usize {
-    let mut stopped = 0;
+    #[cfg(unix)]
+    let mut stopped: usize = 0;
+    #[cfg(not(unix))]
+    let stopped: usize = 0;
     for pid in other_pids() {
         #[cfg(unix)]
         if unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } == 0 {

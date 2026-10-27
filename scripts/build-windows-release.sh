@@ -1,13 +1,12 @@
 #!/bin/bash
-# Build the Windows release artefacts from current source.
+# Build the Windows x64 release installer from current source.
 #
-#   scripts/build-windows-release.sh [--skip-build] [--arch x64|arm64]...
+#   scripts/build-windows-release.sh [--skip-build]
 #
-# For every architecture asked for (both by default) this produces an NSIS
-# per-user installer plus a portable ZIP in artifacts/, then refreshes
+# Produces artifacts/Shift-Setup-<version>-win-x64.exe and refreshes
 # artifacts/SHA256SUMS.txt. Cross-compiled on macOS with cargo-xwin; makensis is
-# the Homebrew formula of the same name. publish-release.sh maps the installers
-# onto the "windows" and "windows-arm64" keys of the update manifest.
+# the Homebrew formula of the same name. Windows ARM64 runs this x64 package
+# through the update manifest's normal `windows` fallback.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -18,24 +17,15 @@ export RUSTC="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc"
 ROOT="$PWD"
 VERSION=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
 
-ARCHES=""
 SKIP_BUILD=0
-usage() { echo "usage: $0 [--skip-build] [--arch x64|arm64]..." >&2 && exit 2; }
+usage() { echo "usage: $0 [--skip-build]" >&2 && exit 2; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --skip-build) SKIP_BUILD=1 ;;
-    --arch)
-      shift
-      case "${1:-}" in
-        x64|arm64) ARCHES="$ARCHES $1" ;;
-        *) usage ;;
-      esac
-      ;;
     *) usage ;;
   esac
   shift
 done
-[ -n "$ARCHES" ] || ARCHES="x64 arm64"
 
 # A build can only verify a signed channel if the release key is compiled in. Derive
 # it from the signing key when the caller gave us one, and never do this quietly: the
@@ -55,40 +45,34 @@ if [ "$SKIP_BUILD" != "1" ]; then
   TAURI_ENV_PLATFORM=windows pnpm build
 fi
 
-# One target triple, one expected PE machine and one release-note label per
-# architecture. The PE check is what stops an x64 binary shipping inside an
-# arm64 package because a build was pointed at the wrong target.
-for ARCH in $ARCHES; do
-  case "$ARCH" in
-    x64)   TARGET=x86_64-pc-windows-msvc;   PE_MACHINE=8664; MACHINE="64 位" ;;
-    arm64) TARGET=aarch64-pc-windows-msvc;  PE_MACHINE=aa64; MACHINE=ARM64 ;;
-  esac
-  EXE="src-tauri/target/$TARGET/release/shift.exe"
-  INSTALLER="artifacts/Shift-Setup-$VERSION-win-$ARCH.exe"
-  PORTABLE="artifacts/Shift-Portable-$VERSION-win-$ARCH.zip"
-  NOTES="artifacts/README-Windows-$ARCH.txt"
+ARCH=x64
+TARGET=x86_64-pc-windows-msvc
+PE_MACHINE=8664
+EXE="src-tauri/target/$TARGET/release/shift.exe"
+INSTALLER="artifacts/Shift-Setup-$VERSION-win-x64.exe"
+NOTES="artifacts/README-Windows-x64.txt"
 
-  if [ "$SKIP_BUILD" != "1" ]; then
-    echo "== rust cross build ($ARCH: $TARGET) =="
-    # --features tauri/custom-protocol is mandatory: without it Tauri derives
-    # cfg(dev) and every window loads build.devUrl instead of the bundled assets.
-    CROSS_LOG=$(mktemp /tmp/shift-win-build.XXXXXX)
-    if ! (
-      cd src-tauri
-      cargo xwin build --target "$TARGET" --release \
-        --features tauri/custom-protocol >"$CROSS_LOG" 2>&1
-    ); then
-      sed -n '1,240p' "$CROSS_LOG"
-      exit 1
-    fi
-    grep -Ev "^warning:|^\s+\||^\s+=|LNK4099|failed to load|^$|^\s+-->|^note:" \
-      "$CROSS_LOG" || true
+if [ "$SKIP_BUILD" != "1" ]; then
+  echo "== rust cross build ($TARGET) =="
+  # --features tauri/custom-protocol is mandatory: without it Tauri derives
+  # cfg(dev) and every window loads build.devUrl instead of the bundled assets.
+  CROSS_LOG=$(mktemp /tmp/shift-win-build.XXXXXX)
+  if ! (
+    cd src-tauri
+    cargo xwin build --target "$TARGET" --release \
+      --features tauri/custom-protocol >"$CROSS_LOG" 2>&1
+  ); then
+    sed -n '1,240p' "$CROSS_LOG"
+    exit 1
   fi
+  grep -Ev "^warning:|^\s+\||^\s+=|LNK4099|failed to load|^$|^\s+-->|^note:" \
+    "$CROSS_LOG" || true
+fi
 
-  test -f "$EXE"
+test -f "$EXE"
 
-  echo "== PE machine check ($ARCH) =="
-  python3 - "$EXE" "$PE_MACHINE" <<PE
+echo "== PE machine check (x64) =="
+python3 - "$EXE" "$PE_MACHINE" <<PE
 import pathlib, struct, sys
 exe = pathlib.Path(sys.argv[1]).read_bytes()
 machine = struct.unpack_from("<H", exe, struct.unpack_from("<I", exe, 0x3C)[0] + 4)[0]
@@ -98,8 +82,8 @@ if machine != expected:
 print(f"pe machine ok: 0x{machine:04x}")
 PE
 
-  echo "== verify the frontend is embedded =="
-  python3 - "$EXE" <<PY
+echo "== verify the frontend is embedded =="
+python3 - "$EXE" <<PY
 import pathlib, sys
 exe = pathlib.Path(sys.argv[1]).read_bytes()
 missing = [p.name for p in pathlib.Path("dist/assets").iterdir() if p.name.encode() not in exe]
@@ -125,18 +109,17 @@ if missing:
 print(f"embedded ok: {len(exe):,} byte exe carries the current dist/assets")
 PY
 
-  echo "== windows notes ($ARCH) =="
-  STAGE=$(mktemp -d /tmp/shift-windows-release.XXXXXX)
-  mkdir -p "$STAGE/portable/Shift-$VERSION-Windows-$ARCH"
-  python3 - "$STAGE" "$VERSION" "$ARCH" "$MACHINE" <<PY
+echo "== windows notes (x64) =="
+STAGE=$(mktemp -d /tmp/shift-windows-release.XXXXXX)
+python3 - "$STAGE" "$VERSION" <<PY
 import pathlib, sys
 stage = pathlib.Path(sys.argv[1])
-version, arch, machine = sys.argv[2:5]
-text = f"""Shift {version} - Windows {arch}
+version = sys.argv[2]
+text = f"""Shift {version} - Windows x64
 
 系统要求
 --------
-- Windows 10 或 Windows 11（{machine}）。
+- Windows 10 或 Windows 11（x64；ARM64 设备通过系统兼容层运行）。
 - Microsoft Edge WebView2 Runtime。当前 Windows 10/11 通常已内置；如果 Shift
   启动后窗口空白或无法打开，请从微软官方页面安装：
   https://developer.microsoft.com/microsoft-edge/webview2/
@@ -145,7 +128,7 @@ text = f"""Shift {version} - Windows {arch}
 
 安装
 ----
-1. 运行 Shift-Setup-{version}-win-{arch}.exe，默认安装到
+1. 运行 Shift-Setup-{version}-win-x64.exe，默认安装到
    %LOCALAPPDATA%\\Programs\\Shift，并创建开始菜单与桌面快捷方式。
 2. 这是未签名构建。若 SmartScreen 显示“Windows 已保护你的电脑”，请选择
    “更多信息” > “仍要运行”。
@@ -153,11 +136,6 @@ text = f"""Shift {version} - Windows {arch}
 4. 首次启动若 Windows 安全中心询问网络访问，请允许 Shift 访问“专用网络”。
    如果之前拒绝过，请到“Windows 安全中心 > 防火墙和网络保护 > 允许应用通过
    防火墙”，勾选 Shift 的专用网络权限；否则“发送到设备”无法接收其它终端的信标。
-
-便携版
-------
-不想安装时，解压 Shift-Portable-{version}-win-{arch}.zip，直接运行其中的
-shift.exe。请先完整解压，不要在压缩包的预览窗口里运行。
 
 运行组件
 --------
@@ -181,34 +159,26 @@ WinGet 包映射：
 校验
 ----
 PowerShell：
-  Get-FileHash .\\Shift-Setup-{version}-win-{arch}.exe -Algorithm SHA256
+  Get-FileHash .\\Shift-Setup-{version}-win-x64.exe -Algorithm SHA256
 """
 (stage / "README-Windows.txt").write_bytes(text.replace("\n", "\r\n").encode("utf-8"))
 PY
 
-  echo "== NSIS installer ($ARCH) =="
-  mkdir -p artifacts
-  SIZE_KB=$(( ($(stat -f%z "$EXE" 2>/dev/null || stat -c%s "$EXE") + 1023) / 1024 ))
-  makensis -V2 \
-    -DSHIFT_EXE="$PWD/$EXE" \
-    -DLICENSE_FILE="$PWD/LICENSE" \
-    -DNOTICES_FILE="$PWD/THIRD_PARTY_NOTICES.md" \
-    -DREADME_FILE="$STAGE/README-Windows.txt" \
-    -DICONS_DIR="$PWD/src-tauri/icons" \
-    -DOUT_FILE="$PWD/$INSTALLER" \
-    -DVERSION="$VERSION" \
-    -DARCH="$ARCH" \
-    -DEST_SIZE_KB="$SIZE_KB" \
-    scripts/windows-installer.nsi
-
-  echo "== portable ZIP ($ARCH) =="
-  cp "$EXE" "$STAGE/portable/Shift-$VERSION-Windows-$ARCH/shift.exe"
-  cp LICENSE "$STAGE/portable/Shift-$VERSION-Windows-$ARCH/LICENSE.txt"
-  cp THIRD_PARTY_NOTICES.md "$STAGE/portable/Shift-$VERSION-Windows-$ARCH/THIRD_PARTY_NOTICES.txt"
-  cp "$STAGE/README-Windows.txt" "$STAGE/portable/Shift-$VERSION-Windows-$ARCH/README-Windows.txt"
-  (cd "$STAGE/portable" && zip -q -r -X -9 "$ROOT/$PORTABLE" "Shift-$VERSION-Windows-$ARCH")
-  mv "$STAGE/README-Windows.txt" "$NOTES"
-done
+echo "== NSIS installer (x64) =="
+mkdir -p artifacts
+SIZE_KB=$(( ($(stat -f%z "$EXE" 2>/dev/null || stat -c%s "$EXE") + 1023) / 1024 ))
+makensis -V2 \
+  -DSHIFT_EXE="$PWD/$EXE" \
+  -DLICENSE_FILE="$PWD/LICENSE" \
+  -DNOTICES_FILE="$PWD/THIRD_PARTY_NOTICES.md" \
+  -DREADME_FILE="$STAGE/README-Windows.txt" \
+  -DICONS_DIR="$PWD/src-tauri/icons" \
+  -DOUT_FILE="$PWD/$INSTALLER" \
+  -DVERSION="$VERSION" \
+  -DEST_SIZE_KB="$SIZE_KB" \
+  scripts/windows-installer.nsi
+mv "$STAGE/README-Windows.txt" "$NOTES"
+rm -rf "$STAGE"
 
 echo "== checksums =="
 python3 - "$VERSION" <<PY
@@ -216,24 +186,12 @@ import hashlib, pathlib, sys
 version = sys.argv[1]
 artifacts = pathlib.Path("artifacts")
 preferred = [
-    "Shift-macOS-universal.dmg",
-    "Shift-macOS-universal.zip",
+    f"Shift-{version}-macOS-universal.dmg",
     f"Shift-Setup-{version}-win-x64.exe",
-    f"Shift-Setup-{version}-win-arm64.exe",
-    f"Shift-Portable-{version}-win-x64.zip",
-    f"Shift-Portable-{version}-win-arm64.zip",
     "README-Windows-x64.txt",
-    "README-Windows-arm64.txt",
+    "README-macOS-universal.txt",
 ]
 names = [name for name in preferred if (artifacts / name).is_file()]
-names += sorted(
-    path.name
-    for path in artifacts.iterdir()
-    if path.is_file()
-    and path.name not in names
-    and path.name != "SHA256SUMS.txt"
-    and not path.name.startswith(".")
-)
 lines = [f"{hashlib.sha256((artifacts / name).read_bytes()).hexdigest()}  {name}" for name in names]
 (artifacts / "SHA256SUMS.txt").write_text("".join(line + "\n" for line in lines), encoding="utf-8")
 print("\n".join(lines))

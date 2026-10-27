@@ -284,6 +284,7 @@ mod tests {
         assert_eq!(merged[0].at, 1_730_000_000_000);
     }
 
+    #[test]
     fn an_import_adds_unknown_paths_and_never_refreshes_a_timestamp() {
         let here = real_path();
         // The folder holding the test binary: a second path that really exists,

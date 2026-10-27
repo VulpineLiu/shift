@@ -46,11 +46,10 @@ import {
   defaultWedgeIds,
   orderWedgeIds,
   savedOrderFor,
-  wedgeLabelKey,
   type WedgeOrders,
 } from "../lib/radialOrder";
 import { recognizeImage } from "../lib/ocr";
-import { basename, formatBytes } from "../lib/utils";
+import { formatBytes } from "../lib/utils";
 import type { FileInfo, RadialContext } from "../types";
 import { useI18n } from "../i18n";
 import { SharePanel } from "./SharePanel";
@@ -121,9 +120,8 @@ function sectorAt(x: number, y: number, count: number): number | null {
 }
 
 /**
- * Icon for every wedge the rings can show. Labels come from `wedgeLabelKey` in
- * `src/lib/radialOrder.ts`, which is where the wedge catalogue and the reorder screen
- * in Settings agree on wording.
+ * Icon for every wedge the rings can show. Labels map onto the catalogue ids in
+ * `src/lib/radialOrder.ts`, which is the single source for the wedge rotation.
  */
 const WEDGE_ICONS: Record<string, IconType> = {
   addBackground: ImagePlus,
@@ -160,6 +158,18 @@ const WEDGE_ICONS: Record<string, IconType> = {
 const wedgesWithoutIcons = WEDGE_ACTION_IDS.filter((id) => !WEDGE_ICONS[id]);
 if (wedgesWithoutIcons.length > 0) {
   console.warn("radial wedges without an icon:", wedgesWithoutIcons);
+}
+
+const WEDGE_LABEL_KEYS: Record<string, string> = {
+  grayscale: "blackWhite",
+  resizeHalf: "halfSize",
+  pdfOcr: "ocr",
+  text: "extractText",
+  metadata: "stripMetadata",
+};
+
+function wedgeLabelKey(id: string): string {
+  return WEDGE_LABEL_KEYS[id] ?? id;
 }
 
 function formatIcon(format: string): IconType {
@@ -351,14 +361,11 @@ export function RadialMenu() {
       });
       return;
     }
-    // Saved wedge orders arrive with the context and again whenever Settings edits
-    // one, so a reorder takes effect on the very next gesture.
+    // Saved wedge orders still apply to builds upgraded from a version that had an
+    // in-app editor, so the ring reads them once when this window opens.
     void api.getWedgeOrders().then((next) => {
       if (!disposed) setOrders(next);
     });
-    void listen<WedgeOrders>("settings://wedge-orders", (event) => {
-      setOrders(event.payload);
-    }).then((unlisten) => unlisteners.push(unlisten));
     void api.getRadialContext().then((next) => {
       if (!disposed) applyContext(next);
     });

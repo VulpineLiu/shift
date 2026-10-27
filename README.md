@@ -217,9 +217,9 @@ PDF→image and PDF split write into a new `Name pages` folder containing `Page 
 Every capture, conversion result and received file is written by Rust into one library in the app data directory (`history.json`, capped at 300 entries), so all windows share a single list and a webview cache clear cannot throw it away. Because it sits outside the bundle, **it survives an update and a reinstall**; the first launch after upgrading also adopts whatever the 0.1 webview had kept in its own store, so a list built before that change is not lost either. The main window's **Recent** card is that library:
 
 - **Search** once the list grows past a few rows; it filters on the file name.
-- **Pin** a row to keep it through the capacity limit, a deleted file, and Clear.
-- **Remove** one row, or **Clear** the library - pinned rows stay.
-- **Drag a row out** into Finder, a mail composer or a chat window: the row carries a `file://` URL, so the receiving application gets the file rather than a path string. Plain text and Shift's own internal type travel with it for editors and for the ring.
+- **Favorite** a row to keep it through the capacity limit, a deleted file, and Clear.
+- **Remove** one row, or **Clear** the library - favorite rows stay.
+- **Drag a row out** into Finder, a mail composer or a chat window: the row carries a `file://` URL, so the receiving application gets the file rather than a path string. The plain-text path travels with it for editors.
 - Click a row to open it in the editor; the row's other buttons send, reveal, and pin it to the screen.
 
 ## OCR
@@ -292,7 +292,7 @@ Each is overridable in Settings. File actions offer a *collect everything in one
 
 ## Updates
 
-A new macOS machine installs **`Shift-macOS-universal.dmg`**: builds are ad-hoc signed and not notarized, so Gatekeeper calls Shift an unidentified developer. Double-click the image, drag `Shift.app` to /Applications, then allow the first launch once (right-click → Open, or 允许 in System Settings → Privacy & Security). In-app updates download the same image without a browser, so they never prompt. Details in `docs/RELEASE.md`.
+A new macOS machine installs **`Shift-0.1.8-macOS-universal.dmg`**: builds are ad-hoc signed and not notarized, so Gatekeeper calls Shift an unidentified developer. Double-click the image, drag `Shift.app` to /Applications, then allow the first launch once (right-click → Open, or 允许 in System Settings → Privacy & Security). In-app updates download the same image without a browser, so they never prompt. Details in `docs/RELEASE.md`.
 
 The update channel is this repository: a `releases` branch holding the installers plus `shift-update.json`, which names each artifact, its size and its SHA256. The feed URL is derived from the git remote at build time - Gitea, GitHub and GitLab forms are known, and `SHIFT_UPDATE_URL` overrides it - so no update service has to be deployed anywhere.
 
@@ -363,17 +363,15 @@ cargo test --lib    # Rust unit tests, from src-tauri/
 pnpm tauri build    # release bundle
 ```
 
-Universal macOS build:
+Versioned release builds:
 
 ```bash
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
-pnpm mac:drag-bridge
-PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH" \
-  RUSTUP_TOOLCHAIN=stable \
-  pnpm tauri build --target universal-apple-darwin --bundles app,dmg
+pnpm mac:release
+scripts/build-windows-release.sh
 ```
 
-The result is one universal Mach-O including universal drag, PDF-render and doc-render sidecars. To produce the Windows installers and portable ZIPs — x64 and ARM64, both — from macOS, run `scripts/build-windows-release.sh`; full details are in `docs/BUILD_WINDOWS.md`.
+The release pipeline deliberately emits exactly two installers: `Shift-0.1.8-macOS-universal.dmg` and `Shift-Setup-0.1.8-win-x64.exe`. The macOS app is one universal Mach-O including universal drag, PDF-render and doc-render sidecars. Windows ARM64 uses the x64 installer through the update manifest's compatibility fallback. Full details are in `docs/BUILD_WINDOWS.md` and `docs/RELEASE.md`.
 
 **Permissions (macOS).** Screen Recording for capture, Files & Folders for the output folders you choose, Microphone when recording with audio, and Local Network for **Send to a device**. Shift checks Screen Recording before opening the overlay, so a denial surfaces an actionable error rather than a black screenshot. A denied Local Network grant is quieter: Shift still sends its beacons and still answers anyone who addresses it directly, but it receives no group traffic, so the device list simply stays empty. Ad-hoc signed builds get a new code identity on every rebuild and macOS keys these grants to that identity, so an upgrade can ask again; distribution with Developer ID keeps them stable.
 

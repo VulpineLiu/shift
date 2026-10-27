@@ -21,7 +21,7 @@ import type {
   UpdateStatus,
   WriteCheck,
 } from "../types";
-import type { FileKind, RadialRing, WedgeOrders } from "./radialOrder";
+import type { WedgeOrders } from "./radialOrder";
 
 interface FileActionResultEvent {
   jobId: string;
@@ -119,7 +119,6 @@ export const api = {
   hideRadial: () => invoke<void>("hide_radial"),
   showFilesInRadial: (files: string[], mode?: "actions" | "formats" | "tools") =>
     invoke<RadialContext>("show_files_in_radial", { files, mode }),
-  sharePeers: () => invoke<SharePeer[]>("share_peers"),
   shareAnswer: (transferId: string, accepted: boolean) =>
     invoke<boolean>("share_answer", { transferId, accepted }),
   shareRefresh: () => invoke<SharePeer[]>("share_refresh"),
@@ -148,8 +147,6 @@ export const api = {
     invoke<SwitchState>("set_update_check_enabled", { enabled }),
   setSetupReviewed: (reviewed: boolean) => invoke<boolean>("set_setup_reviewed", { reviewed }),
   getWedgeOrders: () => invoke<WedgeOrders>("get_wedge_orders"),
-  setWedgeOrder: (kind: FileKind, ring: RadialRing, order: string[]) =>
-    invoke<AppSettings>("set_wedge_order", { kind, ring, order }),
   updateCheck: () =>
     invoke<{ status: UpdateStatus; downloadReady: boolean }>("update_check"),
   updateStatus: () => invoke<UpdateStatus | null>("update_status"),

@@ -4,7 +4,7 @@
 #   scripts/publish-release.sh [--notes FILE] [--key FILE] [--dry-run]
 #                              [--no-push] [--branch NAME]
 #
-# Every installer in artifacts/ is copied onto an orphan `releases` branch together
+# The two release installers in artifacts/ are copied onto an orphan `releases` branch together
 # with `shift-update.json`, which names each file, its size and its SHA256. A running
 # Shift reads that manifest from the forge's raw endpoint, downloads its own
 # platform's artifact and refuses to launch it unless the recomputed hash matches, so
@@ -57,23 +57,12 @@ if not artifacts.is_dir():
     sys.exit("artifacts/ is missing; build a release first.")
 notes = pathlib.Path(notes_file).read_text(encoding="utf-8").strip() if notes_file else ""
 
-# One installer per manifest key. Extra files such as the portable archive and the
-# checksum listing still travel with the branch, they are just not installers.
-# Windows is keyed per architecture: `windows` is what an x64 machine installs and
-# what an ARM machine falls back to, `windows-arm64` is the native ARM build. The
-# x64 pattern must not match the arm64 file, or every Windows machine would be
-# served whichever installer sorted first.
+# The channel intentionally has exactly two installers. Versioned, exact names keep
+# a stale DMG or an old architecture from slipping into a new release. Supporting
+# files such as the checksums and readmes still travel with the branch.
 PATTERNS = [
-    ("macos", [r"^Shift-macOS-universal\.dmg$", r"^[Ss]hift.*\.dmg$"]),
-    (
-        "windows",
-        [rf"^Shift-Setup-{re.escape(version)}-win-x64\.exe$", r"-win-x64\.exe$"],
-    ),
-    (
-        "windows-arm64",
-        [rf"^Shift-Setup-{re.escape(version)}-win-arm64\.exe$", r"-win-arm64\.exe$"],
-    ),
-    ("linux", [r"\.AppImage$", r"\.deb$"]),
+    ("macos", rf"^Shift-{re.escape(version)}-macOS-universal\.dmg$"),
+    ("windows", rf"^Shift-Setup-{re.escape(version)}-win-x64\.exe$"),
 ]
 candidates = sorted(p.name for p in artifacts.iterdir() if p.is_file())
 
@@ -89,20 +78,29 @@ manifest = {
     "artifacts": {},
 }
 chosen = []
-for platform, patterns in PATTERNS:
-    for pattern in patterns:
-        match = next((name for name in candidates if re.search(pattern, name)), None)
-        if match:
-            hash_value, size = digest(match)
-            manifest["artifacts"][platform] = {"file": match, "sha256": hash_value, "size": size}
-            chosen.append(match)
-            break
+for platform, pattern in PATTERNS:
+    match = next((name for name in candidates if re.search(pattern, name)), None)
+    if not match:
+        sys.exit(
+            f"missing installer for {platform} at version {version}; expected "
+            f"Shift-{version}-macOS-universal.dmg and "
+            f"Shift-Setup-{version}-win-x64.exe"
+        )
+    hash_value, size = digest(match)
+    manifest["artifacts"][platform] = {"file": match, "sha256": hash_value, "size": size}
+    chosen.append(match)
 
-if not manifest["artifacts"]:
+unexpected = [
+    name
+    for name in candidates
+    if re.search(r"\.(dmg|exe|msi|pkg|zip|AppImage|deb)$", name, re.IGNORECASE)
+    and name not in chosen
+]
+if unexpected:
     sys.exit(
-    f"no installer found in artifacts/ for version {version}; "
-    "expected Shift-macOS-universal.dmg and/or Shift-Setup-<version>-win-{x64,arm64}.exe"
-)
+        "only the two versioned installers may be published; remove: "
+        + ", ".join(unexpected)
+    )
 
 payload = json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
 sys.stdout.write(payload)

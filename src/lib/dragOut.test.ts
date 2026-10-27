@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { dragOutPayload, fileUrl } from "./dragOut.ts";
+import { dragOutPayload, fileUrl, parseSharePaths } from "./dragOut.ts";
 
 test("unix paths become file URLs with separators kept", () => {
   assert.equal(fileUrl("/Users/me/Shift/photo.png"), "file:///Users/me/Shift/photo.png");
@@ -23,15 +23,25 @@ test("repeated separators collapse", () => {
   assert.equal(fileUrl("/Users//me///x.png"), "file:///Users/me/x.png");
 });
 
-test("a row is offered as uri-list, plain path and share paths", () => {
+test("a row is offered as a file URL and a plain path", () => {
   const payload = dragOutPayload("/tmp/a.png");
   assert.deepEqual(payload, {
     "text/uri-list": "file:///tmp/a.png",
     "text/plain": "/tmp/a.png",
-    "application/x-shift-share-paths": JSON.stringify(["/tmp/a.png"]),
   });
 });
 
 test("unc shares are readable too", () => {
   assert.equal(fileUrl("\\\\server\\share\\a.pdf"), "file:///server/share/a.pdf");
+});
+
+test("internal drag payloads round-trip as paths", () => {
+  assert.deepEqual(parseSharePaths(JSON.stringify(["/tmp/a.png"])), ["/tmp/a.png"]);
+  assert.deepEqual(parseSharePaths(JSON.stringify([])), []);
+});
+
+test("malformed internal drag payloads are rejected", () => {
+  assert.equal(parseSharePaths(""), null);
+  assert.equal(parseSharePaths("{not json"), null);
+  assert.equal(parseSharePaths(JSON.stringify(["ok", 2])), null);
 });

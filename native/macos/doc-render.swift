@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import PDFKit
 import Vision
+import WebKit
 
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write((message + "\n").data(using: .utf8)!)
@@ -121,8 +122,8 @@ func writeWordDocument(from pdf: URL, to output: URL) throws {
     try data.write(to: output, options: .atomic)
 }
 
-guard CommandLine.arguments.count == 3 || CommandLine.arguments.count == 4 else {
-    fail("usage: doc-render <input> <output> [html-base-dir]")
+guard (3...5).contains(CommandLine.arguments.count) else {
+    fail("usage: doc-render <input> <output> [html-base-dir] [--webkit]")
 }
 
 let input = URL(fileURLWithPath: CommandLine.arguments[1])
@@ -168,11 +169,24 @@ var options: [NSAttributedString.DocumentReadingOptionKey: Any] = [:]
 if let documentType {
     options[.documentType] = documentType
 }
+
 if documentType == .html {
     let baseDirectory = CommandLine.arguments.count == 4
         ? URL(fileURLWithPath: CommandLine.arguments[3], isDirectory: true)
+        : CommandLine.arguments.count == 5
+            ? URL(fileURLWithPath: CommandLine.arguments[3], isDirectory: true)
         : input.deletingLastPathComponent()
     options[.baseURL] = baseDirectory
+}
+
+if documentType == .html,
+   CommandLine.arguments.count == 5,
+   CommandLine.arguments[4] == "--webkit" {
+    let baseDirectory = URL(fileURLWithPath: CommandLine.arguments[3], isDirectory: true)
+    let renderer = HTMLRenderer(input: input, output: output, baseDirectory: baseDirectory)
+    renderer.run()
+    app.run()
+    exit(0)
 }
 
 let data: Data
@@ -226,6 +240,172 @@ func fitAttachments(
         mutable.addAttribute(.attachment, value: replacement, range: range)
     }
     return mutable
+}
+
+/// Writes the tall PDF WebKit produces from the page as A4-sized slices.
+///
+/// `createPDF` keeps the HTML layout as one continuous page. Printing the web
+/// view directly can loop indefinitely on documents with positioned elements,
+/// so draw the single page into clipped A4 pages instead.
+func writePaginatedPDF(_ data: Data, to output: URL) {
+    let pageSize = CGSize(width: 595.2, height: 841.8)
+    guard let provider = CGDataProvider(data: data as CFData),
+          let document = CGPDFDocument(provider),
+          let source = document.page(at: 1) else {
+        fail("could not read the rendered web page")
+    }
+    let sourceBounds = source.getBoxRect(.mediaBox)
+    let height = max(1, sourceBounds.height)
+    let pageCount = max(1, Int(ceil(height / pageSize.height)))
+    var mediaBox = CGRect(origin: .zero, size: pageSize)
+    guard let context = CGContext(output as CFURL, mediaBox: &mediaBox, nil) else {
+        fail("could not create the PDF")
+    }
+    for index in 0..<pageCount {
+        context.beginPDFPage(nil)
+        context.saveGState()
+        context.clip(to: mediaBox)
+        let offset = max(0, height - CGFloat(index + 1) * pageSize.height)
+        let remaining = max(0, height - CGFloat(index) * pageSize.height)
+        // Full slices move up through the tall page. The final short slice is
+        // top-aligned so the trailing whitespace sits below the content.
+        let translationY = remaining < pageSize.height
+            ? pageSize.height - remaining
+            : -offset
+        context.translateBy(x: 0, y: translationY)
+        context.drawPDFPage(source)
+        context.restoreGState()
+        context.endPDFPage()
+    }
+    context.closePDF()
+}
+
+/// Renders HTML with WebKit instead of flattening it into an attributed
+/// string. Quick Look supplies Word page furniture and positioned tables as
+/// HTML; AppKit's text conversion reflows that content, which changes the page
+/// count and can move a footer onto a page of its own.
+final class HTMLRenderer: NSObject, WKNavigationDelegate {
+    private let input: URL
+    private let baseDirectory: URL
+    private let output: URL
+    private let webView: WKWebView
+    private var finished = false
+
+    init(input: URL, output: URL, baseDirectory: URL) {
+        self.input = input
+        self.output = output
+        self.baseDirectory = baseDirectory
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
+        self.webView = WKWebView(
+            frame: NSRect(x: 0, y: 0, width: 595.2, height: 841.8),
+            configuration: configuration
+        )
+        super.init()
+        webView.navigationDelegate = self
+    }
+
+    func run() {
+        webView.loadFileURL(input, allowingReadAccessTo: baseDirectory)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
+            guard !self.finished else { return }
+            self.finished = true
+            fail("could not render HTML before the 30 second deadline")
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard !finished else { return }
+        webView.evaluateJavaScript(
+            """
+            (() => {
+              const pageWidth = document.documentElement.clientWidth;
+              for (const image of document.images) {
+                if (image.getBoundingClientRect().width > pageWidth) {
+                  image.style.width = `${pageWidth}px`;
+                  image.style.height = "auto";
+                  image.style.maxWidth = "100%";
+                }
+              }
+              let contentBottom = 0;
+              const range = document.createRange();
+              const walker = document.createTreeWalker(
+                document.body,
+                NodeFilter.SHOW_TEXT
+              );
+              for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+                if (!node.textContent.trim()) continue;
+                range.selectNodeContents(node);
+                const rect = range.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) {
+                  contentBottom = Math.max(
+                    contentBottom,
+                    rect.bottom + window.scrollY
+                  );
+                }
+              }
+              for (const element of document.querySelectorAll(
+                "img, svg, canvas, table, hr"
+              )) {
+                const rect = element.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) {
+                  contentBottom = Math.max(
+                    contentBottom,
+                    rect.bottom + window.scrollY
+                  );
+                }
+              }
+              return {
+                width: document.documentElement.scrollWidth,
+                height: Math.max(1, Math.ceil(contentBottom))
+              };
+            })()
+            """
+        ) { value, error in
+            guard !self.finished else { return }
+            self.finished = true
+            guard error == nil,
+                  let size = value as? [String: Any],
+                  let width = (size["width"] as? NSNumber)?.doubleValue,
+                  let height = (size["height"] as? NSNumber)?.doubleValue,
+                  width > 0,
+                  height > 0 else {
+                fail("could not measure the rendered HTML")
+            }
+            let configuration = WKPDFConfiguration()
+            configuration.rect = CGRect(x: 0, y: 0, width: width, height: height)
+            webView.createPDF(configuration: configuration) { result in
+                switch result {
+                case .success(let data):
+                    writePaginatedPDF(data, to: self.output)
+                    NSApp.terminate(nil)
+                case .failure(let error):
+                    fail("could not print HTML: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didFail navigation: WKNavigation!,
+        withError error: Error
+    ) {
+        guard !finished else { return }
+        finished = true
+        fail("could not load HTML: \(error.localizedDescription)")
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didFailProvisionalNavigation navigation: WKNavigation!,
+        withError error: Error
+    ) {
+        guard !finished else { return }
+        finished = true
+        fail("could not load HTML: \(error.localizedDescription)")
+    }
 }
 
 let printInfo = NSPrintInfo.shared.copy() as! NSPrintInfo

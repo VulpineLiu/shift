@@ -366,7 +366,7 @@ fn to_docx_page_images(
         for page in 1..=pages.len() as u32 {
             on_page(page, pages.len() as u32, false);
         }
-        return Ok(pages);
+        Ok(pages)
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -1260,7 +1260,7 @@ mod tests {
 
     fn embedded_image(path: &Path) -> (i64, i64, Option<String>) {
         let document = load(path).unwrap();
-        for (_, object) in &document.objects {
+        for object in document.objects.values() {
             if let Object::Stream(stream) = object {
                 if is_name(stream.dict.get(b"Subtype"), b"Image") {
                     let filter = stream
@@ -1615,7 +1615,7 @@ mod tests {
 
     #[test]
     fn rendered_page_names_sort_numerically_not_lexically() {
-        let mut pages = vec![
+        let mut pages = [
             PathBuf::from("Page-1.jpg"),
             PathBuf::from("Page-10.jpg"),
             PathBuf::from("Page-2.jpg"),

@@ -58,6 +58,8 @@ pub struct AppState {
     /// Mirrors settings.drag_enabled so the drag monitors can check it cheaply.
     pub drag_enabled: AtomicBool,
     pub pinned_image: Mutex<Option<editor::PinnedPreview>>,
+    /// Shift windows a capture hid, so ending the capture can put them back.
+    pub capture_restore: Mutex<Vec<String>>,
 }
 
 /// The language the native tray is showing. The webview sends this before any
@@ -92,6 +94,7 @@ impl Default for AppState {
             drag_enabled: AtomicBool::new(true),
             bridge: Mutex::new(None),
             pinned_image: Mutex::new(None),
+            capture_restore: Mutex::new(Vec::new()),
         }
     }
 }
@@ -101,6 +104,21 @@ fn show_main(app: &AppHandle) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+    }
+}
+
+/// Hand the keyboard to the page itself.
+///
+/// `WebviewWindow::set_focus` only makes the window key, and AppKit keeps sending
+/// key events to whatever the window's first responder is. On macOS that is tao's
+/// own content view: wry injects the WKWebView as a *subview* and points the
+/// responder at it once, when the web view is built, and every later
+/// `set_simple_fullscreen` (its `toggle_style_mask`) or window re-show moves it
+/// back to `TaoView`. The page then never receives Escape or Enter, which is why
+/// the capture overlay cannot be cancelled by keyboard and the ring ignores it.
+pub(crate) fn focus_page(app: &AppHandle, label: &str) {
+    if let Some(webview) = app.get_webview(label) {
+        let _ = webview.set_focus();
     }
 }
 
@@ -367,6 +385,9 @@ pub fn run() {
         .build();
 
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main(app);
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -379,7 +400,6 @@ pub fn run() {
             files::inspect_files,
             files::perform_file_action,
             files::reveal_file,
-            files::existing_files,
             files::open_file,
             files::read_text_file,
             files::read_image_data,
@@ -406,7 +426,6 @@ pub fn run() {
             settings::set_update_check_enabled,
             settings::set_setup_reviewed,
             settings::get_wedge_orders,
-            settings::set_wedge_order,
             settings::reveal_output_directory,
             update::update_check,
             update::update_status,
@@ -441,7 +460,6 @@ pub fn run() {
             drag_bridge::get_radial_context,
             drag_bridge::hide_radial,
             drag_bridge::show_files_in_radial,
-            share::share_peers,
             share::share_answer,
             share::share_refresh,
             share::share_send,
@@ -598,6 +616,64 @@ mod tests {
         assert!(config["app"].get("trayIcon").is_none());
         let production = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
         assert_eq!(production.matches("TrayIconBuilder::with_id").count(), 1);
+    }
+
+    #[test]
+    fn the_single_instance_guard_runs_before_other_plugins() {
+        // Plugins run in registration order. A second Windows process has to be
+        // rejected before dialogs, shortcuts or windows can be initialised.
+        let production = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
+        let guard = production
+            .find(".plugin(tauri_plugin_single_instance::init")
+            .expect("the single-instance plugin must be registered");
+        let next = production
+            .find(".plugin(tauri_plugin_opener::init")
+            .expect("the opener plugin must be registered");
+        assert!(guard < next);
+        assert!(production[guard..next].contains("show_main(app)"));
+    }
+
+    #[test]
+    fn a_window_shown_for_capture_or_ring_hands_the_keyboard_to_its_page() {
+        // AppKit sends key events to the window's first responder, and showing a
+        // window leaves that on tao's own view instead of the WKWebView, so Escape
+        // never reaches the page. `set_focus` on the window is not enough; only the
+        // webview's own focus does it. Regression: ESC cancelled nothing in the
+        // capture overlay, and the ring stopped answering it too.
+        for (name, source) in [
+            ("capture.rs", include_str!("capture.rs")),
+            ("drag_bridge.rs", include_str!("drag_bridge.rs")),
+        ] {
+            let production = source.split("#[cfg(test)]").next().unwrap();
+            assert!(
+                production.contains("focus_page"),
+                "{name} shows a page without giving it the keyboard"
+            );
+        }
+    }
+
+    #[test]
+    fn a_finished_capture_gives_the_open_panels_back() {
+        // Captures hide whatever Shift windows are open. Without restoring them the
+        // user loses an open panel to a screenshot, so both exit paths — the shot
+        // ending, and the recorder taking over — are checked here.
+        let production = include_str!("capture.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(
+            production.contains("restore_windows(app)"),
+            "a dismissed capture must restore the windows it hid"
+        );
+        let recording = include_str!("recording.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(
+            recording.contains("dismiss_capture_for_recording")
+                && recording.contains("capture::restore_windows(app)"),
+            "a recording must hold the panels back until the video is written"
+        );
     }
 
     #[test]

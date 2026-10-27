@@ -35,28 +35,22 @@ The installer is written below `src-tauri\target\release\bundle`.
 
 ## Release packages from macOS
 
-`scripts/build-windows-release.sh` cross-compiles the EXE and produces both
-Windows artefacts without a Windows host:
+`scripts/build-windows-release.sh` cross-compiles the EXE and produces the
+Windows x64 installer without a Windows host:
 
 ```bash
 brew install makensis
-scripts/build-windows-release.sh              # both architectures
-scripts/build-windows-release.sh --arch arm64 # one of them
-scripts/build-windows-release.sh --skip-build # repackage the EXEs already built
+scripts/build-windows-release.sh
+scripts/build-windows-release.sh --skip-build
 ```
 
-For each architecture asked for it writes
-`artifacts/Shift-Setup-<version>-win-<arch>.exe` (NSIS, per-user, no administrator
-rights) and `artifacts/Shift-Portable-<version>-win-<arch>.zip`, then refreshes
-`artifacts/SHA256SUMS.txt`. Before packaging an EXE the script checks its PE machine
-field — `0x8664` for x64, `0xAA64` for ARM64 — so a binary built for the wrong target
-cannot end up in the wrong package, and each installer refuses a machine of the other
-architecture. `scripts/windows-installer.nsi` installs into
+It writes `artifacts/Shift-Setup-<version>-win-x64.exe` (NSIS, per-user, no
+administrator rights), then refreshes `artifacts/SHA256SUMS.txt`. Before packaging
+the EXE the script checks its PE machine field (`0x8664`) and the installer refuses
+a non-x64 machine. `scripts/windows-installer.nsi` installs into
 `%LOCALAPPDATA%\Programs\Shift`, and its uninstaller only removes what the installer
-wrote.
-
-The ARM64 build is cross-compiled and packaged from macOS, but it has not been run on
-Windows-on-ARM hardware, so treat it as unverified on the device.
+wrote. Windows ARM64 uses this x64 package through the update manifest's `windows`
+fallback; no ARM64 or portable package is produced.
 
 ## Runtime behavior
 

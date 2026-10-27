@@ -66,16 +66,13 @@ pub fn resolve_bridge_path(app: &AppHandle) -> Option<std::path::PathBuf> {
         return Some(dev);
     }
     let resource = app.path().resource_dir().ok()?;
-    for candidate in [
+    [
         resource.join("drag-bridge"),
         resource.join("binaries").join("drag-bridge"),
         resource.join(format!("drag-bridge-{triple}")),
-    ] {
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
+    ]
+    .into_iter()
+    .find(|candidate| candidate.exists())
 }
 
 pub fn spawn(app: &AppHandle) {
@@ -482,6 +479,10 @@ pub fn show_radial(
     // Finder drag the non-activating window must stay unfocused.
     if !dragging {
         let _ = window.set_focus();
+        // The window being key is not enough: AppKit delivers keys to the window's
+        // first responder, which re-showing leaves on tao's own view rather than the
+        // page, so Escape would never reach the ring. See `crate::focus_page`.
+        crate::focus_page(app, "radial");
     }
     window
         .emit("radial://show", context.clone())

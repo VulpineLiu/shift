@@ -1,4 +1,4 @@
-Shift 0.1.7 - macOS 通用（universal）
+Shift 0.1.8 - macOS 通用（universal）
 
 本文件说明 macOS 安装包是怎么打出来的、在其它机器上会遇到什么，以及如何自己校验。
 完整细节见仓库 docs/RELEASE.md 的「macOS packaging」和 docs/ENGINEERING-NOTES.md
@@ -8,7 +8,7 @@ Shift 0.1.7 - macOS 通用（universal）
 关于这个安装包
 --------------
 
-Shift 的 macOS 产物只有一个：Shift-macOS-universal.dmg，通用二进制，Apple silicon 与
+Shift 的 macOS 产物只有一个：Shift-0.1.8-macOS-universal.dmg，通用二进制，Apple silicon 与
 Intel 都能用。它既是新机器的首次安装方式，也是软件内升级的载体（更新清单里的 macos
 键指向它）。清单的键必须是 .dmg，因为软件内升级的交接脚本要用 hdiutil 挂载镜像再
 取出应用包；早期曾随包发布的 .pkg 在验证过 DMG 可用后就撤掉了，不为它多维护一份
@@ -23,7 +23,7 @@ Intel 都能用。它既是新机器的首次安装方式，也是软件内升�
 ----------------
 
 新机器首次安装
-  1. 下载并双击 Shift-macOS-universal.dmg 挂载镜像。
+  1. 下载并双击 Shift-0.1.8-macOS-universal.dmg 挂载镜像。
   2. 把 Shift.app 拖进「应用程序」（或任何你有权限的位置）。
   3. 首次启动会被拦：「无法打开，因为来自身份不明的开发者」。点取消，然后
      右键 Shift.app → 打开，或在「系统设置 → 隐私与安全性」中点「仍要打开」。
@@ -70,8 +70,8 @@ macOS 权限
 
     pnpm tauri build --target universal-apple-darwin --bundles app,dmg
 
-产物在 src-tauri/target/universal-apple-darwin/release/bundle/macos/ 下：Shift.app
-与 Shift-macOS-universal.dmg。发布流程（清单、签名、推送）见仓库 docs/RELEASE.md。
+`pnpm mac:release` 会构建、校验并复制为 artifacts/Shift-0.1.8-macOS-universal.dmg。
+发布流程（清单、签名、推送）见仓库 docs/RELEASE.md。
 
 若希望更新通道能校验来源，构建时把 ed25519 公钥编进去（发布流程见仓库
 docs/RELEASE.md 的「Signing the channel」）：
@@ -96,7 +96,7 @@ docs/RELEASE.md 的「Signing the channel」）：
 
 镜像完整性：
 
-    hdiutil verify Shift-macOS-universal.dmg
+    hdiutil verify Shift-0.1.8-macOS-universal.dmg
 
 校验后仍打不开的话，请确认不是在压缩包预览窗口里运行的，并按上面的「新机器首次安装」
 处理首次允许：右键 → 打开，或在「系统设置 → 隐私与安全性」中点「仍要打开」。

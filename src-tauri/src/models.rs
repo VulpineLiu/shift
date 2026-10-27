@@ -32,7 +32,7 @@ pub struct CaptureSessionInfo {
     pub source: CaptureSource,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NormalizedRect {
     pub x: f64,
@@ -84,7 +84,7 @@ pub struct EditorInfo {
 /// The two switches are honest: `recording_capabilities` says which of them the
 /// current platform honours, and the overlay hides the rest, so a choice the backend
 /// would ignore can never be presented as applied.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RecordingOptions {
     /// Record audio alongside video.
@@ -92,15 +92,6 @@ pub struct RecordingOptions {
     /// Requested frame rate, where the backend accepts one. `None` leaves the choice
     /// to the capture tool instead of inventing a number.
     pub fps: Option<u32>,
-}
-
-impl Default for RecordingOptions {
-    fn default() -> Self {
-        Self {
-            audio: false,
-            fps: None,
-        }
-    }
 }
 
 /// Which recording switches this platform actually implements.

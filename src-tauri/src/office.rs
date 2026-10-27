@@ -454,7 +454,7 @@ fn markdown_table(rows: Vec<Vec<String>>) -> String {
     for _ in 0..columns {
         output.push_str(" --- |");
     }
-    output.push_str("\n");
+    output.push('\n');
     for row in rows.iter().skip(1) {
         output.push('|');
         for cell in padded(row) {

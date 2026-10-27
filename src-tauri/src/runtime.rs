@@ -111,6 +111,7 @@ fn install_target(_id: &str) -> Option<InstallTarget> {
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn component(
     id: &str,
     name: impl Into<String>,
@@ -174,7 +175,7 @@ fn external_component(
 fn document_pdf_component() -> RuntimeComponent {
     #[cfg(target_os = "macos")]
     if let Some(renderer) = files::doc_render_bridge() {
-        return component(
+        component(
             "document-pdf",
             "AppKit document renderer",
             "documents",
@@ -259,7 +260,7 @@ fn pdf_page_component() -> RuntimeComponent {
     #[cfg(target_os = "macos")]
     {
         let renderer = pdf::pdf_render_bridge();
-        return component(
+        component(
             "pdf-render",
             "PDFKit page renderer",
             "graphics",
@@ -268,7 +269,7 @@ fn pdf_page_component() -> RuntimeComponent {
             renderer.is_some(),
             None,
             renderer,
-        );
+        )
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -287,7 +288,7 @@ fn image_backend_component() -> RuntimeComponent {
     {
         let path = PathBuf::from("/usr/bin/sips");
         let available = path.is_file();
-        return component(
+        component(
             "image-backend",
             "macOS Core Image (sips)",
             "graphics",
@@ -296,7 +297,7 @@ fn image_backend_component() -> RuntimeComponent {
             available,
             None,
             Some(path),
-        );
+        )
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -568,11 +569,11 @@ fn os_version() -> String {
                 return version;
             }
         }
-        return "macOS".into();
+        "macOS".into()
     }
     #[cfg(target_os = "windows")]
     {
-        return windows_os_version();
+        windows_os_version()
     }
     #[cfg(target_os = "linux")]
     {
@@ -584,11 +585,11 @@ fn os_version() -> String {
                 return version.trim_matches('"').to_string();
             }
         }
-        return "Linux".into();
+        "Linux".into()
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
-        return env::consts::OS.into();
+        env::consts::OS.into()
     }
 }
 

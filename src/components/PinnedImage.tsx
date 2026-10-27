@@ -5,6 +5,7 @@ import { Copy, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import { api } from "../lib/api";
+import { decodeHexParam } from "../lib/utils";
 
 interface PinnedPreview {
   id: number;
@@ -14,20 +15,10 @@ interface PinnedPreview {
   height: number;
 }
 
-function decodePath(value: string | null): string | null {
-  if (!value || value.length % 2 !== 0 || !/^[0-9a-f]+$/i.test(value)) return null;
-  try {
-    const bytes = new Uint8Array((value.match(/../g) ?? []).map((pair) => parseInt(pair, 16)));
-    return new TextDecoder().decode(bytes);
-  } catch {
-    return null;
-  }
-}
-
 export function PinnedImage() {
   const { t } = useI18n();
   const [path, setPath] = useState(() =>
-    decodePath(new URLSearchParams(window.location.search).get("path")),
+    decodeHexParam(new URLSearchParams(window.location.search).get("path")),
   );
   const [src, setSrc] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);

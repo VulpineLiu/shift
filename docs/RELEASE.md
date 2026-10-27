@@ -12,8 +12,8 @@ An orphan branch named `releases` holds exactly one release:
 releases/
 ├── shift-update.json
 ├── shift-update.sig
-├── Shift-macOS-universal.dmg
-└── Shift-Setup-0.1.1-win-x64.exe
+├── Shift-0.1.8-macOS-universal.dmg
+└── Shift-Setup-0.1.8-win-x64.exe
 ```
 
 `shift-update.json` names the version and, per platform, the artifact file, its size in
@@ -22,12 +22,12 @@ bytes and its SHA256:
 ```json
 {
   "schema": 1,
-  "version": "0.1.1",
+  "version": "0.1.8",
   "date": "2026-10-26",
   "notes": "",
   "artifacts": {
-    "macos": { "file": "Shift-macOS-universal.dmg", "sha256": "57fc…", "size": 55479751 },
-    "windows": { "file": "Shift-Setup-0.1.1-win-x64.exe", "sha256": "0255…", "size": 24545040 }
+    "macos": { "file": "Shift-0.1.8-macOS-universal.dmg", "sha256": "…", "size": 0 },
+    "windows": { "file": "Shift-Setup-0.1.8-win-x64.exe", "sha256": "…", "size": 0 }
   }
 }
 ```
@@ -41,12 +41,8 @@ not a code limit, and it decides what the channel may contain:
 | --- | --- | --- |
 | `macos` | yes | One universal bundle, Apple silicon and Intel, shipped as a DMG. Verified on a fresh machine by dragging it to /Applications — see "macOS packaging" |
 | `windows` | yes | x64, which is also what an ARM machine falls back to |
-| `windows-arm64` | no | Buildable — `build-windows-release.sh --arch arm64` still works — just not published |
+| `windows-arm64` | no | Runtime compatibility only: Windows on ARM installs the x64 package through `windows` |
 | `linux` | no | Build target, not a product; see below |
-
-Publishing an ARM64 Windows build later needs no code change: the ladder already prefers
-`windows-arm64` and falls back to `windows`, so adding the file to `artifacts/` and
-re-publishing is enough.
 
 The incident history, failure signatures and non-negotiable implementation constraints
 behind the current Drop, conversion and macOS packaging behaviour are recorded in
@@ -104,7 +100,7 @@ project wants, and no release is worse off for losing a certificate no other Mac
 Reusing that identity again would mean installing it **and trusting it** on every machine,
 which is not something to ask of a user.
 
-So: ad-hoc, and one container. The channel ships **`Shift-macOS-universal.dmg`** and nothing
+So: ad-hoc, and one container. The channel ships **`Shift-<version>-macOS-universal.dmg`** and nothing
 else on macOS — the earlier `.pkg` companion was dropped after the DMG was verified to work
 on a fresh machine, and one file per platform is less to keep straight.
 
@@ -117,20 +113,19 @@ The `macos` manifest key is a DMG for the same reason: the in-app handoff mounts
 so pointing the key at a package would break every in-app update. That was the one real
 constraint the container had to satisfy, and a DMG satisfies it.
 
-`scripts/macos-pkg.sh` — which staged the bundle under an `/Applications` root and ran
-`pkgbuild` — is kept in the tree but is no longer part of a release: it built a container
-with no manifest key, and the DMG covers the first install anyway.
+The retired `.pkg` packaging script has been removed. The DMG is the only macOS
+container in the release pipeline.
 
 ### macOS release gate
 
 Every macOS release must pass all of these before it goes into `artifacts/`:
 
-1. Rebuild the universal Swift sidecars with `pnpm mac:drag-bridge`, then build with
-   `pnpm tauri build --target universal-apple-darwin --bundles app,dmg`.
+1. Run `pnpm mac:release`. It rebuilds the universal Swift sidecars, builds the app
+   and DMG, verifies both, and copies the result to the versioned release name.
 2. Run `codesign --verify --deep --strict` on `Shift.app`, and confirm
    `codesign -dv --verbose=2` reports `Signature=adhoc`. A local certificate name here is
    a release blocker, not a stronger signature.
-3. Run `hdiutil verify Shift-macOS-universal.dmg` and verify `SHA256SUMS.txt` after copying
+3. Run `hdiutil verify artifacts/Shift-<version>-macOS-universal.dmg` and verify `SHA256SUMS.txt` after copying
    the final artifact into `artifacts/`.
 4. Confirm the release contains no `.pkg`, and that the manifest's `macos` entry points at
    the DMG. The in-app helper mounts that exact container with `hdiutil`.
@@ -159,7 +154,8 @@ UI to say why.
 ## Publishing
 
 ```bash
-pnpm tauri build --target universal-apple-darwin --bundles app,dmg
+pnpm mac:release
+scripts/build-windows-release.sh
 printf 'Fixes the ring on external displays.\n' > /tmp/notes.md
 scripts/publish-release.sh --notes /tmp/notes.md     # hash, commit, push
 ```
@@ -178,13 +174,12 @@ same Python pass that walks the files produces both.
 | `--no-push` | Commit locally on `releases` but leave the remote alone |
 | `--branch NAME` | Publish to another channel instead of `releases` |
 
-Recognised installers: `Shift-macOS-universal.dmg` (macOS), `Shift-Setup-<version>-win-x64.exe`
-and `Shift-Setup-<version>-win-arm64.exe` (Windows, keys `windows` and `windows-arm64`),
-`*.AppImage` / `*.deb` (Linux). Other files in `artifacts/` — the portable ZIPs,
-`SHA256SUMS.txt`, the `README-Windows-<arch>.txt` notes and `README-macOS-universal.txt`,
-the packaging note explaining the ad-hoc signature and how to verify a download — travel
-with the branch and are downloadable from it, but are not offered as installers by the
-manifest. Dotfiles and an old manifest are skipped.
+Recognised installers are exactly `Shift-<version>-macOS-universal.dmg` (macOS) and
+`Shift-Setup-<version>-win-x64.exe` (Windows). Publishing fails if either is missing,
+or if any other `.dmg`, `.exe`, `.msi`, `.pkg`, `.zip`, AppImage or deb remains in
+`artifacts/`. `SHA256SUMS.txt`, the two platform notes and `README-macOS-universal.txt`
+travel with the branch as supporting files, never as installers. Dotfiles and an old
+manifest are skipped.
 
 `README-macOS-universal.txt` is tracked in the repository as well as pushed to the channel,
 so the scheme is documented where a contributor reads it and not only next to a build
@@ -192,15 +187,12 @@ product. Every claim in it was checked against the shipped artifacts: the bundle
 published DMG is `Signature=adhoc`, and `shasum -a 256 -c SHA256SUMS.txt` passes on the
 published set.
 
-Both Windows architectures come from one command, which cross-compiles each target,
-checks the PE machine field of the binary it just built (`0x8664` for x64, `0xAA64` for
-ARM64) so a wrong `--target` cannot ship an x64 EXE inside an arm64 package, and gates the
-installer to the matching machine:
+The Windows command cross-compiles one target, checks the PE machine field (`0x8664`)
+and gates the installer to x64:
 
 ```bash
-scripts/build-windows-release.sh                    # both architectures
-scripts/build-windows-release.sh --arch arm64       # one of them
-scripts/build-windows-release.sh --skip-build       # repackage existing EXEs
+scripts/build-windows-release.sh
+scripts/build-windows-release.sh --skip-build
 ```
 
 ## Signing the channel
@@ -213,8 +205,8 @@ scripts/release-key.py keygen ~/.config/shift-release/release.ed25519
 # -> prints the hex public key to bake into the build
 
 export SHIFT_RELEASE_KEY=~/.config/shift-release/release.ed25519
-pnpm tauri build --target universal-apple-darwin --bundles app,dmg   # macOS
-scripts/build-windows-release.sh          # both Windows architectures
+pnpm mac:release                           # macOS universal DMG
+scripts/build-windows-release.sh           # Windows x64 installer
 scripts/publish-release.sh --key "$SHIFT_RELEASE_KEY"
 ```
 

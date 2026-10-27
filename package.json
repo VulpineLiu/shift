@@ -1,7 +1,7 @@
 {
   "name": "shift",
   "private": true,
-  "version": "0.1.7",
+  "version": "0.1.8",
   "type": "module",
   "scripts": {
     "prepare:ocr": "bash scripts/prepare-ocr-assets.sh",
@@ -13,7 +13,8 @@
     "tauri": "tauri",
     "check": "tsc --noEmit",
     "test": "node --experimental-strip-types --test src/lib/*.test.ts",
-    "mac:drag-bridge": "bash scripts/build-macos-drag-bridge.sh"
+    "mac:drag-bridge": "bash scripts/build-macos-drag-bridge.sh",
+    "mac:release": "bash scripts/build-macos-release.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.4",

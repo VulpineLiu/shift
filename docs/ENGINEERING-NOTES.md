@@ -1,6 +1,6 @@
 # Shift 工程回归台账
 
-本文件记录 0.1.2 到 0.1.7 之间已经踩过、并且不应再次引入的工程问题，重点覆盖：
+本文件记录 0.1.2 到 0.1.8 之间已经踩过、并且不应再次引入的工程问题，重点覆盖：
 
 - Drop / 局域网设备发现
 - DOCX、Markdown 与图片转换
@@ -19,6 +19,7 @@
 | 0.1.5 | macOS 改为 ad-hoc 签名并只发布通用 DMG，同时增加本地网络用途声明；但升级后出现 Drop 设备列表为空/只短暂闪现的回归。 |
 | 0.1.6 | 增加按网卡定向广播，改善过滤组播的网络，但用户实测仍只能短暂看到设备。 |
 | 0.1.7 | 增加单播扫描、普通信标回应、15 秒过期和 Windows 错误处理；用户实测 Mac 与 Windows 终端的 Drop 发现恢复正常。 |
+| 0.1.8 | 最近文件改为收藏并移除拖回主操作按钮的交互；Windows 增加单实例保护；macOS DOCX→PDF 改用 Quick Look 源，保留页眉、页脚与装订版式。 |
 
 历史提交可以这样定位：
 
@@ -137,32 +138,38 @@ cargo test share:: -- --ignored --nocapture
 | 输入 → 输出 | 当前实现 | 关键点 |
 | --- | --- | --- |
 | 纯图片 DOCX → PDF | `office::document_page_images` 按文档顺序抽取页面图片，再由 `pdf::images_to_pdf_with_progress` 生成 PDF | 保留页数和原始图片内容；这是扫描件路径，不经过 AppKit 文本排版。 |
-| 含文字和图片 DOCX → PDF | 先用 Pandoc `docx → html5`，通过 `--extract-media` 抽取图片到临时目录，再交给 `native/macos/doc-render.swift` | AppKit 的 OOXML 读取器会静默丢弃内嵌图片，所以这类 DOCX 不能直接交给它。 |
-| Markdown → PDF | 先由 Pandoc（可用时）或内置 `markdown::to_html` 转成 HTML，再交给 AppKit 渲染器；HTML 的 base URL 指向 Markdown 源目录 | 相对图片路径依赖源目录，不能用临时 HTML 所在目录。 |
+| 普通 DOCX → PDF | 先用 `/usr/bin/qlmanage -p` 生成系统的 Quick Look `Preview.html`，再由 `native/macos/doc-render.swift` 用 WebKit 渲染并按 A4 切片 | AppKit 的 OOXML 读取器只保留正文；把 Quick Look HTML 再转成 attributed string 还会重排表格并制造空白页。`qlmanage` 有 30 秒超时，且必须确认 `Preview.html` 存在。 |
+| Quick Look 不可用且含图 DOCX → PDF | 用 Pandoc `docx → html5`，通过 `--extract-media` 抽取图片到临时目录，再交给 `doc-render` | 保留图片的降级路径；Quick Look 失败或超时后才进入。 |
+| Markdown → PDF | 先由 Pandoc（可用时）或内置 `markdown::to_html` 转成 HTML，再交给 WebKit 渲染器；HTML 的 base URL 指向 Markdown 源目录 | 相对图片路径依赖源目录，不能用临时 HTML 所在目录。 |
 | Markdown → DOCX / RTF | Pandoc，并传 `--resource-path <源目录>` | Pandoc 的工作目录不是文档目录；缺少该参数会把相对图片替换成 alt 文本。 |
 | Markdown → HTML | Pandoc，并传 `--resource-path <源目录>` 和 `--self-contained` | 输出必须是可单独移动的单文件，不能引用从未生成的 `media/` 目录。 |
 | 含图 DOCX → HTML | Pandoc 加 `--self-contained` | 图片以内嵌 data URI 写入 HTML。 |
-| 任意含宽图的文档 → PDF | `doc-render.swift` 的 `fitAttachments` 把超宽附件按正文栏宽度等比缩放 | 不重采样像素，只修正排版请求的尺寸，避免截图被裁成碎片。 |
+| 任意含宽图的文档 → PDF | HTML 在 WebKit 测量前把超宽 `<img>` 等比缩到页面宽度；非 HTML 文档仍由 `fitAttachments` 调整 attachment bounds | 不重采样像素，只修正排版请求的尺寸，避免截图被裁成碎片。 |
 
 ### 不能随意改掉的约束
 
-1. **不要把含图 DOCX 直接交给 AppKit OOXML 读取器。** 它会返回只有文字、没有附件的
-   attributed string；问题发生在解析阶段，调页边距或打印参数无法找回图片。
-2. **纯图片 DOCX 的页面抽取要排在通用渲染之前。** 它决定扫描件的真实页数和页面顺序。
-3. **DOCX→HTML 后必须把 `--extract-media` 的临时目录作为 HTML base directory。**
+1. **普通 DOCX 不能直接交给 AppKit OOXML 读取器。** 它只保留正文，页眉页脚会消失；
+   含图文档还会返回只有文字、没有附件的 attributed string。必须先走 Quick Look，
+   失败后才允许回退。
+2. **HTML 必须交给 WebKit，不能再转成 NSAttributedString。** 后者会重新排版 Quick
+   Look 的定位内容，把原本同页的页脚推到新页，并把 7 页内容拉成 9 页。
+3. **纯图片 DOCX 的页面抽取要排在通用渲染之前。** 它决定扫描件的真实页数和页面顺序。
+4. **DOCX→HTML 后必须把 `--extract-media` 的临时目录作为 HTML base directory。**
    Pandoc 会把图片写成相对路径；base 指向源 DOCX 目录会找不到已抽取媒体。
-4. **Markdown→PDF 的 HTML base URL 始终是源 Markdown 目录。** 即使 HTML 写在临时目录，
+5. **Markdown→PDF 的 HTML base URL 始终是源 Markdown 目录。** 即使 HTML 写在临时目录，
    也不能改用临时目录。
-5. **Pandoc 转 DOCX/RTF/HTML 必须保留 `--resource-path`。** 这是相对图片丢失问题的
+6. **Pandoc 转 DOCX/RTF/HTML 必须保留 `--resource-path`。** 这是相对图片丢失问题的
    根因修复，不应为了简化命令删掉。
-6. **HTML 输出必须保留 `--self-contained`。** 否则用户拿到的是一个引用不存在媒体目录
+7. **HTML 输出必须保留 `--self-contained`。** 否则用户拿到的是一个引用不存在媒体目录
    的 HTML 文件。
-7. **宽图适配在 `doc-render.swift` 中完成。** 仅修改 CSS 宽度不会影响 AppKit 对这种
-   HTML `<img>` 单元格的实际 attachment bounds。
-8. **无 Pandoc 时保留 macOS 的降级路径。** 带图 DOCX 会退回旧的文本渲染，而不是让
+8. **宽图适配在 `doc-render.swift` 中完成。** HTML 必须在测量前缩放宽图；非 HTML
+   文档的 AppKit `<img>` 单元格不会服从 CSS width，仍需调整 attachment bounds。
+9. **无 Pandoc 时保留 macOS 的降级路径。** 带图 DOCX 会退回旧的文本渲染，而不是让
    整个转换直接失败；修改时要明确产品选择，不能无意打破降级。
-9. **Swift 渲染器改动后重新运行 `pnpm mac:drag-bridge`。** 只改源码不重编伴生进程，
+10. **Swift 渲染器改动后重新运行 `pnpm mac:drag-bridge`。** 只改源码不重编伴生进程，
    打出的 DMG 不会包含修复。
+11. **Quick Look 临时目录必须在所有成功和失败路径清理。** 输出先写到临时目录，确认
+    PDF 有效后再改名；不能把半成品留在用户的输出目录。
 
 ### 回归测试
 
@@ -171,8 +178,18 @@ cargo test share:: -- --ignored --nocapture
 - `renders_image_only_docx_pages_to_pdf`
 - `keeps_pictures_when_rendering_a_text_docx_to_pdf`
 - `fits_a_wide_picture_onto_the_page`
+- `keeps_docx_headers_and_footers_when_converting_to_pdf`
 - `image_bearing_docx_to_html_embeds_images`
 - `keeps_markdown_images_when_converting_to_word`
+
+## 升级后的单实例
+
+Windows 安装器重启应用时可能留下旧进程，再启动新进程就会有两个托盘实例和两套窗口。
+`tauri-plugin-single-instance` 必须在 `tauri::Builder` 中**最先注册**：第二个进程在
+其余插件和窗口初始化前就把参数交给第一实例并退出，第一实例收到回调后显示主窗口。
+
+macOS 的 `hotkeys::acquire_instance` 文件锁仍保留为热键所有权的额外保护，不能因为加入
+单实例插件而删除；但它不是 Windows 的解决方案，非 Unix 分支本身不会持有跨进程锁。
 
 其中 `keeps_markdown_images_when_converting_to_word` 覆盖 DOCX 和 RTF；
 `image_bearing_docx_to_html_embeds_images` 检查 HTML 中的图片是 data URI 而不是
@@ -202,13 +219,13 @@ cargo test share:: -- --ignored --nocapture
 Shift 的 macOS 产物只有：
 
 ```text
-Shift-macOS-universal.dmg
+Shift-<版本>-macOS-universal.dmg
 ```
 
 它是 Apple silicon 与 Intel 通用的应用包，同时用于首次安装和软件内升级。更新清单的
 `macos` 键必须指向这个 DMG，因为软件内升级脚本会用 `hdiutil` 挂载它再取出应用。
-不再发布 `.pkg`；`scripts/macos-pkg.sh` 可以保留作历史工具，但不能进入正式发布目录或
-更新清单。
+不再发布 `.pkg`；旧的 `scripts/macos-pkg.sh` 已从仓库删除，任何 `.pkg` 都不能进入
+正式发布目录或更新清单。
 
 当前签名配置是：
 
@@ -271,6 +288,62 @@ Mac 后，证书无法链到受信任根，下载的应用会被系统报告为�
 - Developer ID + notarization 才能消除首次安装提示，并让权限在升级间稳定。当前项目没有
   该证书，不能把“已公证”写入发布说明。
 - 发布前不能只看构建机上的 `spctl` 结果；跨机器安装行为和系统提示类型才是有效证据。
+
+## 截图、录制与圆环的键盘焦点
+
+### 症状与真实原因
+
+区域截图、区域录制时按 `ESC` 无法取消，拖动文件后出现的圆环按 `ESC` 也无反应。前端确实
+监听了 `keydown`，但事件根本没有到达页面。
+
+在运行中的 Shift 上用 `lldb` 取证可以看到：
+
+```text
+keyWindow      = <TaoWindow "Shift Capture">   isKeyWindow = YES
+firstResponder = <TaoView>          ← 页面在 contentView 的 subview 里，不在这里
+contentView    = <TaoView>  subviews = [<WryWebView>]
+```
+
+窗口是 key window，但 AppKit 的键盘事件投递给的是窗口的 first responder，而 first
+responder 停在 tao 自己的 `TaoView` 上，所以页面收不到任何按键。链路上有两个成因：
+
+- `WebviewWindow::set_focus()` 只做 `makeKeyAndOrderFront` 加激活应用
+  （tao `platform_impl/macos/window.rs` 的 `set_focus`），不会动 first responder。
+- wry 在创建 webview 时调用过一次 `makeFirstResponder(webview)`，但之后每次
+  `set_simple_fullscreen` 都会经 `toggle_style_mask` 再调
+  `makeFirstResponder(ns_view)`（tao `util/mod.rs`）把它抢回去；窗口重新显示同样会丢。
+
+因此**只要窗口被显示过一次，就必须再显式把键盘交给页面**。等价验证：在真实进程里执行
+`makeFirstResponder(WryWebView)` 之后，同一个 `ESC` 立刻被页面收到。
+
+### 不能随意改掉的约束
+
+| 约束 | 原因 |
+| --- | --- |
+| 显示 overlay / 圆环后必须调用 `crate::focus_page` | 只有 `Webview::set_focus`（`makeFirstResponder`）能让页面收到 `ESC`/`Enter`；`WebviewWindow::set_focus` 不够。 |
+| 采集前记住哪些 Shift 窗口是可见的，结束时按名单恢复 | 之前无条件 `show` 主窗口：面板开着会被截图吃掉，面板本来关着又会被凭空打开。 |
+| 录制期间不能恢复面板，`recording::stop` 才恢复 | 恢复出来的窗口会出现在被录制的区域里。 |
+| `restore_windows` 用 recorder HUD 判断是否在录制，不能去锁 `state.recording` | `recording::stop` 全程持有该 Mutex，从这条路再锁一次会自死锁。 |
+| 已有 overlay 或正在录制时，新一轮采集不得覆盖待恢复名单 | 否则后一次（面板不可见）会把“面板开着”的记录擦掉。 |
+
+### 回归测试
+
+`src-tauri/src/lib.rs` 中的源码断言守住调用点：
+
+```bash
+cd src-tauri
+cargo test --lib capture
+```
+
+键盘投递本身只能实测，最小矩阵（每步都要看窗口是否真的消失/回来）：
+
+1. 面板开着 → `Alt+Shift+2` → 直接按 `ESC` → overlay 消失且面板回来。
+2. 面板开着 → `Alt+Shift+3` → 直接按 `ESC` → 同上。
+3. 面板关着 → `Alt+Shift+2` → `ESC` → 不要凭空出现面板。
+4. 面板开着 → 选区录制 → 录制中面板保持隐藏 → 停止后面板回来，`.mov` 有效。
+5. 录制中再截一张图 → `ESC` 只关 overlay，录制与 HUD 不受影响。
+6. 圆环（拖文件到面板，或「文件转换」选文件后）→ `ESC` 收起圆环。
+7. `Enter` 仍能确认选区并保存截图。
 
 ## 修改这些路径时的统一回归命令
 

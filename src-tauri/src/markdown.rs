@@ -56,7 +56,7 @@ fn inline(text: &str) -> String {
                         }
                     }
                 }
-                output.push_str("!");
+                output.push('!');
                 index += 1;
             }
             '[' => {

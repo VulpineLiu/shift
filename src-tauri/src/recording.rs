@@ -300,7 +300,9 @@ pub fn start(
         started_at,
         stops_with_signal,
     });
-    capture::dismiss_capture(app);
+    // The overlay goes away, but the panel stays hidden until the recording ends:
+    // a restored window would be filmed inside the selected region.
+    capture::dismiss_capture_for_recording(app);
 
     if let Some(window) = app.get_webview_window("recorder") {
         if let Ok(Some(monitor)) = app.primary_monitor() {
@@ -379,8 +381,18 @@ pub fn stop(app: &AppHandle, state: &AppState) -> Result<Option<RecordingInfo>, 
     let Some(mut session) = guard.take() else {
         return Ok(None);
     };
-    stop_process(&mut session)?;
-    if !wait_for_output(&session.output) {
+    let stopped = stop_process(&mut session);
+    let saved = stopped.is_ok() && wait_for_output(&session.output);
+    if let Some(window) = app.get_webview_window("recorder") {
+        // The HUD goes down first: it is what tells `restore_windows` the recording
+        // has ended, and the panel comes back with it.
+        let _ = window.hide();
+    }
+    // The recorder held the panel down so it would not be filmed; it returns whether
+    // or not the file came out, or a failed recording would lose the window.
+    capture::restore_windows(app);
+    stopped?;
+    if !saved {
         return Err(
             "No video was saved. Allow Screen Recording for Shift in System Settings > Privacy & Security > Screen Recording, then try again."
                 .into(),
@@ -390,9 +402,6 @@ pub fn stop(app: &AppHandle, state: &AppState) -> Result<Option<RecordingInfo>, 
         output: session.output.to_string_lossy().to_string(),
         started_at: session.started_at,
     };
-    if let Some(window) = app.get_webview_window("recorder") {
-        let _ = window.hide();
-    }
     match crate::settings::load(app).capture_after {
         crate::settings::CaptureAfter::Editor => {
             editor::show_recording_editor(app, &info)?;

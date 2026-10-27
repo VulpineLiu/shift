@@ -39,8 +39,8 @@ names what is still missing.
 - Custom radial item ordering with per-file-type presets: the wedge catalogue lives in
   `src/lib/radialOrder.ts`, orders are stored per kind and ring in `settings.json`. The
   Settings tab that edited them was removed in 0.1.1, so orders now come from
-  `settings.json` alone; `src/components/RadialOrderPanel.tsx` is kept for when an editor
-  comes back.
+  `settings.json` alone; the retired editor was removed in 0.1.8 and only the read path is
+  retained for compatibility with existing user settings.
 - Undo history in the annotation canvas (annotations pop first, then image-level
   operations, matching the README table) and conflict-safe output naming: `unique_output`
   appends a numeric suffix instead of overwriting. There is no undo for a completed file
@@ -66,16 +66,12 @@ names what is still missing.
   repository has no second-machine fixture. Client-isolated Wi-Fi remains outside the app's
   control, and Windows still permits only one listener per machine. The exact invariants
   and manual matrix are in `docs/ENGINEERING-NOTES.md`.
-- Windows ARM64: `scripts/build-windows-release.sh` builds both architectures by
-  default, checks each binary's PE machine field (`0x8664` / `0xAA64`) before packaging
-  it, and gates each NSIS installer to the matching machine. The update manifest gained a
-  `windows-arm64` key; an ARM build tries it first and falls back to `windows`, which
-  Windows on ARM runs under emulation, so a channel that predates the ARM build still
-  serves it. Verified by cross-building, packaging and publishing all of that from macOS;
-  running the installer on real Windows-on-ARM hardware has not happened. Since 0.1.1 the
-  shipped targets are macOS and Windows x64 only, so ARM64 stays a buildable architecture
-  (`--arch arm64` still works, `windows-arm64` still falls back to `windows`) that nothing
-  is published for.
+- Windows ARM64: the release pipeline ships only the x64 NSIS installer, checks its
+  PE machine field (`0x8664`), and gates the installer to x64. An ARM machine tries the
+  optional `windows-arm64` manifest key first and falls back to `windows`, which Windows
+  on ARM runs through emulation. Verified by cross-building, packaging and publishing
+  from macOS; running the installer on real Windows-on-ARM hardware has not happened.
+  Since 0.1.1 the shipped installers are macOS universal and Windows x64 only.
 - Linux is supported as a build and run target but is **not a shipped product**: no deb or
   AppImage is published, so the update channel has no `linux` key and the platform table
   reports "no artifact" rather than a failure. `scripts/linux/Dockerfile` and the `linux` CI

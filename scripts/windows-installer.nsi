@@ -2,15 +2,13 @@
 ;
 ; makensis -DSHIFT_EXE=<path> -DLICENSE_FILE=<path> -DNOTICES_FILE=<path> \
 ;          -DREADME_FILE=<path> -DICONS_DIR=<path> -DOUT_FILE=<path> \
-;          -DVERSION=0.1.0 -DEST_SIZE_KB=<kb> [-DARCH=x64|arm64] \
+;          -DVERSION=0.1.8 -DEST_SIZE_KB=<kb> \
 ;          scripts/windows-installer.nsi
 ;
-; ARCH decides which machine the installer accepts: an x64 package refuses an ARM
-; machine and an arm64 package refuses x64, so nobody installs the wrong build and
-; finds out from a blank window. Omitting it keeps the previous x64 behaviour.
+; The installer accepts native x64 Windows only. Windows on ARM is served by the
+; same x64 build through its compatibility layer and the update manifest fallback.
 ;
-; Install scope is deliberately per-user: Shift writes only to HKCU and its own
-; folder, which is also what the portable build already does.
+; Install scope is deliberately per-user: Shift writes only to HKCU and its own folder.
 
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
@@ -28,21 +26,6 @@
 !endif
 !ifndef EST_SIZE_KB
   !define EST_SIZE_KB "40000"
-!endif
-
-!ifndef ARCH
-  !define ARCH "x64"
-!endif
-
-!if "${ARCH}" == "arm64"
-  !define ARCH_GATE '${IsNativeARM64}'
-  !define ARCH_GATE_MESSAGE "This build is for 64-bit Windows (ARM64)."
-!else
-  !if "${ARCH}" != "x64"
-    !error "ARCH is either x64 or arm64"
-  !endif
-  !define ARCH_GATE '${IsNativeAMD64}'
-  !define ARCH_GATE_MESSAGE "This build is for 64-bit Windows (x64)."
 !endif
 
 !define APP_NAME "Shift"
@@ -68,7 +51,7 @@ VIAddVersionKey CompanyName "${PUBLISHER}"
 VIAddVersionKey LegalCopyright "Copyright ${BUILD_YEAR} ${PUBLISHER}"
 VIAddVersionKey FileDescription "${APP_NAME} installer"
 VIAddVersionKey FileVersion "${APP_VERSION}.0"
-VIAddVersionKey OriginalFilename "Shift-Setup.exe"
+VIAddVersionKey OriginalFilename "Shift-Setup-${VERSION}-win-x64.exe"
 
 !define MUI_ICON "${ICONS_DIR}\icon.ico"
 !define MUI_UNICON "${ICONS_DIR}\icon.ico"
@@ -107,16 +90,10 @@ Function .onInit
     Abort
   ${EndIf}
 
-  ${IfNot} ${ARCH_GATE}
-    MessageBox MB_OK|MB_ICONSTOP "${ARCH_GATE_MESSAGE}"
+  ${IfNot} ${IsNativeAMD64}
+    MessageBox MB_OK|MB_ICONSTOP "This build is for 64-bit Windows (x64)."
     Abort
   ${EndIf}
-
-!if "${ARCH}" == "arm64"
-  ; Read the real 64-bit registry view: on ARM64 the default view is emulated,
-  ; and the machine-wide WebView2 key looked up after install is not in it.
-  SetRegView 64
-!endif
 
   ; Shift keeps a tray process alive and Windows refuses to overwrite a mapped
   ; EXE, so ask before closing a conversion the user may be waiting on.
