@@ -1648,10 +1648,6 @@ kbd {
     inset 0 1px 0 rgba(255, 255, 255, 0.8);
   text-align: center;
   backdrop-filter: blur(18px);
-  transition:
-    border-color 0.18s ease,
-    background 0.18s ease,
-    transform 0.18s ease;
 }
 
 .permission-banner {
@@ -1718,16 +1714,6 @@ kbd {
   border: 1.5px dashed rgba(150, 99, 70, 0.19);
   border-radius: 20px;
   pointer-events: none;
-}
-
-.home-drop.is-dragging {
-  border-color: rgba(242, 106, 51, 0.38);
-  background: rgba(255, 245, 235, 0.94);
-  transform: scale(0.995);
-}
-
-.home-drop.is-dragging::after {
-  border-color: rgba(242, 106, 51, 0.58);
 }
 
 .home-drop-art {

@@ -128,7 +128,7 @@ pub fn tray_titles(language: &str) -> TrayTitles {
             capture: "区域截图",
             fullscreen: "全屏截图",
             record: "区域录屏",
-            ocr: "识别图片文字…",
+            ocr: "文字识别",
             update: "发现新版本 ",
             quit: "退出 Shift",
         }
@@ -138,7 +138,7 @@ pub fn tray_titles(language: &str) -> TrayTitles {
             capture: "Capture area",
             fullscreen: "Capture full screen",
             record: "Record area",
-            ocr: "OCR an image…",
+            ocr: "OCR",
             update: "Update available ",
             quit: "Quit Shift",
         }
@@ -198,9 +198,13 @@ mod tests {
         let chinese = tray_titles(CHINESE);
         assert_eq!(chinese.quit, "退出 Shift");
         assert_eq!(chinese.capture, "区域截图");
+        // The tray row carries the same words as the window's own OCR button, and
+        // no ellipsis: every other row is a command, not a preview.
+        assert_eq!(chinese.ocr, "文字识别");
         let english = tray_titles(ENGLISH);
         assert_eq!(english.quit, "Quit Shift");
         assert_eq!(english.capture, "Capture area");
+        assert_eq!(english.ocr, "OCR");
         // Chinese is the only other language, so anything else means English.
         assert_eq!(tray_titles("de").open, english.open);
     }

@@ -1031,6 +1031,10 @@ mod tests {
         assert!(version_is_newer("v1.0.0", "0.9.0"));
         assert!(!version_is_newer("0.1.0", "0.1.0"));
         assert!(!version_is_newer("0.0.9", "0.1.0"));
+        // 0.1.10 was the first release whose *patch* component reached two digits, so
+        // the double-digit rule is asserted for that position too and not just above it.
+        assert!(version_is_newer("0.1.10", "0.1.9"));
+        assert!(!version_is_newer("0.1.9", "0.1.10"));
     }
 
     #[test]

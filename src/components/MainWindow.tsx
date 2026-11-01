@@ -316,13 +316,15 @@ export function MainWindow() {
   }
 
   async function runOcrOn(paths: string[]) {
-    const image = paths.find((path) => OCR_EXTENSIONS.includes(extensionOf(path)));
-    if (!image) {
-      // No image in the batch: the format ring is more useful than a failing OCR run.
-      await api.showFilesInRadial(paths, "formats");
+    // No fallback: a drop the OCR button cannot serve is refused rather than
+    // silently handed to another ring, which used to look like the button
+    // ignoring the file and doing something else instead.
+    const unsupported = paths.filter((path) => !OCR_EXTENSIONS.includes(extensionOf(path)));
+    if (unsupported.length > 0) {
+      flash(t("ocrUnsupported"), 2600);
       return;
     }
-    await api.openInEditor(image);
+    await api.openInEditor(paths[0]);
     window.setTimeout(() => {
       void emitTo("editor", "editor://run-ocr", {});
     }, 450);
@@ -350,29 +352,26 @@ export function MainWindow() {
   /**
    * Run the one action a drop was aimed at.
    *
-   * The button *is* the choice: a drop that lands on the panel rather than on one of
-   * the three buttons runs nothing, so the gesture can never open a ring the user did
-   * not ask for. `dropOnButton` says why instead of leaving the drop silent.
+   * The button *is* the choice. `null` means the file was released on the panel
+   * rather than on a button, and that runs nothing and says nothing - the same
+   * nothing a row released off a button does, which is why a file from outside and
+   * a row from the list are now one gesture with one set of consequences.
    */
-  function dropFiles(paths: string[], action: DropAction) {
+  function dropFiles(paths: string[], action: DropAction | null) {
     if (paths.length === 0) return Promise.resolve();
+    if (!action) return Promise.resolve();
     if (action === "ocr") return runOcrOn(paths);
     return api.showFilesInRadial(paths, action).then(() => undefined);
   }
 
   /**
-   * Land a dragged Recent row, at most once per gesture. Off a button it runs nothing,
-   * the same rule a file from Finder follows, and says so rather than going silent.
+   * Land a dragged Recent row, at most once per gesture.
    */
   function landRecentRow(action: DropAction | null) {
     const drag = recentDrag.current;
     if (!drag || drag.landed) return;
     drag.landed = true;
     setDropAction(null);
-    if (!action) {
-      flash(t("dropOnButton"), 2600);
-      return;
-    }
     void dropFiles([drag.path], action).catch((error) => flash(String(error), 3200));
   }
 
@@ -675,12 +674,6 @@ export function MainWindow() {
               landRecentRow(action);
               return;
             }
-            // Off a button there is no action to run, so the drop says what it expects
-            // instead of opening a ring the user never aimed at.
-            if (!action) {
-              flash(t("dropOnButton"), 2600);
-              return;
-            }
             void dropFiles(event.payload.paths, action).catch((error) => flash(String(error), 3200));
             return;
           }
@@ -816,7 +809,7 @@ export function MainWindow() {
       ) : null}
 
       <main className="home-main">
-        <section className={`home-drop ${dragging ? "is-dragging" : ""}`}>
+        <section className="home-drop">
           {screenAccess === false ? (
             <div className="permission-banner">
               <ShieldAlert size={16} />
@@ -855,9 +848,10 @@ export function MainWindow() {
               );
             })}
           </div>
-          <h1>{dragging ? t("homeDropRelease") : t("homeDropTitle")}</h1>
-          {/* While any drag is in flight all three buttons show as candidates, so the
-              aim is visible before the pointer reaches one. */}
+          <h1>{t("homeDropTitle")}</h1>
+          {/* The buttons are the only thing a drag reacts to: while one is in flight
+              all three show as candidates, so the aim is visible before the pointer
+              reaches one, and the panel itself never animates. */}
           <div
             className={`home-primary-actions ${
               dragging || rowDragging || dropAction ? "has-drop-target" : ""
