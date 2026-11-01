@@ -2,6 +2,18 @@ export function basename(path: string): string {
   return path.split(/[\\/]/).pop() || path;
 }
 
+/**
+ * The one way a thrown value becomes text a user can read.
+ *
+ * A Rust error arrives as a plain string and a JS-layer error as a real `Error`,
+ * and `String(error)` on the second keeps its `Error: ` prefix, so the same
+ * failure used to read one way in the main window and another in the ring.
+ */
+export function messageFrom(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/^Error:\s*/, "").trim();
+}
+
 export const IS_MAC = /Mac/i.test(navigator.platform) || /Mac OS X/i.test(navigator.userAgent);
 
 export function dirname(path: string): string {

@@ -6,7 +6,7 @@ import { Copy, FileVideo, FolderSearch, Images, Send } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import { api } from "../lib/api";
-import { basename, decodeHexParam } from "../lib/utils";
+import { basename, decodeHexParam, messageFrom } from "../lib/utils";
 import type { CaptureResult } from "../types";
 
 const THUMB_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "tif"];
@@ -75,7 +75,7 @@ export function ResultCard() {
       else await writeText(info.path);
       setNote(t("copied"));
     } catch (error) {
-      setNote(String(error));
+      setNote(t(messageFrom(error)));
     }
   }
 

@@ -28,10 +28,7 @@ fn ensure_screen_capture_access() -> Result<(), String> {
             return Ok(());
         }
     }
-    Err(
-        "Screen Recording permission is required. Enable Shift in System Settings > Privacy & Security > Screen Recording, then restart Shift if macOS asks."
-            .into(),
-    )
+    Err("errScreenPermission".into())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -70,7 +67,7 @@ fn monitor_at_cursor(app: &AppHandle) -> Result<tauri::Monitor, String> {
                 && cursor.y <= y + monitor.size().height as f64
         })
         .or_else(|| app.primary_monitor().ok().flatten())
-        .ok_or_else(|| "No monitor found under the cursor.".to_string())
+        .ok_or_else(|| "errNoMonitor".to_string())
 }
 
 fn capture_screen(app: &AppHandle, monitor: &tauri::Monitor) -> Result<CaptureSource, String> {
@@ -100,10 +97,7 @@ fn capture_screen(app: &AppHandle, monitor: &tauri::Monitor) -> Result<CaptureSo
             .status()
             .map_err(|error| format!("Could not launch screencapture: {error}"))?;
         if !status.success() {
-            return Err(
-                "Screen capture was cancelled or blocked. Allow Screen Recording in System Settings."
-                    .into(),
-            );
+            return Err("errCaptureBlocked".into());
         }
     }
 
@@ -129,11 +123,11 @@ fn capture_screen(app: &AppHandle, monitor: &tauri::Monitor) -> Result<CaptureSo
                 .args(["-f", output.to_string_lossy().as_ref()])
                 .status()
         } else {
-            return Err("Install grim or gnome-screenshot to capture the screen on Linux.".into());
+            return Err("errCaptureToolMissing".into());
         };
         let status = status.map_err(|error| error.to_string())?;
         if !status.success() {
-            return Err("Screen capture failed.".into());
+            return Err("errCaptureFailed".into());
         }
     }
 
@@ -180,12 +174,12 @@ fn capture_windows_screen(monitor: &tauri::Monitor, output: &Path) -> Result<(),
         };
         if width <= 0 || height <= 0 {
             restore_awareness();
-            return Err("Windows did not report a usable screen size.".into());
+            return Err("errWinScreenSize".into());
         }
         let screen = GetDC(std::ptr::null_mut());
         if screen.is_null() {
             restore_awareness();
-            return Err("Windows could not open the desktop surface.".into());
+            return Err("errWinDesktopDC".into());
         }
         let memory = CreateCompatibleDC(screen);
         let bitmap = CreateCompatibleBitmap(screen, width, height);
@@ -198,7 +192,7 @@ fn capture_windows_screen(monitor: &tauri::Monitor, output: &Path) -> Result<(),
             }
             ReleaseDC(std::ptr::null_mut(), screen);
             restore_awareness();
-            return Err("Windows could not allocate a screenshot surface.".into());
+            return Err("errWinSurfaceAlloc".into());
         }
         let previous = SelectObject(memory, bitmap as HGDIOBJ);
         let copied = BitBlt(
@@ -251,7 +245,7 @@ fn capture_windows_screen(monitor: &tauri::Monitor, output: &Path) -> Result<(),
 
         if copied == 0 || rows == 0 {
             restore_awareness();
-            return Err("Windows could not copy the screen surface.".into());
+            return Err("errWinSurfaceCopy".into());
         }
         for pixel in pixels.chunks_exact_mut(4) {
             pixel.swap(0, 2);
@@ -259,7 +253,7 @@ fn capture_windows_screen(monitor: &tauri::Monitor, output: &Path) -> Result<(),
         }
         let Some(image) = image::RgbaImage::from_raw(width as u32, height as u32, pixels) else {
             restore_awareness();
-            return Err("Windows returned an invalid screenshot buffer.".into());
+            return Err("errWinSurfaceBuffer".into());
         };
         let result = image
             .save_with_format(output, image::ImageFormat::Png)
@@ -423,7 +417,7 @@ pub fn crop_session(
     let crop_width = (rect.width.clamp(0.0, 1.0) * width as f64).round() as u32;
     let crop_height = (rect.height.clamp(0.0, 1.0) * height as f64).round() as u32;
     if crop_width < 2 || crop_height < 2 || x >= width || y >= height {
-        return Err("Select an area first.".into());
+        return Err("errNoSelection".into());
     }
     let cropped = image.crop_imm(x, y, crop_width.min(width - x), crop_height.min(height - y));
     let directory = screenshot_directory(app)?;
@@ -523,7 +517,7 @@ fn finish_capture(
         app,
         ActionOutcome {
             outputs: vec![output.to_string_lossy().to_string()],
-            message: "Screenshot saved.".into(),
+            message: "outcomeSaved".into(),
         },
     );
     Ok(output.to_string_lossy().to_string())

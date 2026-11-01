@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
+import { messageFrom } from "./utils";
 import type { UpdateProgress, UpdateStatus } from "../types";
 
 export interface UpdateFlow {
@@ -92,7 +93,7 @@ export function useUpdateFlow(): UpdateFlow {
       // moment before the windows close.
     } catch (error) {
       if (mounted.current) {
-        setInstallError(String(error).replace(/^Error:\s*/, ""));
+        setInstallError(messageFrom(error));
         setInstalling(false);
       }
     }

@@ -412,7 +412,7 @@ pub fn stop(app: &AppHandle, state: &AppState) -> Result<Option<RecordingInfo>, 
         app,
         ActionOutcome {
             outputs: vec![info.output.clone()],
-            message: "Recording saved.".into(),
+            message: "outcomeSaved".into(),
         },
     );
     Ok(Some(info))

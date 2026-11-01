@@ -5,7 +5,7 @@ import { Copy, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import { api } from "../lib/api";
-import { decodeHexParam } from "../lib/utils";
+import { decodeHexParam, messageFrom } from "../lib/utils";
 
 interface PinnedPreview {
   id: number;
@@ -68,7 +68,7 @@ export function PinnedImage() {
         .then(apply)
         .catch((reason) => {
           if (disposed) return;
-          setError(String(reason).replace(/^Error:\s*/, ""));
+          setError(t(messageFrom(reason)));
           void api.pinReady(null);
         });
     };
@@ -102,7 +102,7 @@ export function PinnedImage() {
   }
 
   if (error) {
-    return <div className="pin-error">{error}</div>;
+    return <div className="pin-error" role="alert">{error}</div>;
   }
 
   return (

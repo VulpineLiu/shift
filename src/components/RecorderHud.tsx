@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
 import { useI18n } from "../i18n";
 import { api } from "../lib/api";
-import { formatDuration } from "../lib/utils";
+import { formatDuration, messageFrom } from "../lib/utils";
 import type { RecordingInfo } from "../types";
 
 export function RecorderHud() {
@@ -42,7 +42,7 @@ export function RecorderHud() {
     try {
       await api.stopRecording();
     } catch (stopError) {
-      setError(String(stopError));
+      setError(t(messageFrom(stopError)));
     } finally {
       setStopping(false);
     }
@@ -55,7 +55,11 @@ export function RecorderHud() {
       </span>
       <div className="recorder-copy" data-tauri-drag-region>
         <strong>{recording ? formatDuration(now - recording.startedAt) : "00:00"}</strong>
-        <span className={error ? "recorder-error" : ""} title={error ?? undefined}>
+        <span
+          className={error ? "recorder-error" : ""}
+          title={error ?? undefined}
+          role={error ? "alert" : undefined}
+        >
           {error || t("record")}
         </span>
       </div>

@@ -4,6 +4,7 @@ import { writeImage, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { save } from "@tauri-apps/plugin-dialog";
 import {
   Check,
+  CircleAlert,
   Clipboard,
   Copy,
   ExternalLink,
@@ -18,7 +19,8 @@ import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import { api } from "../lib/api";
 import { recognizeImage } from "../lib/ocr";
-import { basename, dirname, extensionOf, IS_MAC } from "../lib/utils";
+import { FEEDBACK } from "../lib/feedback";
+import { basename, dirname, extensionOf, IS_MAC, messageFrom } from "../lib/utils";
 import { history } from "../lib/history";
 import type { EditorInfo } from "../types";
 import { ImageAnnotator } from "./ImageAnnotator";
@@ -31,8 +33,10 @@ export function Editor() {
   const [ocrProgress, setOcrProgress] = useState(0);
   const [ocrStatus, setOcrStatus] = useState("");
   const [ocrRunning, setOcrRunning] = useState(false);
+  const [ocrFailed, setOcrFailed] = useState(false);
   const [pinBusy, setPinBusy] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
+  const [copiedIsError, setCopiedIsError] = useState(false);
   const [textContent, setTextContent] = useState("");
   const copyTimer = useRef<number | null>(null);
   const sessionRef = useRef<EditorInfo | null>(null);
@@ -85,23 +89,25 @@ export function Editor() {
     };
   }, [session?.kind, session?.path]);
 
-  function flashCopied(label: string) {
+  /** The window's one transient notice. A failure must not arrive wearing a tick. */
+  function flashNotice(label: string, failed = false) {
     if (copyTimer.current) window.clearTimeout(copyTimer.current);
     setCopied(label);
-    copyTimer.current = window.setTimeout(() => setCopied(null), 1400);
+    setCopiedIsError(failed);
+    copyTimer.current = window.setTimeout(() => setCopied(null), FEEDBACK.done);
   }
 
   async function copy() {
     if (!session) return;
-    if (session.kind === "image") {
-      await writeImage(session.path);
-      flashCopied(t("copy"));
-    } else if (session.kind === "text") {
-      await writeText(textContent);
-      flashCopied(t("copy"));
-    } else {
-      await writeText(session.path);
-      flashCopied(t("copy"));
+    // A clipboard the OS refuses is a result the user has to be told about; it
+    // used to fail in silence here while every other window reported it.
+    try {
+      if (session.kind === "image") await writeImage(session.path);
+      else if (session.kind === "text") await writeText(textContent);
+      else await writeText(session.path);
+      flashNotice(t("copy"));
+    } catch (error) {
+      flashNotice(t(messageFrom(error)), true);
     }
   }
 
@@ -113,8 +119,12 @@ export function Editor() {
       filters: ext ? [{ name: ext.toUpperCase(), extensions: [ext] }] : undefined,
     });
     if (!target) return;
-    await api.copyFileTo(session.path, target);
-    flashCopied(t("saved"));
+    try {
+      await api.copyFileTo(session.path, target);
+      flashNotice(t("saved"));
+    } catch (error) {
+      flashNotice(t(messageFrom(error)), true);
+    }
   }
 
   async function runOcr() {
@@ -124,6 +134,7 @@ export function Editor() {
     setOcrRunning(true);
     setOcrText("");
     setOcrProgress(0);
+      setOcrFailed(false);
     setOcrStatus(t("ocrRunning"));
     try {
       const source = isTauri() ? convertFileSrc(current.path) : current.path;
@@ -134,12 +145,15 @@ export function Editor() {
       setOcrText(result.text || t("ocrEmpty"));
       if (result.text) {
         await writeText(result.text);
-        flashCopied(t("copyText"));
+        flashNotice(t("copyText"));
       }
       setOcrProgress(1);
       setOcrStatus("");
     } catch (error) {
-      setOcrText(String(error));
+      // Nothing was read, so the panel says only that and stays out of the way;
+      // the reason belongs on the notice, which is where this window reports.
+      setOcrFailed(true);
+      flashNotice(t(messageFrom(error)), true);
       setOcrStatus("");
     } finally {
       setOcrRunning(false);
@@ -153,7 +167,7 @@ export function Editor() {
     try {
       await api.pinImage(current.path);
     } catch (error) {
-      flashCopied(String(error).replace(/^Error:\s*/, ""));
+      flashNotice(t(messageFrom(error)), true);
     } finally {
       setPinBusy(false);
     }
@@ -177,7 +191,12 @@ export function Editor() {
         <div className="editor-title" data-tauri-drag-region>
           {name}
         </div>
-        <button className="home-icon-button editor-close" onClick={() => void api.closeEditor()}>
+        <button
+          className="home-icon-button editor-close"
+          onClick={() => void api.closeEditor()}
+          aria-label={t("close")}
+          title={t("close")}
+        >
           <X size={16} />
         </button>
       </header>
@@ -229,7 +248,7 @@ export function Editor() {
               path={session.path}
               onSaved={(nextPath) => {
                 applySession({ path: nextPath, kind: "image" });
-                flashCopied(t("saved"));
+                flashNotice(t("saved"));
               }}
             />
           ) : session.kind === "video" ? (
@@ -252,7 +271,12 @@ export function Editor() {
                 <span className="ocr-eyebrow">{t("ocr")}</span>
                 <h2>{t("ocrTitle")}</h2>
               </div>
-              <button className="editor-icon" onClick={() => setOcrOpen(false)}>
+              <button
+                className="editor-icon"
+                onClick={() => setOcrOpen(false)}
+                aria-label={t("close")}
+                title={t("close")}
+              >
                 <X size={16} />
               </button>
             </div>
@@ -272,11 +296,11 @@ export function Editor() {
               className="ocr-output"
               value={ocrText}
               onChange={(event) => setOcrText(event.target.value)}
-              placeholder={t("ocrEmpty")}
+              placeholder={t(ocrFailed ? "ocrNothing" : "ocrEmpty")}
               spellCheck={false}
             />
             <div className="ocr-actions">
-              <button className="editor-primary" onClick={() => void writeText(ocrText).then(() => flashCopied(t("copyText")))}>
+              <button className="editor-primary" onClick={() => void writeText(ocrText).then(() => flashNotice(t("copyText")))}>
                 <Copy size={15} />
                 {t("copyText")}
               </button>
@@ -290,8 +314,12 @@ export function Editor() {
       </main>
 
       {copied ? (
-        <div className="editor-toast">
-          <Check size={15} />
+        <div
+          className={`editor-toast ${copiedIsError ? "is-error" : ""}`}
+          role={copiedIsError ? "alert" : "status"}
+          aria-live="polite"
+        >
+          {copiedIsError ? <CircleAlert size={15} /> : <Check size={15} />}
           {copied}
         </div>
       ) : null}

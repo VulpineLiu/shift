@@ -17,7 +17,7 @@ import { useEffect, useRef, useState, type DragEvent } from "react";
 import { useI18n } from "../i18n";
 import { api } from "../lib/api";
 import { parseSharePaths, SHARE_PATHS_TYPE } from "../lib/dragOut";
-import { basename, dirname, formatBytes } from "../lib/utils";
+import { basename, dirname, formatBytes, messageFrom } from "../lib/utils";
 import type { SharePeer, ShareTransfer } from "../types";
 
 interface SharePanelProps {
@@ -48,7 +48,8 @@ export function SharePanel({ paths, onClose, onNotice }: SharePanelProps) {
   const [searching, setSearching] = useState(true);
   const [busyPeer, setBusyPeer] = useState<string | null>(null);
   const [progress, setProgress] = useState<ShareTransfer | null>(null);
-  const [failed, setFailed] = useState(false);
+  /** Why the last send failed, in the user's language; the panel reports it once. */
+  const [failure, setFailure] = useState<string | null>(null);
   const sendingRef = useRef(false);
   const [selectedPaths, setSelectedPaths] = useState(paths);
   const [dragOverPeer, setDragOverPeer] = useState<string | null>(null);
@@ -101,7 +102,7 @@ export function SharePanel({ paths, onClose, onNotice }: SharePanelProps) {
   async function send(peer: SharePeer, files: string[] = selectedPaths) {
     if (busyPeer || files.length === 0) return;
     setBusyPeer(peer.id);
-    setFailed(false);
+    setFailure(null);
     setProgress(null);
     setWaitingFor(peer.name);
     sendingRef.current = true;
@@ -117,22 +118,28 @@ export function SharePanel({ paths, onClose, onNotice }: SharePanelProps) {
       );
       onClose();
     } catch (error) {
-      const message = String(error);
-      setFailed(true);
+      const message = messageFrom(error);
       setProgress(null);
       setWaitingFor(null);
       const name =
         files.length > 1
           ? t("shareFilesCount", { count: files.length })
           : basename(files[0]);
-      if (message.includes("share-peer-gone")) onNotice(t("sharePeerGone"));
-      else if (message.includes("share-unreachable")) onNotice(t("shareUnreachable"));
-      // The peer's own answer arrives as an error, so these are not failures of ours.
-      else if (message.includes("share-declined"))
-        onNotice(t("shareDeclined", { name, peer: peer.name }));
-      else if (message.includes("share-timeout"))
-        onNotice(t("shareTimeout", { name, peer: peer.name }));
-      else onNotice(t("shareFailed", { name }));
+      // The peer's own answer arrives as an error, so a decline or a timeout is
+      // not a failure of ours and says so. One message, in the panel that raised
+      // it: it used to appear twice, once as a banner and once as a toast that
+      // named a different reason.
+      setFailure(
+        message.includes("share-peer-gone")
+          ? t("sharePeerGone")
+          : message.includes("share-unreachable")
+            ? t("shareUnreachable")
+            : message.includes("share-declined")
+              ? t("shareDeclined", { name, peer: peer.name })
+              : message.includes("share-timeout")
+                ? t("shareTimeout", { name, peer: peer.name })
+                : t("shareFailed", { name }),
+      );
     } finally {
       sendingRef.current = false;
       setBusyPeer(null);
@@ -141,7 +148,7 @@ export function SharePanel({ paths, onClose, onNotice }: SharePanelProps) {
 
   function searchAgain() {
     setSearching(true);
-    setFailed(false);
+    setFailure(null);
     if (!isTauri()) {
       setSearching(false);
       return;
@@ -366,13 +373,10 @@ export function SharePanel({ paths, onClose, onNotice }: SharePanelProps) {
           </div>
         ) : null}
 
-        {failed ? (
-          <div className="share-error">
+        {failure ? (
+          <div className="share-error" role="alert">
             <CircleAlert size={13} />
-            {t("shareFailed", {
-              name:
-                paths.length > 1 ? t("shareFilesCount", { count: paths.length }) : basename(paths[0]),
-            })}
+            {failure}
           </div>
         ) : null}
 

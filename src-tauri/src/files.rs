@@ -204,13 +204,11 @@ fn save_image(
 
 fn describe_write_error(output: &Path, error: std::io::Error) -> String {
     if error.kind() == std::io::ErrorKind::PermissionDenied {
-        return format!(
-            "Shift cannot write to {}. Allow access in System Settings > Privacy & Security > Files and Folders, or choose another output folder in Settings.",
-            output
-                .parent()
-                .unwrap_or(output)
-                .display()
-        );
+        // The interface words this; a sentence written here could only ever be
+        // English, and the panel that shows it knows the language. The folder is
+        // what a log needs, so it goes there instead of into the message.
+        eprintln!("cannot write to {}", output.display());
+        return "errWriteDenied".into();
     }
     format!("Could not write {}: {error}", output.display())
 }
@@ -1649,20 +1647,20 @@ pub fn perform_action(
     on_progress: Option<&(dyn Fn(u32, u32, bool) + Sync)>,
 ) -> Result<ActionOutcome, String> {
     if paths.is_empty() {
-        return Err("No files selected.".into());
+        return Err("errNoFiles".into());
     }
     if action == "reveal" {
         reveal_path(Path::new(&paths[0]))?;
         return Ok(ActionOutcome {
             outputs: vec![],
-            message: "Revealed in file manager.".into(),
+            message: "outcomeRevealed".into(),
         });
     }
     if action == "open" {
         open_path(Path::new(&paths[0]))?;
         return Ok(ActionOutcome {
             outputs: vec![],
-            message: "Opened.".into(),
+            message: "outcomeOpened".into(),
         });
     }
 
@@ -1676,7 +1674,7 @@ pub fn perform_action(
             let output = pdf::merge(&pdf_paths, output_dir)?;
             return Ok(ActionOutcome {
                 outputs: vec![output.to_string_lossy().to_string()],
-                message: "Merged PDFs.".into(),
+                message: "outcomeMergedPdfs".into(),
             });
         }
         let image_paths: Vec<PathBuf> = paths
@@ -1688,21 +1686,21 @@ pub fn perform_action(
             let output = pdf::images_to_pdf(&image_paths, output_dir)?;
             return Ok(ActionOutcome {
                 outputs: vec![output.to_string_lossy().to_string()],
-                message: "Combined images into a PDF.".into(),
+                message: "outcomeImagesToPdf".into(),
             });
         }
-        return Err("Merge works with multiple PDFs or multiple images.".into());
+        return Err("errMergeKinds".into());
     }
     if action == "split" {
         if pdf_paths.is_empty() {
-            return Err("Split works with PDF files.".into());
+            return Err("errSplitPdf".into());
         }
         let mut outputs = Vec::new();
         for path in &pdf_paths {
             outputs.extend(pdf::split(path, output_dir)?);
         }
         return Ok(ActionOutcome {
-            message: format!("Saved {} PDF pages.", outputs.len()),
+            message: "outcomePdfPages".into(),
             outputs: outputs
                 .into_iter()
                 .map(|path| path.to_string_lossy().to_string())
@@ -1711,14 +1709,14 @@ pub fn perform_action(
     }
     if action == "text" {
         if pdf_paths.is_empty() {
-            return Err("Text extraction currently works with PDF files.".into());
+            return Err("errTextPdf".into());
         }
         let mut outputs = Vec::new();
         for path in &pdf_paths {
             outputs.push(pdf::extract_text(path, output_dir)?);
         }
         return Ok(ActionOutcome {
-            message: "Extracted PDF text.".into(),
+            message: "outcomePdfText".into(),
             outputs: outputs
                 .into_iter()
                 .map(|path| path.to_string_lossy().to_string())
@@ -1742,7 +1740,7 @@ pub fn perform_action(
             outputs.extend(pdf::to_images(path, extension, output_dir)?);
         }
         return Ok(ActionOutcome {
-            message: format!("Saved {} PDF pages.", outputs.len()),
+            message: "outcomePdfPages".into(),
             outputs: outputs
                 .into_iter()
                 .map(|path| path.to_string_lossy().to_string())
@@ -1796,12 +1794,7 @@ pub fn perform_action(
                 let _ = fs::remove_file(&temporary);
                 result?
             }
-            "convert" if is_pdf => {
-                return Err(
-                    "Pick a supported target for this PDF: an image format, TXT, MD, DOCX or RTF."
-                        .into(),
-                )
-            }
+            "convert" if is_pdf => return Err("errPdfTarget".into()),
             "convert"
                 if is_image
                     && target
@@ -1899,11 +1892,7 @@ pub fn perform_action(
         outputs.push(output.to_string_lossy().to_string());
     }
     Ok(ActionOutcome {
-        message: if outputs.len() == 1 {
-            "Saved 1 file.".into()
-        } else {
-            format!("Saved {} files.", outputs.len())
-        },
+        message: "outcomeSaved".into(),
         outputs,
     })
 }
@@ -2879,7 +2868,7 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert!(error.contains("DOCX or RTF"), "{error}");
+        assert_eq!(error, "errPdfTarget");
         fs::remove_dir_all(dir).unwrap();
     }
 

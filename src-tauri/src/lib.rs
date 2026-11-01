@@ -138,7 +138,7 @@ fn spawn_capture_work(
     let reporter = app.clone();
     tauri::async_runtime::spawn(async move {
         let result = tauri::async_runtime::spawn_blocking(move || work(worker)).await;
-        if let Err(error) = result.unwrap_or_else(|_| Err("Capture was interrupted.".into())) {
+        if let Err(error) = result.unwrap_or_else(|_| Err("errCaptureInterrupted".into())) {
             report_error(&reporter, error);
             show_main(&reporter);
         }

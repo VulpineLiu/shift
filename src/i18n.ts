@@ -1,6 +1,7 @@
 import { isTauri } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./lib/api";
+import { messageFrom } from "./lib/utils";
 
 export type Lang = "en" | "zh";
 
@@ -54,12 +55,17 @@ const messages: Record<Lang, Record<string, string>> = {
     merge: "Merge",
     split: "Split",
     files: "files",
-    file: "file",
-    ready: "Ready",
     processing: "Processing…",
     fileActionPageProgress: "Converting page {done}/{total}…",
     fileActionPackaging: "Building document…",
     saved: "Saved",
+    outcomeSaved: "Saved {count} files",
+    outcomePdfPages: "Saved {count} PDF pages",
+    outcomeRevealed: "Shown in the folder",
+    outcomeOpened: "Opened",
+    outcomeMergedPdfs: "PDFs merged",
+    outcomeImagesToPdf: "Images combined into a PDF",
+    outcomePdfText: "PDF text extracted",
     copy: "Copy",
     pin: "Pin",
     pinLoadFailed: "The pinned image could not be displayed.",
@@ -77,16 +83,39 @@ const messages: Record<Lang, Record<string, string>> = {
     ocrTitle: "Extract text",
     ocrRunning: "Reading text…",
     ocrEmpty: "No readable text found.",
+    ocrNothing: "Nothing was read.",
     extractText: "Extract text",
     revealFile: "Show in folder",
     actionFailed: "That action could not be completed",
+    errNoFiles: "No files selected.",
+    errNoMonitor: "No display was found for this capture.",
+    errCaptureBlocked:
+      "Screen capture was cancelled or blocked. Allow Screen Recording in System Settings.",
+    errCaptureFailed: "Screen capture failed.",
+    errCaptureInterrupted: "Capture was interrupted.",
+    errCaptureToolMissing: "Install grim or gnome-screenshot to capture the screen on Linux.",
+    errNoSelection: "Select an area first.",
+    errScreenPermission:
+      "Screen Recording permission is required. Enable Shift in System Settings > Privacy & Security > Screen Recording, and restart Shift if macOS asks.",
+    errMergeKinds: "Merge works with several PDFs or several images.",
+    errSplitPdf: "Split works with PDF files.",
+    errTextPdf: "Text extraction works with PDF files.",
+    errPdfTarget: "Pick a supported target for this PDF: an image format, TXT, MD, DOCX or RTF.",
+    errNoActionResult: "The action finished without a result.",
+    errWinScreenSize: "Windows did not report a usable screen size.",
+    errWinDesktopDC: "Windows could not open the desktop surface.",
+    errWinSurfaceAlloc: "Windows could not allocate a screenshot surface.",
+    errWinSurfaceCopy: "Windows could not copy the screen surface.",
+    errWinSurfaceBuffer: "Windows returned an invalid screenshot buffer.",
+    errWriteDenied:
+      "Shift cannot write to the output folder. Allow access in System Settings > Privacy & Security > Files and Folders, or choose another folder in Settings.",
+    unknownError: "Unknown error",
     comingSoon: "Coming soon.",
     openScreenSettings: "Open screen recording settings",
     tools: "Tools",
     unsupported: "No formats for this file type",
     homeDropTitle: "Drop files to get started",
     homeDropHint: "Drop a file on a button to run that action.",
-    ocrUnsupported: "OCR works on image files only.",
     convertFiles: "Convert files",
     fileTools: "File tools",
     nothingYet: "Nothing yet",
@@ -142,6 +171,8 @@ const messages: Record<Lang, Record<string, string>> = {
     checking: "Checking…",
     checkAccess: "Check folders",
     accessOk: "Write access confirmed.",
+    accessDenied:
+      "This folder cannot be written. Allow access in System Settings > Privacy & Security > Files and Folders, or choose another folder.",
     runtimeComponents: "Runtime components",
     runtimeOpenPanel: "Open Runtime components",
     languageSaveFailed: "The language could not be saved. Try again.",
@@ -194,7 +225,6 @@ const messages: Record<Lang, Record<string, string>> = {
     updateAutoCheck: "Check for updates daily",
     updateBody:
       "Releases come from this repository’s release branch. Every download is re-hashed and must match the manifest before it can be installed. Installing replaces this copy and restarts it; a conversion still running is interrupted.",
-    radial: "Radial rings",
     setupTitle: "Before you start",
     setupIntro: "Shift works offline and installs nothing. These are the four things that can quietly stop it working on this machine.",
     setupRecheck: "Run the checks again",
@@ -281,12 +311,17 @@ const messages: Record<Lang, Record<string, string>> = {
     merge: "合并",
     split: "拆分",
     files: "个文件",
-    file: "个文件",
-    ready: "就绪",
     processing: "处理中…",
     fileActionPageProgress: "正在转换第 {done}/{total} 页…",
     fileActionPackaging: "正在生成文档…",
     saved: "已保存",
+    outcomeSaved: "已保存 {count} 个文件",
+    outcomePdfPages: "已保存 {count} 页 PDF",
+    outcomeRevealed: "已在文件夹中显示",
+    outcomeOpened: "已打开",
+    outcomeMergedPdfs: "已合并 PDF",
+    outcomeImagesToPdf: "已将图片合成为 PDF",
+    outcomePdfText: "已提取 PDF 文字",
     copy: "复制",
     pin: "钉在屏幕上",
     pinLoadFailed: "无法显示钉住的图片。",
@@ -304,16 +339,36 @@ const messages: Record<Lang, Record<string, string>> = {
     ocrTitle: "提取文字",
     ocrRunning: "正在识别文字…",
     ocrEmpty: "没有识别到可读文字。",
+    ocrNothing: "未能读到文字。",
     extractText: "提取文字",
     revealFile: "在文件夹中显示",
     actionFailed: "操作未能完成",
+    errNoFiles: "没有选择文件。",
+    errNoMonitor: "没有找到可用于截取的显示器。",
+    errCaptureBlocked: "截图被取消或被阻止，请在系统设置中允许屏幕录制。",
+    errCaptureFailed: "屏幕截取失败。",
+    errCaptureInterrupted: "截取过程被中断。",
+    errCaptureToolMissing: "在 Linux 上需要安装 grim 或 gnome-screenshot 才能截屏。",
+    errNoSelection: "请先框选一个区域。",
+    errScreenPermission: "需要屏幕录制权限。请在「系统设置 › 隐私与安全性 › 屏幕录制」中允许 Shift，如 macOS 提示请重启应用。",
+    errMergeKinds: "合并仅支持多个 PDF 或多个图片。",
+    errSplitPdf: "拆分仅支持 PDF 文件。",
+    errTextPdf: "提取文字仅支持 PDF 文件。",
+    errPdfTarget: "请为该 PDF 选择受支持的目标：图片格式、TXT、MD、DOCX 或 RTF。",
+    errNoActionResult: "操作已完成，但没有产生结果。",
+    errWinScreenSize: "Windows 未报告可用的屏幕尺寸。",
+    errWinDesktopDC: "Windows 无法打开桌面表面。",
+    errWinSurfaceAlloc: "Windows 无法分配截图所需的表面。",
+    errWinSurfaceCopy: "Windows 无法复制桌面表面。",
+    errWinSurfaceBuffer: "Windows 返回的截图数据无效。",
+    errWriteDenied: "Shift 无法写入输出目录。请在「系统设置 › 隐私与安全性 › 文件与文件夹」中允许，或在设置中改用其他目录。",
+    unknownError: "未知错误",
     comingSoon: "该功能即将推出。",
     openScreenSettings: "打开屏幕录制设置",
     tools: "工具",
     unsupported: "此文件类型暂时没有可用格式",
     homeDropTitle: "拖入文件开始处理",
     homeDropHint: "把文件拖到对应按钮上，执行该操作。",
-    ocrUnsupported: "文字识别仅支持图片格式。",
     convertFiles: "文件转换",
     fileTools: "文件工具",
     nothingYet: "暂无内容",
@@ -334,6 +389,9 @@ const messages: Record<Lang, Record<string, string>> = {
     shareFilesCount: "{count} 个文件",
     shareReceived: "{peer} 给你发送了 {name}。",
     shareFailed: "{name} 发送失败。",
+    sharePeerGone: "该设备已不可达。",
+    shareUnreachable: "设备拒绝了连接，请检查它的防火墙设置。",
+    shareSendingTo: "正在将 {name} 发送到 {peer}",
     shareNoticeKicker: "{peer} 想发送一个文件给你",
     shareNoticeAccept: "接收",
     shareNoticeDecline: "拒绝",
@@ -341,9 +399,6 @@ const messages: Record<Lang, Record<string, string>> = {
     shareWaiting: "等待 {peer} 确认接收…",
     shareDeclined: "{peer} 拒绝了 {name}。",
     shareTimeout: "{peer} 未应答，{name} 未发送。",
-    sharePeerGone: "该设备已不可达。",
-    shareUnreachable: "设备拒绝了连接，请检查它的防火墙设置。",
-    shareSendingTo: "正在将 {name} 发送到 {peer}",
     shareMac: "Mac",
     shareWindows: "Windows",
     shareLinux: "Linux",
@@ -368,6 +423,7 @@ const messages: Record<Lang, Record<string, string>> = {
     checking: "检测中…",
     checkAccess: "检测目录",
     accessOk: "写入权限正常。",
+    accessDenied: "该目录无法写入。请在「系统设置 › 隐私与安全性 › 文件与文件夹」中允许，或改用其他目录。",
     runtimeComponents: "运行组件",
     runtimeOpenPanel: "打开运行组件",
     languageSaveFailed: "语言设置保存失败，请重试。",
@@ -418,7 +474,6 @@ const messages: Record<Lang, Record<string, string>> = {
     updateAutoCheck: "每天自动检查更新",
     updateBody:
       "更新包来自本仓库的 release 分支。下载后会重新计算 SHA256，只有与清单一致才允许安装。安装会替换当前版本并自动重启，正在进行的转换会被中断。",
-    radial: "环形菜单",
     setupTitle: "开始前先检查",
     setupIntro: "Shift 全程离线运行，也不会往系统里装任何东西。以下四项是唯一可能让它在当前电脑上悄悄失效的地方。",
     setupRecheck: "重新检查",
@@ -474,7 +529,7 @@ export function publishLang(lang: Lang) {
     void api.setLanguage(lang).catch((error) => {
       window.dispatchEvent(
         new CustomEvent("shift:language-error", {
-          detail: String(error).replace(/^Error:\s*/, ""),
+          detail: messageFrom(error),
         }),
       );
     });
@@ -489,6 +544,17 @@ export function translate(lang: Lang, key: string, vars?: Record<string, string 
     }
   }
   return value;
+}
+
+/**
+ * Translate at the moment of the call, for handlers that subscribe once.
+ *
+ * A listener registered on mount keeps the `t` of its first render, so a message
+ * raised later - a failed drop, an error the backend reports - would keep the
+ * language the app was started in. The stored choice is read here instead.
+ */
+export function tLive(key: string, vars?: Record<string, string | number>): string {
+  return translate(getInitialLang(), key, vars);
 }
 
 export function useI18n() {

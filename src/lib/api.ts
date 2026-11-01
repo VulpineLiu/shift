@@ -58,7 +58,7 @@ async function performFileAction(
       if (event.payload.jobId !== jobId) return;
       if (event.payload.error) rejectOutcome(new Error(event.payload.error));
       else if (event.payload.outcome) resolveOutcome(event.payload.outcome);
-      else rejectOutcome(new Error("File action returned no result."));
+      else rejectOutcome(new Error("errNoActionResult"));
     },
   );
   const unlistenProgress = onProgress

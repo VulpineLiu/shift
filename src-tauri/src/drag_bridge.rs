@@ -550,7 +550,7 @@ pub async fn show_files_in_radial(
     mode: Option<String>,
 ) -> Result<RadialContext, String> {
     if files.is_empty() {
-        return Err("No files selected.".into());
+        return Err("errNoFiles".into());
     }
     tauri::async_runtime::spawn_blocking(move || {
         show_radial(

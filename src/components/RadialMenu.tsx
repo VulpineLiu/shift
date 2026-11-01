@@ -49,7 +49,8 @@ import {
   type WedgeOrders,
 } from "../lib/radialOrder";
 import { recognizeImage } from "../lib/ocr";
-import { formatBytes } from "../lib/utils";
+import { formatBytes, messageFrom } from "../lib/utils";
+import { FEEDBACK, outcomeMessage } from "../lib/feedback";
 import type { FileInfo, RadialContext } from "../types";
 import { useI18n } from "../i18n";
 import { SharePanel } from "./SharePanel";
@@ -226,11 +227,6 @@ function buildWedge(
   return actionWedge(id, t(wedgeLabelKey(id)), WEDGE_ICONS[id] ?? File);
 }
 
-function messageOf(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.replace(/^Error:\s*/, "") || "Unknown error";
-}
-
 function waitForPaint() {
   return new Promise<void>((resolve) => {
     requestAnimationFrame(() => {
@@ -294,7 +290,7 @@ export function RadialMenu() {
   const wedgeCount = Math.max(wedges.length, 1);
   const hoveredWedge = hovered !== null ? wedges[hovered] : undefined;
 
-  function flash(message: string, duration = 1600) {
+  function flash(message: string, duration: number = FEEDBACK.hint) {
     if (statusTimer.current) window.clearTimeout(statusTimer.current);
     setError(null);
     setStatus(message);
@@ -304,7 +300,9 @@ export function RadialMenu() {
   function showError(reason: unknown) {
     if (statusTimer.current) window.clearTimeout(statusTimer.current);
     setStatus(null);
-    setError(messageOf(reason));
+    // The backend names a failure with a code, so the code is looked up here; an
+    // unrecognised sentence is shown as it came rather than swallowed.
+    setError(t(messageFrom(reason)) || t("unknownError"));
   }
 
   function applyContext(next: RadialContext | null) {
@@ -533,7 +531,7 @@ export function RadialMenu() {
             }
           }
         } catch (error) {
-          flash(String(error), 2400);
+          showError(error);
         }
       })
       .then((stop) => {
@@ -560,11 +558,11 @@ export function RadialMenu() {
       currentKind !== "presentation" &&
       currentKind !== "spreadsheet"
     ) {
-      flash(t("comingSoon"), 1800);
+      flash(t("comingSoon"), FEEDBACK.hint);
       return;
     }
     setBusy(true);
-    flash(t("processing"), 12000);
+    flash(t("processing"), FEEDBACK.running);
     await waitForPaint();
     try {
       const outcome = await api.performFileAction(
@@ -576,11 +574,11 @@ export function RadialMenu() {
             packaging
               ? t("fileActionPackaging")
               : t("fileActionPageProgress", { done, total }),
-            120000,
+            FEEDBACK.hold,
           );
         },
       );
-      flash(outcome.message || t("saved"), 900);
+      flash(outcomeMessage(outcome.message, outcome.outputs.length, t), FEEDBACK.done);
       window.setTimeout(() => void api.hideRadial(), 850);
     } catch (error) {
       showError(error);
@@ -604,20 +602,22 @@ export function RadialMenu() {
         current.fileInfo[0]?.extension ?? "",
       );
       if (activeFormats.length === 0) {
-        flash(t("unsupported"), 1600);
+        flash(t("unsupported"), FEEDBACK.hint);
         return;
       }
       setRing("formats");
       ringRef.current = "formats";
       setHovered(null);
       hoveredRef.current = null;
-      flash(t("chooseFormat"), 1200);
+      flash(t("chooseFormat"), FEEDBACK.hint);
       return;
     }
 
     if (id === "pdfOcr") {
       setBusy(true);
-      flash(t("processing"), 120000);
+      // Page rendering reports nothing until the first page is read, which on a
+      // long PDF outlasts any short-lived notice, so this one cannot expire.
+      flash(t("processing"), FEEDBACK.hold);
       await waitForPaint();
       try {
         const pages = await api.renderPdfPages(current.files[0]);
@@ -626,12 +626,12 @@ export function RadialMenu() {
           for (let index = 0; index < pages.length; index += 1) {
             flash(
               `${t("ocrRunning")} ${index + 1}/${pages.length}`,
-              120000,
+              FEEDBACK.hold,
             );
             const result = await recognizeImage(convertFileSrc(pages[index]), (progress) => {
               flash(
                 `${t("ocrRunning")} ${index + 1}/${pages.length} · ${Math.round(progress * 100)}%`,
-                120000,
+                FEEDBACK.hold,
               );
             });
             chunks.push(`--- Page ${index + 1} ---\n${result.text}`);
@@ -657,14 +657,14 @@ export function RadialMenu() {
         await api.openInEditor(current.files[0]);
         void api.hideRadial();
       } catch (error) {
-        flash(String(error), 2200);
+        showError(error);
       }
       return;
     }
 
     if (id === "extractAudio" || id === "plain") {
       setBusy(true);
-      flash(t("processing"), 12000);
+      flash(t("processing"), FEEDBACK.running);
       await waitForPaint();
       try {
         const outcome = await api.performFileAction(
@@ -672,7 +672,7 @@ export function RadialMenu() {
           current.files,
           id === "extractAudio" ? "m4a" : "txt",
         );
-        flash(outcome.message || t("saved"), 900);
+        flash(outcomeMessage(outcome.message, outcome.outputs.length, t), FEEDBACK.done);
         window.setTimeout(() => void api.hideRadial(), 850);
       } catch (error) {
         showError(error);
@@ -701,15 +701,15 @@ export function RadialMenu() {
     };
     const action = mapping[id];
     if (!action) {
-      flash(t("comingSoon"));
+      flash(t("comingSoon"), FEEDBACK.hint);
       return;
     }
     setBusy(true);
-    flash(t("processing"), 12000);
+    flash(t("processing"), FEEDBACK.running);
     await waitForPaint();
     try {
       const outcome = await api.performFileAction(action, current.files);
-      flash(outcome.message || t("saved"), 900);
+      flash(outcomeMessage(outcome.message, outcome.outputs.length, t), FEEDBACK.done);
       window.setTimeout(() => void api.hideRadial(), 850);
     } catch (error) {
       showError(error);
@@ -917,7 +917,7 @@ export function RadialMenu() {
       ) : null}
 
       {!error && !busy && !sharePaths && (status || context.dragging) ? (
-        <div className="radial-hint">
+        <div className="radial-hint" role="status" aria-live="polite">
           {hoveredWedge ? (
             ring === "formats" ? (
               <>
@@ -954,7 +954,7 @@ export function RadialMenu() {
           }}
           onNotice={(message) => {
             shareNoticeRef.current = true;
-            flash(message, 2_600);
+            flash(message, FEEDBACK.notice);
           }}
         />
       ) : null}

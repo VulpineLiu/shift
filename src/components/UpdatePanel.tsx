@@ -159,7 +159,13 @@ export function UpdatePanel({ feedUrl, autoCheck, onAutoCheckChange, system }: P
       ) : null}
 
       {percent !== null ? (
-        <div className="update-progress" role="progressbar" aria-valuenow={percent}>
+        <div
+          className="update-progress"
+          role="progressbar"
+          aria-valuenow={percent}
+          aria-valuemin={0}
+          aria-valuemax={100}
+        >
           <div className="update-progress-fill" style={{ width: `${percent}%` }} />
           <span>
             {progress ? `${formatBytes(progress.downloaded)} / ${formatBytes(progress.total)}` : ""}
@@ -175,7 +181,10 @@ export function UpdatePanel({ feedUrl, autoCheck, onAutoCheckChange, system }: P
       ) : null}
 
       {status?.message && (failed || verified) ? (
-        <div className={`runtime-error ${verified ? "is-ok" : ""}`}>
+        <div
+          className={`runtime-error ${verified ? "is-ok" : ""}`}
+          role={verified ? "status" : "alert"}
+        >
           <span>{verified ? t("updateVerified") : status.message}</span>
         </div>
       ) : null}
@@ -183,7 +192,7 @@ export function UpdatePanel({ feedUrl, autoCheck, onAutoCheckChange, system }: P
       {/* An install that could not run leaves the verified download in place, so it
           is reported beside the button instead of rewriting the status. */}
       {installError ? (
-        <div className="runtime-error">
+        <div className="runtime-error" role="alert">
           <span>{installError}</span>
         </div>
       ) : null}

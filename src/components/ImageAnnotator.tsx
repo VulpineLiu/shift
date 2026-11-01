@@ -24,6 +24,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import { api } from "../lib/api";
+import { messageFrom } from "../lib/utils";
 
 type Tool =
   | "rectangle"
@@ -305,7 +306,7 @@ export function ImageAnnotator({ path, onSaved }: Props) {
           if (!cancelled) image.src = url;
         })
         .catch((reason) => {
-          if (!cancelled) setError(String(reason).replace(/^Error:\s*/, ""));
+          if (!cancelled) setError(t(messageFrom(reason)));
         });
     } else {
       image.src = "/demo-preview.svg";
@@ -382,7 +383,7 @@ export function ImageAnnotator({ path, onSaved }: Props) {
         await writeImage(saved);
       }
     } catch (reason) {
-      setError(String(reason));
+      setError(t(messageFrom(reason)));
     } finally {
       setBusy(false);
       setCopying(false);
@@ -685,7 +686,7 @@ export function ImageAnnotator({ path, onSaved }: Props) {
             event.currentTarget.releasePointerCapture(event.pointerId);
           }}
         />
-        {error ? <div className="annotator-error">{error}</div> : null}
+        {error ? <div className="annotator-error" role="alert">{error}</div> : null}
         {textPoint ? (
           <div className="annotator-text-entry">
             <input
@@ -716,6 +717,8 @@ export function ImageAnnotator({ path, onSaved }: Props) {
               }}
             />
             <button
+              aria-label={t("confirm")}
+              title={t("confirm")}
               onClick={() => {
                 if (!textDraft.trim()) return;
                 setAnnotations((current) => [

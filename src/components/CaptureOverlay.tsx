@@ -4,7 +4,8 @@ import { Check, Gauge, LoaderCircle, Mic, MicOff, ScanLine, Square, X } from "lu
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import { api } from "../lib/api";
-import { normalizeSelection } from "../lib/utils";
+import { messageFrom, normalizeSelection } from "../lib/utils";
+import { FEEDBACK } from "../lib/feedback";
 import type { CaptureSession, RecordingCapabilities } from "../types";
 
 interface Point {
@@ -94,7 +95,7 @@ export function CaptureOverlay() {
   async function confirm() {
     if (busy || !selection || selection.width < 8 || selection.height < 8) {
       setStatus(t("dragSelect"));
-      window.setTimeout(() => setStatus(null), 1600);
+      window.setTimeout(() => setStatus(null), FEEDBACK.hint);
       return;
     }
     if (!isTauri()) {
@@ -121,8 +122,8 @@ export function CaptureOverlay() {
       }
     } catch (error) {
       setBusy(false);
-      setStatus(String(error));
-      window.setTimeout(() => setStatus(null), 3000);
+      setStatus(t(messageFrom(error)));
+      window.setTimeout(() => setStatus(null), FEEDBACK.error);
     }
   }
 
@@ -277,12 +278,12 @@ export function CaptureOverlay() {
         </div>
       )}
       {busy ? (
-        <div className="capture-processing">
+        <div className="capture-processing" role="status" aria-live="polite">
           <LoaderCircle size={20} className="spin" />
           {status || t("processing")}
         </div>
       ) : status ? (
-        <div className="capture-status">{status}</div>
+        <div className="capture-status" role="status" aria-live="polite">{status}</div>
       ) : null}
     </div>
   );

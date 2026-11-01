@@ -109,7 +109,6 @@ pub struct WriteCheck {
     pub kind: String,
     pub path: String,
     pub ok: bool,
-    pub message: String,
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -338,14 +337,15 @@ pub fn test_output_access(app: &AppHandle) -> Result<Vec<WriteCheck>, String> {
             let probe = directory.join(format!(".shift-write-test-{}", uuid::Uuid::new_v4()));
             let result = fs::write(&probe, b"Shift");
             let _ = fs::remove_file(&probe);
+            // Only the verdict travels: the wording belongs to the interface, which
+            // knows the language and does not have to guess the operating system.
+            if let Err(error) = &result {
+                eprintln!("{kind} output directory is not writable: {error}");
+            }
             WriteCheck {
                 kind: kind.into(),
                 path: directory.to_string_lossy().to_string(),
                 ok: result.is_ok(),
-                message: match result {
-                    Ok(()) => "Write access confirmed.".into(),
-                    Err(error) => format!("{error}. Allow access in System Settings > Privacy & Security > Files and Folders."),
-                },
             }
         })
         .collect())

@@ -48,6 +48,16 @@ export function SetupPanel({
   const patch = (id: Row["id"], next: Partial<Row>) =>
     setRows((current) => current.map((row) => (row.id === id ? { ...row, ...next } : row)));
 
+  // Escape leaves the guided flow the way it leaves every other panel. Everything
+  // the flow checks is re-runnable from Settings, so closing it loses nothing.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onDone();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onDone]);
+
   const refresh = useCallback(async () => {
     setRows((current) => current.map((row) => ({ ...row, state: "checking" as State })));
 
@@ -79,7 +89,7 @@ export function SetupPanel({
           "folders",
           broken.length === 0
             ? { state: "ok", detail: t("setupFoldersOk") }
-            : { state: "problem", detail: broken.map((check) => check.message).join(" ") },
+            : { state: "problem", detail: t("accessDenied") },
         );
       })
       .catch(() => patch("folders", { state: "unknown", detail: t("setupCheckFailed") }));

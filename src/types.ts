@@ -122,7 +122,6 @@ export interface WriteCheck {
   kind: "screenshot" | "recording" | "files";
   path: string;
   ok: boolean;
-  message: string;
 }
 
 export type RuntimeComponentCategory = "documents" | "graphics" | "video" | "capture" | "ocr";

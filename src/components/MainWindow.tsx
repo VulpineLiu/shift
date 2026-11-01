@@ -46,8 +46,9 @@ import {
   type CSSProperties,
   type DragEvent,
 } from "react";
-import { getInitialLang, publishLang, useI18n } from "../i18n";
+import { getInitialLang, publishLang, tLive, useI18n } from "../i18n";
 import { api } from "../lib/api";
+import { FEEDBACK } from "../lib/feedback";
 import { hitTestDropTarget, toWindowPoint } from "../lib/dropTargets";
 import { SetupPanel } from "./SetupPanel";
 import { SharePanel } from "./SharePanel";
@@ -58,6 +59,7 @@ import {
   extensionOf,
   getLocalRecentItems,
   IS_MAC,
+  messageFrom,
   type RecentItem,
   subscribeRecent,
   timeAgo,
@@ -126,6 +128,11 @@ const OCR_EXTENSIONS = [
 const ARC_STEP_DEG = 13;
 const ARC_RADIUS = 140;
 const ARC_LIFT = 32;
+
+/** Whether every file a drag carries is one the OCR button can read. */
+function ocrCanRead(paths: string[]) {
+  return paths.every((path) => OCR_EXTENSIONS.includes(extensionOf(path)));
+}
 
 // WKWebView renders HEIC/AVIF natively; the icon fallback covers any decode failure.
 const THUMB_EXTENSIONS = [
@@ -252,6 +259,12 @@ export function MainWindow() {
   const [dropAction, setDropAction] = useState<DropAction | null>(null);
   /** True while a Recent row is being dragged, which the native `dragging` never covers. */
   const [rowDragging, setRowDragging] = useState(false);
+  /**
+   * The files the drag in flight is carrying, so a button can say "not this one"
+   * before the file is released. Both drag sources report them: the native event
+   * on `enter`, a Recent row on `dragstart`.
+   */
+  const [dragPaths, setDragPaths] = useState<string[] | null>(null);
   const [hotkeys, setHotkeys] = useState<HotkeyStatus | null>(null);
   const dropTargets = useRef<Partial<Record<DropAction, HTMLElement | null>>>({});
   /**
@@ -279,7 +292,7 @@ export function MainWindow() {
     setSettingsOpen(true);
   }
 
-  async function flash(message: string, duration = 2600) {
+  async function flash(message: string, duration: number = FEEDBACK.notice) {
     if (toastTimer.current) window.clearTimeout(toastTimer.current);
     setToast(message);
     toastTimer.current = window.setTimeout(() => setToast(null), duration);
@@ -291,7 +304,7 @@ export function MainWindow() {
     try {
       await task();
     } catch (error) {
-      flash(String(error), 3800);
+      flash(t(messageFrom(error)), FEEDBACK.error);
     } finally {
       setBusy(null);
     }
@@ -316,14 +329,9 @@ export function MainWindow() {
   }
 
   async function runOcrOn(paths: string[]) {
-    // No fallback: a drop the OCR button cannot serve is refused rather than
-    // silently handed to another ring, which used to look like the button
-    // ignoring the file and doing something else instead.
-    const unsupported = paths.filter((path) => !OCR_EXTENSIONS.includes(extensionOf(path)));
-    if (unsupported.length > 0) {
-      flash(t("ocrUnsupported"), 2600);
-      return;
-    }
+    // The button already showed it could not take this file, so a release on it
+    // stays silent: no action, no message, nothing to acknowledge.
+    if (!ocrCanRead(paths)) return;
     await api.openInEditor(paths[0]);
     window.setTimeout(() => {
       void emitTo("editor", "editor://run-ocr", {});
@@ -372,7 +380,9 @@ export function MainWindow() {
     if (!drag || drag.landed) return;
     drag.landed = true;
     setDropAction(null);
-    void dropFiles([drag.path], action).catch((error) => flash(String(error), 3200));
+    // The gesture is over, whether or not `dragend` arrives to say so.
+    setDragPaths(null);
+    void dropFiles([drag.path], action).catch((error) => flash(tLive(messageFrom(error)), FEEDBACK.error));
   }
 
   /**
@@ -406,7 +416,7 @@ export function MainWindow() {
     try {
       setSettings(await task());
     } catch (error) {
-      flash(String(error), 3800);
+      flash(t(messageFrom(error)), FEEDBACK.error);
     }
   }
 
@@ -437,7 +447,7 @@ export function MainWindow() {
       });
     } catch (error) {
       if (previous) setSettings(previous);
-      flash(String(error), 3800);
+      flash(t(messageFrom(error)), FEEDBACK.error);
     }
   }
 
@@ -483,14 +493,14 @@ export function MainWindow() {
     try {
       setRuntimeInfo(await api.getRuntimeInfo());
     } catch (error) {
-      setRuntimeError(String(error).replace(/^Error:\s*/, ""));
+      setRuntimeError(t(messageFrom(error)));
     } finally {
       setRuntimeLoading(false);
     }
   }
 
   function describeRuntimeInstallError(error: unknown) {
-    const message = String(error).replace(/^Error:\s*/, "");
+    const message = messageFrom(error);
     setRuntimeInstallHelp(
       message === "homebrew-missing"
         ? "homebrew"
@@ -511,14 +521,14 @@ export function MainWindow() {
       return t("runtimeInstallUnsupported");
     }
     if (message.startsWith("homebrew-install-failed:")) {
-      return `${t("runtimeInstallFailed")} ${message
-        .slice("homebrew-install-failed:".length)
-        .trim()}`;
+      // The tail is the installer's own exit status - worth having in a log,
+      // useless as a sentence a user has to read.
+      console.error(message);
+      return t("runtimeInstallFailed");
     }
     if (message.startsWith("winget-install-failed:")) {
-      return `${t("runtimeInstallFailed")} ${message
-        .slice("winget-install-failed:".length)
-        .trim()}`;
+      console.error(message);
+      return t("runtimeInstallFailed");
     }
     if (
       message === "homebrew-install-missing-binary" ||
@@ -526,7 +536,9 @@ export function MainWindow() {
     ) {
       return t("runtimeInstallFailed");
     }
-    return message;
+    // Every failure the installer raises is a code it names here, so anything
+    // still unrecognised is worded by the dictionary or shown as it came.
+    return t(message);
   }
 
   async function installRuntimeComponent(component: RuntimeComponent) {
@@ -551,7 +563,7 @@ export function MainWindow() {
       // Give the other copies a beat to release the hotkeys they own.
       window.setTimeout(() => void api.reclaimHotkeys().then(setHotkeys).catch(() => refreshHotkeys()), 900);
     } catch (error) {
-      flash(String(error), 3800);
+      flash(t(messageFrom(error)), FEEDBACK.error);
     }
   }
 
@@ -560,7 +572,7 @@ export function MainWindow() {
     try {
       setChecks(await api.checkOutputAccess());
     } catch (error) {
-      flash(String(error), 3800);
+      flash(t(messageFrom(error)), FEEDBACK.error);
     } finally {
       setChecking(false);
     }
@@ -585,7 +597,7 @@ export function MainWindow() {
       })
       .catch((error) => {
         setSettings(FALLBACK_SETTINGS);
-        flash(String(error), 3200);
+        flash(t(messageFrom(error)), FEEDBACK.error);
       });
     void api
       .screenCaptureAccessStatus()
@@ -617,6 +629,19 @@ export function MainWindow() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settingsOpen]);
 
+  // Every dismissible surface answers to Escape: the send panel already did, and
+  // the settings sheet only answered to its close button and its backdrop. The
+  // panel owns the key while it is open, so one press never closes two things.
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || sharePaths || setupOpen) return;
+      setSettingsOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [settingsOpen, sharePaths, setupOpen]);
+
   // Announce files that another Shift pushed to this machine. A dedicated effect so
   // the message re-subscribes when the language changes.
   useEffect(() => {
@@ -624,7 +649,7 @@ export function MainWindow() {
     const unlisten = listen<ShareTransfer>("share://transfer", (event) => {
       const transfer = event.payload;
       if (transfer.state === "received" && transfer.path) {
-        flash(t("shareReceived", { name: transfer.fileName, peer: transfer.peerName }), 3600);
+        flash(t("shareReceived", { name: transfer.fileName, peer: transfer.peerName }), FEEDBACK.notice);
       }
     });
     return () => {
@@ -652,6 +677,9 @@ export function MainWindow() {
           const drag = recentDrag.current;
           if (event.payload.type === "enter") {
             setDragging(true);
+            // `enter` is the first moment the carried files are known, which is
+            // early enough to mark a button that cannot serve them.
+            setDragPaths(event.payload.paths);
             setDropAction(actionAt(event.payload.position));
             return;
           }
@@ -662,24 +690,26 @@ export function MainWindow() {
           if (event.payload.type === "leave") {
             setDragging(false);
             setDropAction(null);
+            setDragPaths(null);
             return;
           }
           if (event.payload.type === "drop") {
             const action = actionAt(event.payload.position);
             setDragging(false);
             setDropAction(null);
+            setDragPaths(null);
             // A Recent row is a real file drag, so it can reach here as well as the
             // panel's own DOM handler; nothing else can be in flight at the same time.
             if (drag) {
               landRecentRow(action);
               return;
             }
-            void dropFiles(event.payload.paths, action).catch((error) => flash(String(error), 3200));
+            void dropFiles(event.payload.paths, action).catch((error) => flash(tLive(messageFrom(error)), FEEDBACK.error));
             return;
           }
         })
         .then((unlisten) => unlisteners.push(unlisten));
-      void listen<string>("app://error", (event) => flash(event.payload, 3800)).then((unlisten) =>
+      void listen<string>("app://error", (event) => flash(tLive(event.payload), FEEDBACK.error)).then((unlisten) =>
         unlisteners.push(unlisten),
       );
       void listen("app://open-ocr", () => void chooseOcr()).then((unlisten) =>
@@ -725,6 +755,12 @@ export function MainWindow() {
     if (!needle) return recent;
     return recent.filter((item) => basename(item.path).toLowerCase().includes(needle));
   }, [recent, historyQuery]);
+
+  // A drag the OCR button cannot serve shows it spent while the gesture is in
+  // flight, which is the whole notice: releasing on it then does nothing at all.
+  const ocrUnavailable = dragPaths !== null && !ocrCanRead(dragPaths);
+  // A button that cannot serve the drag is not a candidate, so it never lights up.
+  const aimedAction = ocrUnavailable && dropAction === "ocr" ? null : dropAction;
 
   const outputLabel = (kind: WriteCheck["kind"]) =>
     kind === "screenshot" ? t("screenshots") : kind === "recording" ? t("recordings") : t("fileResults");
@@ -811,7 +847,7 @@ export function MainWindow() {
       <main className="home-main">
         <section className="home-drop">
           {screenAccess === false ? (
-            <div className="permission-banner">
+            <div className="permission-banner" role="alert">
               <ShieldAlert size={16} />
               <span>{t("screenPermissionPrompt")}</span>
               <button onClick={() => void api.openScreenRecordingSettings()}>
@@ -819,7 +855,7 @@ export function MainWindow() {
               </button>
             </div>
           ) : hotkeys && !hotkeys.live ? (
-            <div className="permission-banner">
+            <div className="permission-banner" role="alert">
               <ShieldAlert size={16} />
               <span>{hotkeys.others.length > 0 ? t("hotkeysDead") : t("hotkeysNotLive")}</span>
               <button onClick={() => void reclaimHotkeys()}>{t("hotkeysFix")}</button>
@@ -858,7 +894,7 @@ export function MainWindow() {
             }`}
           >
             <button
-              className={`home-primary ${dropAction === "formats" ? "is-drop-target" : ""}`}
+              className={`home-primary ${aimedAction === "formats" ? "is-drop-target" : ""}`}
               ref={(node) => {
                 dropTargets.current.formats = node;
               }}
@@ -874,7 +910,7 @@ export function MainWindow() {
               {t("convertFiles")}
             </button>
             <button
-              className={`home-secondary ${dropAction === "tools" ? "is-drop-target" : ""}`}
+              className={`home-secondary ${aimedAction === "tools" ? "is-drop-target" : ""}`}
               ref={(node) => {
                 dropTargets.current.tools = node;
               }}
@@ -888,10 +924,13 @@ export function MainWindow() {
               {t("fileTools")}
             </button>
             <button
-              className={`home-secondary ${dropAction === "ocr" ? "is-drop-target" : ""}`}
+              className={`home-secondary ${aimedAction === "ocr" ? "is-drop-target" : ""} ${
+                ocrUnavailable ? "is-drop-unavailable" : ""
+              }`}
               ref={(node) => {
                 dropTargets.current.ocr = node;
               }}
+              aria-disabled={ocrUnavailable ? "true" : undefined}
               onClick={() => void spring("ocr", chooseOcr)}
             >
               {busy === "ocr" ? <LoaderCircle size={18} className="spin" /> : <ScanText size={18} />}
@@ -971,6 +1010,7 @@ export function MainWindow() {
                       event.dataTransfer.effectAllowed = "copy";
                       recentDrag.current = { path: item.path, landed: false };
                       setRowDragging(true);
+                      setDragPaths([item.path]);
                       for (const [type, value] of Object.entries(dragOutPayload(item.path))) {
                         event.dataTransfer.setData(type, value);
                       }
@@ -979,6 +1019,7 @@ export function MainWindow() {
                       setDropAction(null);
                       setDragging(false);
                       setRowDragging(false);
+                      setDragPaths(null);
                       // Some engines report the native drop only after the button is
                       // already up, so the gesture stays recognised for a moment.
                       const drag = recentDrag.current;
@@ -1290,7 +1331,7 @@ export function MainWindow() {
                         {check.ok ? <Check size={15} /> : <X size={15} />}
                         <span>
                           <strong>{outputLabel(check.kind)}</strong>
-                          <small>{check.ok ? t("accessOk") : check.message}</small>
+                          <small>{check.ok ? t("accessOk") : t("accessDenied")}</small>
                         </span>
                       </div>
                     ))}
@@ -1331,7 +1372,7 @@ export function MainWindow() {
                   </button>
                 </div>
                 {languageError ? (
-                  <div className="runtime-error">
+                  <div className="runtime-error" role="alert">
                     <span>{languageError}</span>
                   </div>
                 ) : null}
@@ -1361,7 +1402,7 @@ export function MainWindow() {
                 </div>
                 <p className="runtime-summary">{t("runtimeSummary")}</p>
                 {runtimeError ? (
-                  <div className="runtime-error">
+                  <div className="runtime-error" role="alert">
                     <span>{runtimeError}</span>
                     {runtimeInstallHelp ? (
                       <button
@@ -1451,11 +1492,15 @@ export function MainWindow() {
         <SharePanel
           paths={sharePaths}
           onClose={() => setSharePaths(null)}
-          onNotice={(message) => flash(message, 3600)}
+          onNotice={(message) => flash(message, FEEDBACK.notice)}
         />
       ) : null}
 
-      {toast ? <div className="main-toast">{toast}</div> : null}
+      {toast ? (
+        <div className="main-toast" role="status" aria-live="polite">
+          {toast}
+        </div>
+      ) : null}
     </div>
   );
 }
