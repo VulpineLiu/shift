@@ -40,13 +40,13 @@ Built on Tauri 2, Rust, React and TypeScript. Native capture and drag behaviour 
 
 ## What it does
 
-**The radial menu is the whole interface.** Hold `Shift` and drag a file in Finder (or `Shift + Alt` on Windows) and a ring opens under the cursor. Release over a format to convert, or add `Option`/`Alt` to switch to the tool ring. The main window accepts drops too, and its `Convert files` / `File tools` buttons open the same rings for files you pick yourself.
+**The radial menu is the whole interface.** Hold `Shift` and drag a file in Finder (or `Shift + Alt` on Windows) and a ring opens under the cursor. Release over a format to convert, or add `Option`/`Alt` to switch to the tool ring. In the main window the same rings open from a file you drop on one of the three buttons, or pick through `Convert files` / `File tools`.
 
 **Everything is type-aware.** The ring only offers what the selected file can actually become, and never repeats the source format — an image can target PNG/JPG/WEBP/HEIC/TIFF/BMP/GIF/PDF except its current format, a PPTX offers PDF and Markdown, and a `.key` or `.pages` file offers no conversion wedges at all instead of failing later. The centre shows a glass preview with the file's dimensions and size; a multi-file selection renders a stacked icon deck.
 
 **Batch by default.** Select ten files, drag, and one gesture produces ten outputs. Results land next to each source with a descriptive suffix (`report (compressed).pdf`, `photo (rotated).png`) and never overwrite — a numeric suffix is appended on collision. Settings can collect every result into one folder instead.
 
-**Capture is built in.** Frozen-screen area capture, full-screen capture, and area recording with a floating timer, all aimed at the monitor under the pointer rather than always the primary display. A finished capture hands you a floating result card - Copy, Pin, Send, Reveal, Edit, one click each, and it steps aside on its own - or opens the annotation canvas straight away, whichever you choose in Settings. Recording options only ever offer what your platform actually does: microphone on macOS, frame rate on the FFmpeg backends.
+**Capture is built in.** Frozen-screen area capture, full-screen capture, and area recording with a floating timer, all aimed at the monitor under the pointer rather than always the primary display. A finished capture hands you a floating result card - Copy, Pin, Send, Reveal, Edit, one click each, and it steps aside on its own. Recording options only ever offer what your platform actually does: microphone on macOS, frame rate on the FFmpeg backends.
 
 **The rings are yours to arrange.** A saved order rearranges the wedges for each file type and each ring, so the convert you use hourly sits at the top of an image's action ring rather than the bottom. (The Settings screen that edited those orders was removed, so orders are applied from `settings.json` rather than changed in the app.)
 
@@ -72,7 +72,7 @@ Shift lives in the menu bar (macOS) and the notification area (Windows), and it 
 
 **Use a tool (`Option + Shift`, or `Alt + Shift` on Windows).** Same gesture, and the wedges become tools for that file type instead of formats. While the ring is open, keep `Shift` held and press or release `Option`/`Alt` to flip between the format ring and the tool ring.
 
-**Prefer not to drag?** In the main window, **Convert files** and **File tools** open a picker and then show the same ring for what you chose; **OCR** picks an image and reads it. Dropping files straight onto the main window opens the action ring directly. Drop them **onto a button** instead and that button lights up and runs its own action: **Convert files** opens the format ring, **File tools** the tool ring, **OCR** reads the image.
+**Prefer not to drag?** In the main window, **Convert files** and **File tools** open a picker and then show the same ring for what you chose; **OCR** picks an image and reads it. Dropping a file is **aimed**: the three buttons are the only drop targets, and the button you release on is the action it runs - **Convert files** opens the format ring, **File tools** the tool ring, **OCR** reads the image. All three light up as candidates while a drag is in flight; release anywhere else on the panel and nothing runs, with a note that the drop needs a button.
 
 **Several files at once.** Multi-select with `⌘`/`Ctrl`-click, then drag. Every file is processed. With 2+ images or 2+ PDFs selected, a **Merge** wedge appears that combines them into a single PDF.
 
@@ -191,7 +191,7 @@ PDF→image and PDF split write into a new `Name pages` folder containing `Page 
 
 **Recording options are honest.** `capabilities()` in `src-tauri/src/recording.rs` reports what the backend actually implements, and the capture toolbar renders only those switches. macOS gets the microphone toggle (`screencapture -g`) and no frame-rate control, because `screencapture -v` has none; Windows and Linux get a frame-rate chip (15 / 24 / 30) that becomes ffmpeg's `-framerate`, and no microphone toggle, because no audio input is wired into the grab yet. Nothing in the UI can promise a setting the encoder would silently drop.
 
-**Result card.** A finished screenshot or recording appears bottom-right as a card with **Copy**, **Pin**, **Send**, **Reveal** and **Edit**. Hovering holds it open; otherwise it steps aside on its own. Settings -> Screenshots chooses what happens at that moment - **Result card** or **Open in editor** - and the editor is the fallback whenever a card window cannot be created.
+**Result card.** A finished screenshot or recording appears bottom-right as a card with **Copy**, **Pin**, **Send**, **Reveal** and **Edit**. Hovering holds it open; otherwise it steps aside on its own. The editor is the fallback whenever a card window cannot be created, so a capture is never left with no way to act on it.
 
 **Annotation.** The editor canvas works at native resolution and writes a new PNG, so the source file is never modified.
 
@@ -220,6 +220,7 @@ Every capture, conversion result and received file is written by Rust into one l
 - **Favorite** a row to keep it through the capacity limit, a deleted file, and Clear.
 - **Remove** one row, or **Clear** the library - favorite rows stay.
 - **Drag a row out** into Finder, a mail composer or a chat window: the row carries a `file://` URL, so the receiving application gets the file rather than a path string. The plain-text path travels with it for editors.
+- **Drag a row onto Convert files, File tools or OCR** to run just that action on a file you already used — the same gesture, inverted. Like any drop it has to land on a button; releasing it back over the list runs nothing.
 - Click a row to open it in the editor; the row's other buttons send, reveal, and pin it to the screen.
 
 ## OCR
@@ -292,7 +293,7 @@ Each is overridable in Settings. File actions offer a *collect everything in one
 
 ## Updates
 
-A new macOS machine installs **`Shift-0.1.8-macOS-universal.dmg`**: builds are ad-hoc signed and not notarized, so Gatekeeper calls Shift an unidentified developer. Double-click the image, drag `Shift.app` to /Applications, then allow the first launch once (right-click → Open, or 允许 in System Settings → Privacy & Security). In-app updates download the same image without a browser, so they never prompt. Details in `docs/RELEASE.md`.
+A new macOS machine installs **`Shift-0.1.9-macOS-universal.dmg`**: builds are ad-hoc signed and not notarized, so Gatekeeper calls Shift an unidentified developer. Double-click the image, drag `Shift.app` to /Applications, then allow the first launch once (right-click → Open, or 允许 in System Settings → Privacy & Security). In-app updates download the same image without a browser, so they never prompt. Details in `docs/RELEASE.md`.
 
 The update channel is this repository: a `releases` branch holding the installers plus `shift-update.json`, which names each artifact, its size and its SHA256. The feed URL is derived from the git remote at build time - Gitea, GitHub and GitLab forms are known, and `SHIFT_UPDATE_URL` overrides it - so no update service has to be deployed anywhere.
 
@@ -315,9 +316,11 @@ Core conversion, radial menu, capture, and OCR work with nothing installed. Thes
 | LAME | MP3 encode when FFmpeg lacks `libmp3lame` | rare | rare | rare |
 
 Settings -> **Runtime components** shows the tools found on the current machine,
-their versions and paths. Missing Pandoc, Typst, FFmpeg, Poppler and ImageMagick can be
-installed from the same panel through Homebrew on macOS or WinGet on Windows,
-then detected again automatically. Tools are also found on `PATH` and their
+their versions and paths, and what each one unlocks on this platform. A row that reads
+as missing also says how to fix it: anything installable carries an **Install** button
+(Pandoc and FFmpeg on macOS through Homebrew; Pandoc, FFmpeg, Poppler, ImageMagick and
+Typst on Windows through WinGet), and a row with no button is either built in or simply
+not used on that platform. Tools are also found on `PATH` and their
 standard install locations at call time, so a missing dependency degrades one
 wedge rather than the app.
 
@@ -331,7 +334,7 @@ wedge rather than the app.
 | Monitor under cursor | Yes | Yes | `grim` output selection |
 | Area recording | `screencapture -v`, audio via `-g` | FFmpeg `x11grab` | `wf-recorder` under Wayland, FFmpeg `x11grab` under X11 |
 | Recording frame-rate control | not offered (`screencapture` has none) | 15 / 24 / 30 | 15 / 24 / 30 (`-r` / `-framerate`) |
-| History library, drag a row out | Yes | Yes | Yes |
+| History library, drag a row out and back onto a button | Yes | Yes | Yes |
 | Git-backed updates: SHA256 gate, optional signed manifest | Yes | x64 is the published installer; an ARM machine gets it through the `windows` fallback | Checks and downloads; nothing published for Linux, so the answer is "no artifact" |
 | Image convert and edit | Yes | Yes | Yes |
 | HEIC / AVIF encode | `sips` | ImageMagick | ImageMagick |
@@ -371,7 +374,7 @@ pnpm mac:release
 scripts/build-windows-release.sh
 ```
 
-The release pipeline deliberately emits exactly two installers: `Shift-0.1.8-macOS-universal.dmg` and `Shift-Setup-0.1.8-win-x64.exe`. The macOS app is one universal Mach-O including universal drag, PDF-render and doc-render sidecars. Windows ARM64 uses the x64 installer through the update manifest's compatibility fallback. Full details are in `docs/BUILD_WINDOWS.md` and `docs/RELEASE.md`.
+The release pipeline deliberately emits exactly two installers: `Shift-0.1.9-macOS-universal.dmg` and `Shift-Setup-0.1.9-win-x64.exe`. The macOS app is one universal Mach-O including universal drag, PDF-render and doc-render sidecars. Windows ARM64 uses the x64 installer through the update manifest's compatibility fallback. Full details are in `docs/BUILD_WINDOWS.md` and `docs/RELEASE.md`.
 
 **Permissions (macOS).** Screen Recording for capture, Files & Folders for the output folders you choose, Microphone when recording with audio, and Local Network for **Send to a device**. Shift checks Screen Recording before opening the overlay, so a denial surfaces an actionable error rather than a black screenshot. A denied Local Network grant is quieter: Shift still sends its beacons and still answers anyone who addresses it directly, but it receives no group traffic, so the device list simply stays empty. Ad-hoc signed builds get a new code identity on every rebuild and macOS keys these grants to that identity, so an upgrade can ask again; distribution with Developer ID keeps them stable.
 
@@ -451,7 +454,7 @@ The one exception is opt-in by usage: **Send to a device** talks to your local n
 - PDF compression resamples embedded images to at most 1440 px as q60 JPEG. It deliberately skips anything it cannot prove it can round-trip — masks, indexed or CMYK colour, JPX/JBIG2/CCITT — so exotic scans may still resist shrinking.
 - Windows recording and media conversion require `ffmpeg` on `PATH`. On Linux media conversion also requires it, area recording needs `wf-recorder` under Wayland and `ffmpeg` under X11, and neither path is exercised by the forge this repository is hosted on, so treat Linux capture as build-verified only.
 - Linux is a build target, not a shipped product: no deb or AppImage is published, so the update channel carries no `linux` key and a Linux build finds nothing to download. `scripts/linux/Dockerfile` and the `linux` job in CI remain the recipe for anyone who wants one.
-- Dragging a library row out uses the webview's file-URL drag support. It is the standard `text/uri-list` payload with a `file://` entry plus the plain path, and it needs a gesture-level check on each platform; until then, **Send**, **Reveal** and the row's own buttons are the guaranteed paths for handing a file over.
+- Dragging a library row out uses the webview's file-URL drag support. It is the standard `text/uri-list` payload with a `file://` entry plus the plain path, and it needs a gesture-level check on each platform; until then, **Send**, **Reveal** and the row's own buttons are the guaranteed paths for handing a file over. Dropping a row back onto Shift is checked: one gesture reports through the DOM, the native webview drop, or both, and the `landed` flag in `MainWindow.tsx` lets only the first through — the invariants are in `docs/ENGINEERING-NOTES.md`.
 - LAN sharing needs a network that allows peer traffic. Multicast is skipped by some guest and corporate Wi-Fi; those networks still work over the broadcast and unicast fallbacks, but two copies cannot meet across a router that isolates clients. The discovery invariants, permission checks and regression matrix are in `docs/ENGINEERING-NOTES.md`.
 - On Windows only one Shift copy per machine can hold the discovery port, so extra instances do not appear as peers.
 - Windows and Linux paths are compile-verified here, and the forge hosting this repository runs no Actions, so nothing is ever built by CI on your behalf. Gesture-level QA needs real Windows and Linux hardware.

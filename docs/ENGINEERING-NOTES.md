@@ -1,9 +1,10 @@
 # Shift 工程回归台账
 
-本文件记录 0.1.2 到 0.1.8 之间已经踩过、并且不应再次引入的工程问题，重点覆盖：
+本文件记录 0.1.2 到 0.1.9 之间已经踩过、并且不应再次引入的工程问题，重点覆盖：
 
 - Drop / 局域网设备发现
 - DOCX、Markdown 与图片转换
+- 设置面板与「运行组件」的显示口径
 - macOS DMG 打包及在其它机器上的安装
 
 它记录的是实现约束、故障原因和回归方法，不是用户手册。修改相关代码或打包配置前，
@@ -20,6 +21,7 @@
 | 0.1.6 | 增加按网卡定向广播，改善过滤组播的网络，但用户实测仍只能短暂看到设备。 |
 | 0.1.7 | 增加单播扫描、普通信标回应、15 秒过期和 Windows 错误处理；用户实测 Mac 与 Windows 终端的 Drop 发现恢复正常。 |
 | 0.1.8 | 最近文件改为收藏并移除拖回主操作按钮的交互；Windows 增加单实例保护；macOS DOCX→PDF 改用 Quick Look 源，保留页眉、页脚与装订版式。 |
+| 0.1.9 | 重新支持把「最近使用」拖回三个主操作按钮，并且**按钮是唯一落点**——松开在面板其他位置不执行任何操作（见「『最近使用』拖回主面板的三个按钮」）；设置面板字号统一到 `--text-*` 阶梯；取消「截图后」行为选项，固定为结果卡片；修复 macOS「运行组件」把 AppKit 文档渲染器报成 Pandoc 缺失且没有安装入口的回归。 |
 
 历史提交可以这样定位：
 
@@ -344,6 +346,92 @@ cargo test --lib capture
 5. 录制中再截一张图 → `ESC` 只关 overlay，录制与 HUD 不受影响。
 6. 圆环（拖文件到面板，或「文件转换」选文件后）→ `ESC` 收起圆环。
 7. `Enter` 仍能确认选区并保存截图。
+
+## 「运行组件」的显示口径
+
+### 0.1.9 的 macOS 回归
+
+macOS 的设置 → 运行组件里，文档转 PDF 那一行显示 **“Pandoc PDF pipeline / 缺失”**，
+而且**没有安装按钮**。两件事都是同一个错误造成的。
+
+`document_pdf_component()` 原本在 `if let Some(renderer) = files::doc_render_bridge()`
+里 `return` 掉内置的 AppKit 渲染器；`df35111`（准备 0.1.8）把 `return` 改成了裸表达式，
+于是构造出的组件被丢弃、继续往下走到 Pandoc 分支。后果是：
+
+- 名字变成 `Pandoc PDF pipeline`，可用条件变成 `pandoc.is_some() && pdf_engine.is_some()`；
+  macOS 这条链路根本不需要 LaTeX/Typst 引擎（pandoc 只负责把带图 DOCX 转成 HTML 交给
+  渲染器），所以只要机器上没装 xelatex/typst 之类就永远显示缺失。
+- 面板对 `external` 且缺失的行只给安装按钮，而 `install_target("document-pdf")` 在
+  macOS 没有条目（只有 `pandoc`、`media`），于是既报缺失又无处可装。
+
+**修法不是补一个安装入口，而是恢复「macOS 由内置渲染器作答」这件事。** 现在两个平台各自
+拥有独立的 `document_pdf_component()`（`#[cfg(target_os = "macos")]` /
+`#[cfg(not(target_os = "macos"))]`），与同文件里 `pdf_page_component`、
+`image_backend_component` 的写法一致：在 macOS 上想再次落到 Pandoc 分支会变成编译错误，
+而不再是一次静默的行为回归。
+
+### 不能随意改掉的约束
+
+| 约束 | 原因 |
+| --- | --- |
+| macOS 的 `document-pdf` 必须是 `source = "bundled"` 且以 `doc_render_bridge()` 为准 | 这条转换在 macOS 上就是 Quick Look / AppKit 渲染器；改成 external 会重新引入"缺失但装不了"。 |
+| 带图 DOCX 仍需要 Pandoc，但那是 `pandoc` 那一行的职责 | `pandoc` 行有自己的安装目标（`brew install pandoc`）；不要把依赖合并进 `document-pdf`。 |
+| `external` + 缺失的行必须有安装目标 | 否则面板等于告诉用户坏了、却不给出口，就是本次回归的表现。 |
+
+### 回归测试
+
+`src-tauri/src/runtime.rs` 的 `tests` 模块：
+
+```bash
+cd src-tauri
+cargo test --lib runtime
+```
+
+- `macos_document_pdf_is_the_bundled_renderer_not_a_pandoc_pipeline`：钉住 macOS 的
+  `source` 与 `name`。
+- `a_missing_component_always_offers_a_way_forward`：任何标记为缺失的行都必须要么可安装、
+  要么本来就不是 external。
+
+## 「最近使用」拖回主面板的三个按钮
+
+0.1.8 曾经把这条交互关掉：一行拖出去是文件，拖回来却什么都不是，用户只能重新选一次文件。
+现在拖到「文件转换 / 文件工具 / 文字识别」上就执行该按钮的动作。
+
+**按钮是唯一的落点。** 从 0.1.9 起，拖到面板其他位置**不执行任何操作**，只提示"请把文件拖到
+下方三个按钮之一"。此前"落在面板空白处就打开操作环"的兜底已经去掉：外部拖入和内部拖拽都遵循
+同一条规则，`dropFiles` 的 `action` 参数因此从 `DropAction | null` 收紧成 `DropAction`。拖拽
+进行中三个按钮会同时点亮为候选落点（原生拖拽用 `dragging`，内部拖拽用 `rowDragging`），否则
+用户在松开之前无从知道该瞄哪里。实现上有一条约束容易在重构时丢掉：
+
+**一次内部拖拽可能被报告两次。** 历史行使用 `dragOutPayload`，也就是 `text/uri-list` 里的
+`file://` 加纯文本路径，因此它对外就是一个文件拖拽。同一次手势有两种投递路径：
+
+- DOM：`onDragOver` / `onDrop`（挂在 `.home` 根节点，用 `clientX/clientY` 命中按钮）；
+- 原生：`getCurrentWebview().onDragDropEvent` 的 `drop`（坐标要先经 `toWindowPoint` 换算）。
+
+哪个先、是否都会到，取决于 WebView 版本与平台，所以两条路都必须武装，再由
+`recentDrag.current = { path, landed }` 的 `landed` 标记只放行第一个。去掉这个标记，
+圆环会被打开两次；只保留 DOM，Windows 的原生投递会让拖拽失效。
+
+另外两条约束：
+
+| 约束 | 原因 |
+| --- | --- |
+| `onDragEnd` 不能立即清空 `recentDrag`，要延迟 500 ms | 部分引擎在按钮抬起之后才发出原生 `drop`，提前清空会让这一次手势变成"落回面板的空拖拽"。 |
+| 两条投递路径都必须把"没命中按钮"当作同一种结果处理 | 内部拖拽与外部拖入的语义必须一致；只在 DOM 路径拒绝、原生路径仍兜底开环，就会出现同一个动作两种结果。 |
+| 点亮候选按钮的开关有两个来源 | 外部拖拽靠原生 `enter` 设置的 `dragging`，内部拖拽原生事件不一定到，必须另有 `rowDragging`，否则从列表拖起时按钮毫无反应。 |
+
+### 回归测试
+
+`src/lib/dropTargets.test.ts` 覆盖命中区域与坐标换算；拖拽本身用浏览器实测（Chromium 与
+WKWebView 两条路径都要走一遍）：
+
+1. 「最近使用」某行 → 拖到「文件转换」→ 只弹出一个格式环，且文件是这一行。
+2. 同一行 → 拖到「文件工具」→ 只弹出工具环。
+3. 图片行 → 拖到「文字识别」→ 打开编辑器并自动开始识别；非图片行 → 退回格式环。
+4. 同一行 → 拖到面板空白处 / 标题栏 / 列表本身 → 不开环、不执行，只提示需要拖到按钮上。
+5. 从访达拖文件到面板空白处 → 同样不执行；拖到任一按钮 → 执行该按钮的动作。
+6. 行拖出到访达/聊天窗口 → 仍是文件本体，没有被 Shift 自己吃掉。
 
 ## 修改这些路径时的统一回归命令
 

@@ -12,8 +12,8 @@ An orphan branch named `releases` holds exactly one release:
 releases/
 ├── shift-update.json
 ├── shift-update.sig
-├── Shift-0.1.8-macOS-universal.dmg
-└── Shift-Setup-0.1.8-win-x64.exe
+├── Shift-0.1.9-macOS-universal.dmg
+└── Shift-Setup-0.1.9-win-x64.exe
 ```
 
 `shift-update.json` names the version and, per platform, the artifact file, its size in
@@ -22,12 +22,12 @@ bytes and its SHA256:
 ```json
 {
   "schema": 1,
-  "version": "0.1.8",
+  "version": "0.1.9",
   "date": "2026-10-26",
   "notes": "",
   "artifacts": {
-    "macos": { "file": "Shift-0.1.8-macOS-universal.dmg", "sha256": "…", "size": 0 },
-    "windows": { "file": "Shift-Setup-0.1.8-win-x64.exe", "sha256": "…", "size": 0 }
+    "macos": { "file": "Shift-0.1.9-macOS-universal.dmg", "sha256": "…", "size": 0 },
+    "windows": { "file": "Shift-Setup-0.1.9-win-x64.exe", "sha256": "…", "size": 0 }
   }
 }
 ```
