@@ -1255,6 +1255,16 @@ fn convert_document(
     let target = target.to_ascii_lowercase();
     let pdf_engine = (target == "pdf").then(document_pdf_engine).flatten();
     if target == "pdf" && pdf_engine.is_none() {
+        // Only Windows and Linux drive a PDF engine through Pandoc, and only they list
+        // one in Settings > Runtime components. Reaching this on macOS means the
+        // built-in renderer is unavailable too, so pointing at a Typst row there would
+        // send the user to a row that panel never shows.
+        #[cfg(target_os = "macos")]
+        return Err(
+            "PDF output needs the built-in document renderer or a Pandoc PDF engine (Typst, WeasyPrint, or a LaTeX engine on your PATH)."
+                .into(),
+        );
+        #[cfg(not(target_os = "macos"))]
         return Err(
             "PDF output needs a Pandoc PDF engine. Install Typst from Settings > Runtime Components or add a supported engine to your PATH."
                 .into(),

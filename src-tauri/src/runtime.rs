@@ -172,21 +172,39 @@ fn external_component(
     )
 }
 
+/// The document -> PDF row. macOS prints through the bundled AppKit renderer, and the
+/// renderer alone decides the row.
+///
+/// Regression this shape prevents: the `if let Some(renderer)` once built this component
+/// without returning it, so every Mac fell through to the Pandoc row below, which asks
+/// for a LaTeX/Typst engine macOS never runs. The panel then reported "Pandoc PDF
+/// pipeline" as missing and offered no install button, because `document-pdf` has no
+/// install target on macOS. Splitting the two platforms into their own functions makes
+/// that fall-through a compile error instead of a silent one.
+///
+/// Pandoc is still genuinely needed on macOS, but only to turn a picture-bearing DOCX
+/// into HTML for this renderer, and it already has its own row and install target in
+/// `machine_info`.
+#[cfg(target_os = "macos")]
 fn document_pdf_component() -> RuntimeComponent {
-    #[cfg(target_os = "macos")]
-    if let Some(renderer) = files::doc_render_bridge() {
-        component(
-            "document-pdf",
-            "AppKit document renderer",
-            "documents",
-            "DOCX / RTF / ODT / TXT / MD / HTML -> PDF (a DOCX with pictures also needs Pandoc, which keeps the images)",
-            "bundled",
-            true,
-            None,
-            Some(renderer),
-        );
-    }
+    let renderer = files::doc_render_bridge();
+    component(
+        "document-pdf",
+        "AppKit document renderer",
+        "documents",
+        "DOCX / RTF / ODT / TXT / MD / HTML -> PDF (a DOCX with pictures also needs Pandoc, which keeps the images)",
+        "bundled",
+        renderer.is_some(),
+        None,
+        renderer,
+    )
+}
 
+/// Elsewhere the conversion really is Pandoc driving a PDF engine, so the row names
+/// whichever engine was found and stays missing until both halves exist. Each half
+/// carries its own install target, so a missing row is always fixable from the panel.
+#[cfg(not(target_os = "macos"))]
+fn document_pdf_component() -> RuntimeComponent {
     let pandoc = files::resolve_tool("pandoc");
     let pdf_engine = files::document_pdf_engine();
     let available = pandoc.is_some() && pdf_engine.is_some();
@@ -666,5 +684,37 @@ mod tests {
         assert_eq!(magick.package_id, "ImageMagick.ImageMagick");
         let typst = windows_install_target("pdf-engine").expect("Typst should be installable");
         assert_eq!(typst.package_id, "Typst.Typst");
+    }
+
+    /// Regression: 0.1.8 built the bundled renderer's component inside `if let
+    /// Some(renderer)` but dropped the `return`, so every Mac fell through to the Pandoc
+    /// row. That row wants a LaTeX/Typst engine macOS never runs, so the panel read
+    /// "Pandoc PDF pipeline: missing" while offering no install button, because
+    /// `document-pdf` has no macOS install target. The two platforms now have their own
+    /// function, so the fall-through cannot come back silently.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_document_pdf_is_the_bundled_renderer_not_a_pandoc_pipeline() {
+        let row = document_pdf_component();
+        assert_eq!(row.id, "document-pdf");
+        assert_eq!(
+            row.source, "bundled",
+            "macOS must report its own renderer, not the external Pandoc pipeline"
+        );
+        assert_eq!(row.name, "AppKit document renderer");
+    }
+
+    /// A row the panel marks missing is only honest when the user can do something about
+    /// it: either an install button, or a built-in/system component they cannot install.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_missing_component_always_offers_a_way_forward() {
+        for component in machine_info_sync().components {
+            assert!(
+                component.available || component.installable || component.source != "external",
+                "{} is reported missing with no install entry",
+                component.id
+            );
+        }
     }
 }
