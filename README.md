@@ -72,7 +72,7 @@ Shift lives in the menu bar (macOS) and the notification area (Windows), and it 
 
 **Use a tool (`Option + Shift`, or `Alt + Shift` on Windows).** Same gesture, and the wedges become tools for that file type instead of formats. While the ring is open, keep `Shift` held and press or release `Option`/`Alt` to flip between the format ring and the tool ring.
 
-**Prefer not to drag?** In the main window, **Convert files** and **File tools** open a picker and then show the same ring for what you chose; **OCR** picks an image and reads it. Dropping a file is **aimed**: the three buttons are the only drop targets, and the button you release on is the action it runs - **Convert files** opens the format ring, **File tools** the tool ring, **OCR** reads the image. All three light up as candidates while a drag is in flight; release anywhere else on the panel and nothing runs, with a note that the drop needs a button.
+**Prefer not to drag?** In the main window, **Convert files** and **File tools** open a picker and then show the same ring for what you chose; **OCR** picks an image and reads it. Dropping a file is **aimed**: the three buttons are the only drop targets, and the button you release on is the action it runs - **Convert files** opens the format ring, **File tools** the tool ring, **OCR** reads the image. All three light up as candidates while a drag is in flight, and only they react: the panel around them stays still. Release anywhere else and nothing happens at all. **OCR** refuses a file it cannot read rather than handing it to another ring.
 
 **Several files at once.** Multi-select with `⌘`/`Ctrl`-click, then drag. Every file is processed. With 2+ images or 2+ PDFs selected, a **Merge** wedge appears that combines them into a single PDF.
 
@@ -273,7 +273,7 @@ The menu bar (macOS) and notification area (Windows) icon exposes the actions yo
 | Capture area | `Alt+Shift+2` | Start an area screenshot |
 | Capture full screen | `Alt+Shift+4` | Grab the monitor under the pointer |
 | Record area | `Alt+Shift+3` | Start, or stop, an area recording |
-| OCR an image… | — | Pick an image and read its text locally |
+| OCR | — | Pick an image and read its text locally |
 | Update available *x.y.z* | — | Only while an update is available; opens Settings → Updates |
 | Quit Shift | `Cmd/Ctrl+Q` | Exit; an in-flight recording is finalised first |
 
@@ -293,7 +293,7 @@ Each is overridable in Settings. File actions offer a *collect everything in one
 
 ## Updates
 
-A new macOS machine installs **`Shift-0.1.9-macOS-universal.dmg`**: builds are ad-hoc signed and not notarized, so Gatekeeper calls Shift an unidentified developer. Double-click the image, drag `Shift.app` to /Applications, then allow the first launch once (right-click → Open, or 允许 in System Settings → Privacy & Security). In-app updates download the same image without a browser, so they never prompt. Details in `docs/RELEASE.md`.
+A new macOS machine installs **`Shift-0.1.10-macOS-universal.dmg`**: builds are ad-hoc signed and not notarized, so Gatekeeper calls Shift an unidentified developer. Double-click the image, drag `Shift.app` to /Applications, then allow the first launch once (right-click → Open, or 允许 in System Settings → Privacy & Security). In-app updates download the same image without a browser, so they never prompt. Details in `docs/RELEASE.md`.
 
 The update channel is this repository: a `releases` branch holding the installers plus `shift-update.json`, which names each artifact, its size and its SHA256. The feed URL is derived from the git remote at build time - Gitea, GitHub and GitLab forms are known, and `SHIFT_UPDATE_URL` overrides it - so no update service has to be deployed anywhere.
 
@@ -374,7 +374,7 @@ pnpm mac:release
 scripts/build-windows-release.sh
 ```
 
-The release pipeline deliberately emits exactly two installers: `Shift-0.1.9-macOS-universal.dmg` and `Shift-Setup-0.1.9-win-x64.exe`. The macOS app is one universal Mach-O including universal drag, PDF-render and doc-render sidecars. Windows ARM64 uses the x64 installer through the update manifest's compatibility fallback. Full details are in `docs/BUILD_WINDOWS.md` and `docs/RELEASE.md`.
+The release pipeline deliberately emits exactly two installers: `Shift-0.1.10-macOS-universal.dmg` and `Shift-Setup-0.1.10-win-x64.exe`. The macOS app is one universal Mach-O including universal drag, PDF-render and doc-render sidecars. Windows ARM64 uses the x64 installer through the update manifest's compatibility fallback. Full details are in `docs/BUILD_WINDOWS.md` and `docs/RELEASE.md`.
 
 **Permissions (macOS).** Screen Recording for capture, Files & Folders for the output folders you choose, Microphone when recording with audio, and Local Network for **Send to a device**. Shift checks Screen Recording before opening the overlay, so a denial surfaces an actionable error rather than a black screenshot. A denied Local Network grant is quieter: Shift still sends its beacons and still answers anyone who addresses it directly, but it receives no group traffic, so the device list simply stays empty. Ad-hoc signed builds get a new code identity on every rebuild and macOS keys these grants to that identity, so an upgrade can ask again; distribution with Developer ID keeps them stable.
 
