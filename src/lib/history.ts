@@ -2,7 +2,6 @@ import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import {
-  announceRecentChange,
   clearLegacyRecentItems,
   getLocalRecentItems,
   type RecentItem,
@@ -110,6 +109,3 @@ export const history = {
     };
   },
 };
-
-/** Kept so a caller that only has a path can still announce a local change. */
-export { announceRecentChange };

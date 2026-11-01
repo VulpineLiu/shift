@@ -170,7 +170,7 @@ export function SetupPanel({
             return (
               <li key={row.id} className={`setup-row is-${row.state}`}>
                 <span className="setup-row-icon">
-                  <Icon size={15} />
+                  <Icon size={17} />
                 </span>
                 <span className="setup-row-body">
                   <strong>{t(`setupRow_${row.id}`)}</strong>
@@ -191,9 +191,9 @@ export function SetupPanel({
                 </span>
                 <span className={`setup-state is-${row.state}`}>
                   {row.state === "ok" ? (
-                    <Check size={14} />
+                    <Check size={16} />
                   ) : row.state === "problem" ? (
-                    <X size={14} />
+                    <X size={16} />
                   ) : null}
                   {t(
                     row.state === "ok"

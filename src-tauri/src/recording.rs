@@ -402,15 +402,11 @@ pub fn stop(app: &AppHandle, state: &AppState) -> Result<Option<RecordingInfo>, 
         output: session.output.to_string_lossy().to_string(),
         started_at: session.started_at,
     };
-    match crate::settings::load(app).capture_after {
-        crate::settings::CaptureAfter::Editor => {
-            editor::show_recording_editor(app, &info)?;
-        }
-        crate::settings::CaptureAfter::Card => {
-            if crate::result_card::show(app, Path::new(&info.output)).is_err() {
-                editor::show_recording_editor(app, &info)?;
-            }
-        }
+    // The card carries the recording's own Copy / Pin / Edit / Send buttons; the
+    // editor is the fallback so a finished recording is never left with no way to
+    // act on it.
+    if crate::result_card::show(app, Path::new(&info.output)).is_err() {
+        editor::show_recording_editor(app, &info)?;
     }
     crate::history::publish_result(
         app,

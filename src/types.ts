@@ -88,8 +88,6 @@ export interface AppSettings {
   autostart: boolean;
   /** "" until the user picks a language; the tray follows whatever is stored. */
   language: string;
-  /** Show the floating result card, or open the editor, after a capture. */
-  captureAfter: "card" | "editor";
   /** Ask the git release branch for a newer build once a day. */
   updateCheckEnabled: boolean;
   /** Raw URL of the release manifest this build reads; "" when unconfigured. */

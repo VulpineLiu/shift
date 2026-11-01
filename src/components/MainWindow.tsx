@@ -22,6 +22,7 @@ import {
   FileOutput,
   LoaderCircle,
   Maximize,
+  MoveRight,
   Pin,
   Presentation,
   RefreshCw,
@@ -37,7 +38,14 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type DragEvent,
+} from "react";
 import { getInitialLang, publishLang, useI18n } from "../i18n";
 import { api } from "../lib/api";
 import { hitTestDropTarget, toWindowPoint } from "../lib/dropTargets";
@@ -75,7 +83,6 @@ const FALLBACK_SETTINGS: AppSettings = {
   dragEnabled: true,
   shareEnabled: true,
   autostart: false,
-  captureAfter: "card",
   defaultFileOutputDir: "~/Downloads/Shift",
   defaultScreenshotDir: "~/Pictures/Shift",
   defaultRecordingDir: "~/Movies/Shift",
@@ -154,13 +161,13 @@ function RecentThumb({ item }: { item: RecentItem }) {
   return (
     <span className={`home-recent-icon ${item.kind}`}>
       {item.kind === "image" ? (
-        <FileImage size={15} />
+        <FileImage size={17} />
       ) : item.kind === "video" ? (
-        <FileVideo size={15} />
+        <FileVideo size={17} />
       ) : item.kind === "text" ? (
-        <FileText size={15} />
+        <FileText size={17} />
       ) : (
-        <FileGeneric size={15} />
+        <FileGeneric size={17} />
       )}
     </span>
   );
@@ -198,12 +205,12 @@ function OutputLocation({
         ) : null}
       </div>
       <div className="settings-path" title={path}>
-        <FolderOpen size={14} />
+        <FolderOpen size={16} />
         <span>{path}</span>
       </div>
       <div className="settings-output-actions">
         <button className="settings-small-button" onClick={onChoose}>
-          <FolderSearch size={14} />
+          <FolderSearch size={16} />
           {chooseLabel}
         </button>
         <button className="settings-small-button" onClick={onReveal}>
@@ -243,11 +250,16 @@ export function MainWindow() {
   const toastTimer = useRef<number | null>(null);
   const [, setNowTick] = useState(0);
   const [dropAction, setDropAction] = useState<DropAction | null>(null);
+  /** True while a Recent row is being dragged, which the native `dragging` never covers. */
+  const [rowDragging, setRowDragging] = useState(false);
   const [hotkeys, setHotkeys] = useState<HotkeyStatus | null>(null);
   const dropTargets = useRef<Partial<Record<DropAction, HTMLElement | null>>>({});
-  // Recent rows can still be handed to other apps, but dropping one back onto
-  // Shift's own action buttons is intentionally unsupported.
-  const recentDragActive = useRef(false);
+  /**
+   * The Recent row that is in flight, and whether it has already landed. A row leaves
+   * Shift as a real file drag, so one gesture can be reported twice: once by the DOM,
+   * once by the native drop events. Only the first of the two may run an action.
+   */
+  const recentDrag = useRef<{ path: string; landed: boolean } | null>(null);
   const runtimeCheckStarted = useRef(false);
 
   async function finishSetup() {
@@ -320,9 +332,8 @@ export function MainWindow() {
     return toWindowPoint(position, IS_MAC ? "mac" : "other", window.devicePixelRatio || 1);
   }
 
-  function actionAt(position: { x: number; y: number }): DropAction | null {
-    const point = localPoint(position);
-    if (!point) return null;
+  /** Hit-test a point that is already in CSS pixels inside this window. */
+  function actionAtPoint(point: { x: number; y: number }): DropAction | null {
     const boxes: Array<[DropAction, DOMRect | null | undefined]> = [
       ["formats", dropTargets.current.formats?.getBoundingClientRect()],
       ["tools", dropTargets.current.tools?.getBoundingClientRect()],
@@ -331,11 +342,57 @@ export function MainWindow() {
     return hitTestDropTarget(boxes, point);
   }
 
-  function dropFiles(paths: string[], action: DropAction | null) {
+  function actionAt(position: { x: number; y: number }): DropAction | null {
+    const point = localPoint(position);
+    return point ? actionAtPoint(point) : null;
+  }
+
+  /**
+   * Run the one action a drop was aimed at.
+   *
+   * The button *is* the choice: a drop that lands on the panel rather than on one of
+   * the three buttons runs nothing, so the gesture can never open a ring the user did
+   * not ask for. `dropOnButton` says why instead of leaving the drop silent.
+   */
+  function dropFiles(paths: string[], action: DropAction) {
     if (paths.length === 0) return Promise.resolve();
     if (action === "ocr") return runOcrOn(paths);
-    // Outside a button the ring keeps asking which action to run.
-    return api.showFilesInRadial(paths, action ?? "actions").then(() => undefined);
+    return api.showFilesInRadial(paths, action).then(() => undefined);
+  }
+
+  /**
+   * Land a dragged Recent row, at most once per gesture. Off a button it runs nothing,
+   * the same rule a file from Finder follows, and says so rather than going silent.
+   */
+  function landRecentRow(action: DropAction | null) {
+    const drag = recentDrag.current;
+    if (!drag || drag.landed) return;
+    drag.landed = true;
+    setDropAction(null);
+    if (!action) {
+      flash(t("dropOnButton"), 2600);
+      return;
+    }
+    void dropFiles([drag.path], action).catch((error) => flash(String(error), 3200));
+  }
+
+  /**
+   * DOM half of the same gesture, armed on the window root. Whether a file drag that
+   * started inside the webview is reported here, to the native handler, or to both
+   * differs by engine, so both are listening and `landRecentRow` decides who was first.
+   */
+  function rowDragOver(event: DragEvent) {
+    if (!recentDrag.current) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    const next = actionAtPoint({ x: event.clientX, y: event.clientY });
+    if (dropAction !== next) setDropAction(next);
+  }
+
+  function rowDropped(event: DragEvent) {
+    if (!recentDrag.current) return;
+    event.preventDefault();
+    landRecentRow(actionAtPoint({ x: event.clientX, y: event.clientY }));
   }
 
   async function chooseFiles(mode: "formats" | "tools") {
@@ -593,23 +650,39 @@ export function MainWindow() {
     if (isTauri()) {
       void getCurrentWebview()
         .onDragDropEvent((event) => {
-          if (recentDragActive.current) return;
+          const drag = recentDrag.current;
           if (event.payload.type === "enter") {
             setDragging(true);
             setDropAction(actionAt(event.payload.position));
+            return;
           }
           if (event.payload.type === "over") {
             setDropAction(actionAt(event.payload.position));
+            return;
           }
           if (event.payload.type === "leave") {
             setDragging(false);
             setDropAction(null);
+            return;
           }
           if (event.payload.type === "drop") {
             const action = actionAt(event.payload.position);
             setDragging(false);
             setDropAction(null);
+            // A Recent row is a real file drag, so it can reach here as well as the
+            // panel's own DOM handler; nothing else can be in flight at the same time.
+            if (drag) {
+              landRecentRow(action);
+              return;
+            }
+            // Off a button there is no action to run, so the drop says what it expects
+            // instead of opening a ring the user never aimed at.
+            if (!action) {
+              flash(t("dropOnButton"), 2600);
+              return;
+            }
             void dropFiles(event.payload.paths, action).catch((error) => flash(String(error), 3200));
+            return;
           }
         })
         .then((unlisten) => unlisteners.push(unlisten));
@@ -680,7 +753,11 @@ export function MainWindow() {
     : [];
 
   return (
-    <div className={`home ${IS_MAC ? "is-mac" : ""}`}>
+    <div
+      className={`home ${IS_MAC ? "is-mac" : ""}`}
+      onDragOver={rowDragOver}
+      onDrop={rowDropped}
+    >
       <header className="home-bar" data-tauri-drag-region>
         <div className="home-brand" data-tauri-drag-region>
           <img className="home-mark" src="/shift-icon.png" alt="" aria-hidden="true" />
@@ -694,9 +771,9 @@ export function MainWindow() {
             onClick={() => void spring("fullscreen", () => api.captureFullscreen().then(() => undefined))}
           >
             {busy === "fullscreen" ? (
-              <LoaderCircle size={15} className="spin" />
+              <LoaderCircle size={17} className="spin" />
             ) : (
-              <Maximize size={15} />
+              <Maximize size={17} />
             )}
             {t("fullScreen")}
             <kbd>{IS_MAC ? "⌥⇧4" : "Alt+Shift+4"}</kbd>
@@ -707,7 +784,7 @@ export function MainWindow() {
               void spring("capture", () => api.startCapture("screenshot").then(() => undefined))
             }
           >
-            {busy === "capture" ? <LoaderCircle size={15} className="spin" /> : <ScanLine size={15} />}
+            {busy === "capture" ? <LoaderCircle size={17} className="spin" /> : <ScanLine size={17} />}
             {t("capture")}
             <kbd>{IS_MAC ? "⌥⇧2" : "Alt+Shift+2"}</kbd>
           </button>
@@ -717,7 +794,7 @@ export function MainWindow() {
               void spring("record", () => api.startCapture("recording").then(() => undefined))
             }
           >
-            {busy === "record" ? <LoaderCircle size={15} className="spin" /> : <Circle size={14} />}
+            {busy === "record" ? <LoaderCircle size={17} className="spin" /> : <Circle size={16} />}
             {t("record")}
             <kbd>{IS_MAC ? "⌥⇧3" : "Alt+Shift+3"}</kbd>
           </button>
@@ -726,7 +803,7 @@ export function MainWindow() {
             title={t("settings")}
             onClick={() => setSettingsOpen((value) => !value)}
           >
-            <Settings2 size={17} />
+            <Settings2 size={19} />
           </button>
         </div>
       </header>
@@ -779,7 +856,13 @@ export function MainWindow() {
             })}
           </div>
           <h1>{dragging ? t("homeDropRelease") : t("homeDropTitle")}</h1>
-          <div className={`home-primary-actions ${dropAction ? "has-drop-target" : ""}`}>
+          {/* While any drag is in flight all three buttons show as candidates, so the
+              aim is visible before the pointer reaches one. */}
+          <div
+            className={`home-primary-actions ${
+              dragging || rowDragging || dropAction ? "has-drop-target" : ""
+            }`}
+          >
             <button
               className={`home-primary ${dropAction === "formats" ? "is-drop-target" : ""}`}
               ref={(node) => {
@@ -790,9 +873,9 @@ export function MainWindow() {
               }
             >
               {busy === "convert" ? (
-                <LoaderCircle size={16} className="spin" />
+                <LoaderCircle size={18} className="spin" />
               ) : (
-                <FileOutput size={16} />
+                <FileOutput size={18} />
               )}
               {t("convertFiles")}
             </button>
@@ -804,9 +887,9 @@ export function MainWindow() {
               onClick={() => void spring("tools", () => chooseFiles("tools"))}
             >
               {busy === "tools" ? (
-                <LoaderCircle size={16} className="spin" />
+                <LoaderCircle size={18} className="spin" />
               ) : (
-                <Wrench size={15} />
+                <Wrench size={18} />
               )}
               {t("fileTools")}
             </button>
@@ -817,16 +900,20 @@ export function MainWindow() {
               }}
               onClick={() => void spring("ocr", chooseOcr)}
             >
-              {busy === "ocr" ? <LoaderCircle size={16} className="spin" /> : <ScanText size={16} />}
+              {busy === "ocr" ? <LoaderCircle size={18} className="spin" /> : <ScanText size={18} />}
               {t("ocr")}
             </button>
           </div>
+          <p className="home-drop-hint">
+            <MoveRight size={14} />
+            {t("homeDropHint")}
+          </p>
         </section>
 
         <aside className="home-side">
           <section className="home-card home-card-recent">
             <header className="home-card-head">
-              <Clock3 size={16} />
+              <Clock3 size={18} />
               <h1>{t("recent")}</h1>
               <span className="home-card-count">
                 {recent.length > 0
@@ -846,7 +933,7 @@ export function MainWindow() {
             </header>
             {recent.length > 3 ? (
               <label className="home-recent-search">
-                <Search size={13} />
+                <Search size={15} />
                 <input
                   value={historyQuery}
                   placeholder={t("searchHistory")}
@@ -858,7 +945,7 @@ export function MainWindow() {
                     title={t("clearHistory")}
                     aria-label={t("clearHistory")}
                   >
-                    <X size={12} />
+                    <X size={13} />
                   </button>
                 ) : null}
               </label>
@@ -866,7 +953,7 @@ export function MainWindow() {
             {recent.length === 0 ? (
               <div className="home-empty">
                 <span className="home-empty-glyph" aria-hidden="true">
-                  <ScanLine size={17} />
+                  <ScanLine size={19} />
                 </span>
                 <p>{t("recentEmpty")}</p>
               </div>
@@ -885,15 +972,26 @@ export function MainWindow() {
                     onDragStart={(event) => {
                       // A row leaves Shift as the file itself: WebKit turns the file URL
                       // in text/uri-list into a real file drop for Finder and friends,
-                      // while the plain path remains readable for editors.
+                      // while the plain path remains readable for editors. The same path
+                      // is what tells our own drop zones the row has come back.
                       event.dataTransfer.effectAllowed = "copy";
-                      recentDragActive.current = true;
+                      recentDrag.current = { path: item.path, landed: false };
+                      setRowDragging(true);
                       for (const [type, value] of Object.entries(dragOutPayload(item.path))) {
                         event.dataTransfer.setData(type, value);
                       }
                     }}
                     onDragEnd={() => {
-                      recentDragActive.current = false;
+                      setDropAction(null);
+                      setDragging(false);
+                      setRowDragging(false);
+                      // Some engines report the native drop only after the button is
+                      // already up, so the gesture stays recognised for a moment.
+                      const drag = recentDrag.current;
+                      if (!drag) return;
+                      window.setTimeout(() => {
+                        if (recentDrag.current === drag) recentDrag.current = null;
+                      }, 500);
                     }}
                   >
                     <button
@@ -917,24 +1015,24 @@ export function MainWindow() {
                           void history.setPinned(item.path, !item.pinned).catch(() => undefined)
                         }
                       >
-                        <Star size={13} fill={item.pinned ? "currentColor" : "none"} />
+                        <Star size={15} fill={item.pinned ? "currentColor" : "none"} />
                       </button>
                       <button title={t("sendTo")} onClick={() => setSharePaths([item.path])}>
-                        <Send size={13} />
+                        <Send size={15} />
                       </button>
                       <button title={t("revealFile")} onClick={() => void api.revealFile(item.path)}>
-                        <FolderSearch size={13} />
+                        <FolderSearch size={15} />
                       </button>
                       {item.kind === "image" ? (
                         <button title={t("pin")} onClick={() => void api.pinImage(item.path)}>
-                          <Pin size={13} />
+                          <Pin size={15} />
                         </button>
                       ) : null}
                       <button
                         title={t("forget")}
                         onClick={() => void history.remove(item.path).catch(() => undefined)}
                       >
-                        <X size={13} />
+                        <X size={15} />
                       </button>
                     </span>
                   </li>
@@ -958,7 +1056,7 @@ export function MainWindow() {
             aria-label={t("close")}
             title={t("close")}
           >
-            <X size={17} />
+            <X size={19} />
           </button>
           <div className="home-settings-heading">
             <h2>
@@ -980,7 +1078,7 @@ export function MainWindow() {
             aria-controls="settings-panel-system"
             onClick={() => setSettingsTab("system")}
           >
-            <Settings2 size={14} />
+            <Settings2 size={16} />
             {t("systemSettings")}
           </button>
           <button
@@ -991,7 +1089,7 @@ export function MainWindow() {
             aria-controls="settings-panel-runtime"
             onClick={() => setSettingsTab("runtime")}
           >
-            <Cpu size={14} />
+            <Cpu size={16} />
             {t("runtimeComponents")}
           </button>
           <button
@@ -1002,7 +1100,7 @@ export function MainWindow() {
             aria-controls="settings-panel-updates"
             onClick={() => setSettingsTab("updates")}
           >
-            <Sparkle size={14} />
+            <Sparkle size={16} />
             {t("updates")}
           </button>
         </div>
@@ -1044,7 +1142,7 @@ export function MainWindow() {
             >
               <section className="home-settings-section">
                 <div className="home-section-title">
-                  <FolderCog size={15} />
+                  <FolderCog size={17} />
                   {t("fileResults")}
                 </div>
                 <div className="home-segment">
@@ -1077,7 +1175,7 @@ export function MainWindow() {
 
               <section className="home-settings-section">
                 <div className="home-section-title">
-                  <ScanLine size={15} />
+                  <ScanLine size={17} />
                   {t("screenshots")}
                 </div>
                 <OutputLocation
@@ -1090,26 +1188,11 @@ export function MainWindow() {
                   onReveal={() => void api.revealOutputDirectory("screenshot")}
                   onReset={() => void resetFolder("screenshot")}
                 />
-                <div className="home-segment home-segment-after">
-                  <button
-                    className={(settings?.captureAfter ?? "card") !== "editor" ? "is-active" : ""}
-                    onClick={() => void applySettings(() => api.setCaptureAfter("card"))}
-                  >
-                    {t("captureAfterCard")}
-                  </button>
-                  <button
-                    className={settings?.captureAfter === "editor" ? "is-active" : ""}
-                    onClick={() => void applySettings(() => api.setCaptureAfter("editor"))}
-                  >
-                    {t("captureAfterEditor")}
-                  </button>
-                </div>
-                <p className="runtime-summary">{t("captureAfterBody")}</p>
               </section>
 
               <section className="home-settings-section">
                 <div className="home-section-title">
-                  <Circle size={14} />
+                  <Circle size={16} />
                   {t("recordings")}
                 </div>
                 <OutputLocation
@@ -1192,14 +1275,14 @@ export function MainWindow() {
 
               <section className="home-settings-section">
                 <div className="home-section-title">
-                  <ShieldCheck size={15} />
+                  <ShieldCheck size={17} />
                   {t("accessCheck")}
                 </div>
                 <button className="settings-wide-button" onClick={() => void runAccessCheck()}>
                   {checking ? (
-                    <LoaderCircle size={14} className="spin" />
+                    <LoaderCircle size={16} className="spin" />
                   ) : (
-                    <RefreshCw size={14} />
+                    <RefreshCw size={16} />
                   )}
                   {checking ? t("checking") : t("checkAccess")}
                 </button>
@@ -1210,7 +1293,7 @@ export function MainWindow() {
                         key={check.kind}
                         className={`home-check ${check.ok ? "is-ok" : "is-bad"}`}
                       >
-                        {check.ok ? <Check size={14} /> : <X size={14} />}
+                        {check.ok ? <Check size={15} /> : <X size={15} />}
                         <span>
                           <strong>{outputLabel(check.kind)}</strong>
                           <small>{check.ok ? t("accessOk") : check.message}</small>
@@ -1226,11 +1309,11 @@ export function MainWindow() {
                   <div className="home-section-title">{t("permissions")}</div>
                   <div className="home-permission-row">
                     <button onClick={() => void api.openScreenRecordingSettings()}>
-                      <ScanLine size={14} />
+                      <ScanLine size={16} />
                       {t("screenPermission")}
                     </button>
                     <button onClick={() => void api.openFilesPermissionSettings()}>
-                      <FolderOpen size={14} />
+                      <FolderOpen size={16} />
                       {t("filesPermission")}
                     </button>
                   </div>
@@ -1270,7 +1353,7 @@ export function MainWindow() {
               <section className="home-settings-section">
                 <div className="runtime-section-head">
                   <div className="home-section-title">
-                    <Cpu size={15} />
+                    <Cpu size={17} />
                     {t("runtimeComponents")}
                   </div>
                   <button
@@ -1278,7 +1361,7 @@ export function MainWindow() {
                     onClick={() => void refreshRuntime()}
                     disabled={runtimeLoading || runtimeInstalling !== null}
                   >
-                    <RefreshCw size={12} className={runtimeLoading ? "spin" : ""} />
+                    <RefreshCw size={13} className={runtimeLoading ? "spin" : ""} />
                     {runtimeLoading ? t("runtimeChecking") : t("runtimeRefresh")}
                   </button>
                 </div>
@@ -1308,7 +1391,7 @@ export function MainWindow() {
                 ) : null}
                 {runtimeLoading && !runtimeInfo ? (
                   <div className="runtime-loading">
-                    <LoaderCircle size={14} className="spin" />
+                    <LoaderCircle size={16} className="spin" />
                     {t("runtimeChecking")}
                   </div>
                 ) : null}
@@ -1328,7 +1411,7 @@ export function MainWindow() {
                         </div>
                         <div className="runtime-component-meta">
                           <span className="runtime-status">
-                            {component.available ? <Check size={11} /> : <X size={11} />}
+                            {component.available ? <Check size={13} /> : <X size={13} />}
                             {component.available ? t("runtimeAvailable") : t("runtimeMissing")}
                           </span>
                           {component.version ? (
@@ -1351,9 +1434,9 @@ export function MainWindow() {
                             disabled={runtimeInstalling !== null || runtimeLoading}
                           >
                             {runtimeInstalling === component.id ? (
-                              <LoaderCircle size={12} className="spin" />
+                              <LoaderCircle size={14} className="spin" />
                             ) : (
-                              <Download size={12} />
+                              <Download size={14} />
                             )}
                             {runtimeInstalling === component.id
                               ? t("runtimeInstalling")

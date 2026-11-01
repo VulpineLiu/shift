@@ -422,7 +422,6 @@ pub fn run() {
             settings::set_autostart,
             settings::check_output_access,
             settings::set_language,
-            settings::set_capture_after,
             settings::set_update_check_enabled,
             settings::set_setup_reviewed,
             settings::get_wedge_orders,

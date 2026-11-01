@@ -529,19 +529,13 @@ fn finish_capture(
     Ok(output.to_string_lossy().to_string())
 }
 
-/// Route a finished capture per the Capture-after setting. The card is allowed to
-/// fail silently: a screenshot that saved is more important than an overlay that
-/// could not be built, and the file is already on disk and copied by then.
+/// Show the result card for a finished capture. The card is allowed to fail
+/// silently: a screenshot that saved is more important than an overlay that could
+/// not be built, and the file is already on disk and copied by then. The editor is
+/// the fallback so a capture is never left with no way to act on it.
 fn hand_off(app: &AppHandle, output: &Path) {
-    match settings::load(app).capture_after {
-        settings::CaptureAfter::Editor => {
-            let _ = editor::show_editor(app, output);
-        }
-        settings::CaptureAfter::Card => {
-            if result_card::show(app, output).is_err() {
-                let _ = editor::show_editor(app, output);
-            }
-        }
+    if result_card::show(app, output).is_err() {
+        let _ = editor::show_editor(app, output);
     }
 }
 

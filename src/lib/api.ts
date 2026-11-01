@@ -141,8 +141,6 @@ export const api = {
   revealOutputDirectory: (kind: "screenshot" | "recording" | "files") =>
     invoke<void>("reveal_output_directory", { kind }),
   openFilesPermissionSettings: () => invoke<void>("open_files_permission_settings"),
-  setCaptureAfter: (after: "card" | "editor") =>
-    invoke<AppSettings>("set_capture_after", { after }),
   setUpdateCheckEnabled: (enabled: boolean) =>
     invoke<SwitchState>("set_update_check_enabled", { enabled }),
   setSetupReviewed: (reviewed: boolean) => invoke<boolean>("set_setup_reviewed", { reviewed }),

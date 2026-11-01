@@ -79,7 +79,7 @@ export function UpdatePanel({ feedUrl, autoCheck, onAutoCheckChange, system }: P
           says what was upgraded and from where. */}
       <div className="update-meta">
         <div className="update-meta-line">
-          <Monitor size={13} />
+          <Monitor size={15} />
           <span className="update-meta-label">{t("updateSystem")}</span>
           {system ? (
             <span className="update-system-host">
@@ -92,13 +92,13 @@ export function UpdatePanel({ feedUrl, autoCheck, onAutoCheckChange, system }: P
           )}
         </div>
         <div className="update-meta-line">
-          <Rss size={13} />
+          <Rss size={15} />
           <span className="update-meta-label">{t("updateFeed")}</span>
           {/* Only a status backed by a manifest may claim anything about trust: an
               errored check has no manifest to have verified. */}
           {status && status.state !== "error" ? (
             <span className={`update-trust is-${status.signed ? "signed" : "unsigned"}`}>
-              <ShieldCheck size={11} />
+              <ShieldCheck size={13} />
               {t(status.signed ? "updateSigned" : "updateUnsigned")}
             </span>
           ) : null}
@@ -108,7 +108,7 @@ export function UpdatePanel({ feedUrl, autoCheck, onAutoCheckChange, system }: P
 
       <div className="runtime-section-head">
         <div className="home-section-title">
-          <Sparkle size={15} />
+          <Sparkle size={17} />
           {t("updates")}
         </div>
         <button
@@ -116,7 +116,7 @@ export function UpdatePanel({ feedUrl, autoCheck, onAutoCheckChange, system }: P
           onClick={() => void check()}
           disabled={checking || downloading}
         >
-          <RefreshCw size={12} className={checking ? "spin" : ""} />
+          <RefreshCw size={13} className={checking ? "spin" : ""} />
           {checking ? t("updateChecking") : t("updateCheckNow")}
         </button>
       </div>
@@ -138,7 +138,7 @@ export function UpdatePanel({ feedUrl, autoCheck, onAutoCheckChange, system }: P
         {available && status ? (
           <span className="update-arrow">
             <span className="update-new">
-              <Sparkle size={11} />
+              <Sparkle size={13} />
               {status.availableVersion}
             </span>
             <small>{status.date}</small>
@@ -150,7 +150,7 @@ export function UpdatePanel({ feedUrl, autoCheck, onAutoCheckChange, system }: P
 
       {status?.fileName ? (
         <div className="update-artifact">
-          <PackageOpen size={13} />
+          <PackageOpen size={15} />
           <span className="update-artifact-name" title={status.fileName}>
             {status.fileName}
           </span>
@@ -169,7 +169,7 @@ export function UpdatePanel({ feedUrl, autoCheck, onAutoCheckChange, system }: P
 
       {status?.sha256 ? (
         <code className="update-hash" title={status.sha256}>
-          <ShieldCheck size={11} />
+          <ShieldCheck size={13} />
           SHA256 {verified ? status.sha256 : `${status.sha256.slice(0, 16)}…`}
         </code>
       ) : null}
@@ -195,7 +195,7 @@ export function UpdatePanel({ feedUrl, autoCheck, onAutoCheckChange, system }: P
             onClick={() => void download()}
             disabled={downloading}
           >
-            {downloading ? <LoaderCircle size={13} className="spin" /> : <Download size={13} />}
+            {downloading ? <LoaderCircle size={15} className="spin" /> : <Download size={15} />}
             {downloading ? t("updateDownloading") : t("updateDownload")}
           </button>
         ) : null}
@@ -205,7 +205,7 @@ export function UpdatePanel({ feedUrl, autoCheck, onAutoCheckChange, system }: P
             onClick={() => void install()}
             disabled={installing}
           >
-            {installing ? <LoaderCircle size={13} className="spin" /> : <Check size={13} />}
+            {installing ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />}
             {installing ? t("updateInstalling") : t("updateInstall")}
           </button>
         ) : null}
@@ -213,7 +213,7 @@ export function UpdatePanel({ feedUrl, autoCheck, onAutoCheckChange, system }: P
             choice that only resets what is already decided. */}
         {verified && !installing ? (
           <button className="update-action" onClick={() => void clear()}>
-            <X size={13} />
+            <X size={15} />
             {t("updateDiscard")}
           </button>
         ) : null}

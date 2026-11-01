@@ -25,16 +25,6 @@ pub struct SwitchUpdate {
     pub autostart: Option<bool>,
 }
 
-/// What happens the instant a capture is saved. The card keeps the shot out of the
-/// way but one click from Copy / Pin / Edit / Send; the editor opens it directly.
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum CaptureAfter {
-    #[default]
-    Card,
-    Editor,
-}
-
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FileOutputMode {
@@ -59,8 +49,6 @@ pub struct AppSettings {
     pub autostart: bool,
     /// UI language, "" until the user picks one. Unset follows the system.
     pub language: String,
-    /// Card or editor, chosen right after a screenshot or recording is written.
-    pub capture_after: CaptureAfter,
     /// Ask the git release branch for a newer build once a day.
     pub update_check_enabled: bool,
     /// Last startup probe as a unix day, so the daily check survives restarts.
@@ -86,7 +74,6 @@ impl Default for AppSettings {
             share_enabled: true,
             autostart: false,
             language: String::new(),
-            capture_after: CaptureAfter::default(),
             update_check_enabled: true,
             last_update_check_day: 0,
             wedge_orders: HashMap::new(),
@@ -107,7 +94,6 @@ pub struct SettingsSnapshot {
     pub share_enabled: bool,
     pub autostart: bool,
     pub language: String,
-    pub capture_after: CaptureAfter,
     pub update_check_enabled: bool,
     pub update_feed_url: String,
     pub wedge_orders: HashMap<String, Vec<String>>,
@@ -299,7 +285,6 @@ pub fn snapshot(app: &AppHandle) -> Result<SettingsSnapshot, String> {
         // Report what the OS actually has registered, not what we last wrote.
         autostart: crate::autostart::is_enabled(),
         language: settings.language.clone(),
-        capture_after: settings.capture_after,
         update_check_enabled: settings.update_check_enabled,
         update_feed_url: crate::update::manifest_url(),
         wedge_orders: settings.wedge_orders.clone(),
@@ -378,22 +363,6 @@ pub fn update_check_due(app: &AppHandle, interval: std::time::Duration) -> bool 
     let settings = load(app);
     let elapsed_days = unix_day().saturating_sub(settings.last_update_check_day);
     elapsed_days >= (interval.as_secs() / 86_400).max(1) as i64
-}
-
-#[tauri::command]
-pub async fn set_capture_after(
-    app: AppHandle,
-    after: CaptureAfter,
-) -> Result<SettingsSnapshot, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        update_settings(&app, |settings| {
-            settings.capture_after = after;
-            Ok(())
-        })?;
-        snapshot(&app)
-    })
-    .await
-    .map_err(|error| error.to_string())?
 }
 
 /// Close the guided first-run flow. The checks themselves are re-runnable from
