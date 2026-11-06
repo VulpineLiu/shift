@@ -48,3 +48,31 @@ export function hitTestDropTarget<T extends string>(
   }
   return null;
 }
+
+export type Point = { x: number; y: number };
+
+/**
+ * Where a drag ended, from the one event that is always delivered.
+ *
+ * `reported` is `dragend`'s own position. Three cases, in the order they can be told
+ * apart: a point outside the window means the file was released on another application,
+ * so nothing of ours runs; a point at the origin means the engine reported no position
+ * at all, and the last position the drag moved through stands in; anything else is the
+ * answer.
+ */
+export function releasePoint(
+  reported: Point,
+  lastSeen: Point | null,
+  viewport: { width: number; height: number },
+): Point | null {
+  if (
+    reported.x < 0 ||
+    reported.y < 0 ||
+    reported.x > viewport.width ||
+    reported.y > viewport.height
+  ) {
+    return null;
+  }
+  if (reported.x === 0 && reported.y === 0) return lastSeen ?? reported;
+  return reported;
+}

@@ -49,7 +49,7 @@ import {
 import { getInitialLang, publishLang, tLive, useI18n } from "../i18n";
 import { api } from "../lib/api";
 import { FEEDBACK } from "../lib/feedback";
-import { hitTestDropTarget, toWindowPoint } from "../lib/dropTargets";
+import { hitTestDropTarget, releasePoint, toWindowPoint } from "../lib/dropTargets";
 import {
   actionCanServe,
   OCR_IMAGE_EXTENSIONS,
@@ -70,6 +70,7 @@ import {
   timeAgo,
 } from "../lib/utils";
 import { dragOutPayload } from "../lib/dragOut";
+import { fileDragImage } from "../lib/dragImage";
 import { history } from "../lib/history";
 import type {
   AppSettings,
@@ -260,6 +261,12 @@ export function MainWindow() {
    * once by the native drop events. Only the first of the two may run an action.
    */
   const recentDrag = useRef<{ path: string; landed: boolean } | null>(null);
+  /**
+   * The last position the drag in flight moved through, in CSS pixels inside this
+   * window. Chromium reports `dragend` at the origin rather than where the pointer
+   * stopped, so this is the only aim that engine can be given.
+   */
+  const dragPointer = useRef<{ x: number; y: number } | null>(null);
   const runtimeCheckStarted = useRef(false);
 
   async function finishSetup() {
@@ -341,6 +348,7 @@ export function MainWindow() {
 
   function actionAt(position: { x: number; y: number }): DropAction | null {
     const point = localPoint(position);
+    if (point) dragPointer.current = point;
     return point ? actionAtPoint(point) : null;
   }
 
@@ -365,12 +373,15 @@ export function MainWindow() {
   /**
    * Land a dragged Recent row, at most once per gesture.
    */
-  function landRecentRow(action: DropAction | null) {
+  function landRecentRow(action: DropAction | null, token?: { path: string; landed: boolean }) {
     const drag = recentDrag.current;
     if (!drag || drag.landed) return;
+    // A timer from the gesture before this one must not land it on the row's behalf.
+    if (token && token !== drag) return;
     drag.landed = true;
     setDropAction(null);
     // The gesture is over, whether or not `dragend` arrives to say so.
+    dragPointer.current = null;
     setDragPaths(null);
     void dropFiles([drag.path], action).catch((error) => flash(tLive(messageFrom(error)), FEEDBACK.error));
   }
@@ -384,7 +395,9 @@ export function MainWindow() {
     if (!recentDrag.current) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "copy";
-    const next = actionAtPoint({ x: event.clientX, y: event.clientY });
+    const point = { x: event.clientX, y: event.clientY };
+    dragPointer.current = point;
+    const next = actionAtPoint(point);
     if (dropAction !== next) setDropAction(next);
   }
 
@@ -1018,8 +1031,18 @@ export function MainWindow() {
                       // is what tells our own drop zones the row has come back.
                       event.dataTransfer.effectAllowed = "copy";
                       recentDrag.current = { path: item.path, landed: false };
+                      dragPointer.current = null;
                       setRowDragging(true);
                       setDragPaths([item.path]);
+                      // Carry the file, not the row. The engine would otherwise photograph
+                      // the row itself - thumbnail, name, age, folder and the five hover
+                      // buttons - which reads as the list being dragged rather than one
+                      // file. The thumbnail the list already decoded is the picture.
+                      fileDragImage(
+                        event.dataTransfer,
+                        basename(item.path),
+                        event.currentTarget.querySelector("img"),
+                      );
                       // A ring left open from the last drop sits over these buttons,
                       // borderless and always on top. Windows hands a drag to whichever
                       // window is under the pointer, so that ring would claim this drop
@@ -1031,31 +1054,39 @@ export function MainWindow() {
                     }}
                     onDragEnd={(event) => {
                       const drag = recentDrag.current;
-                      // A row is dragged as a file, and WebView2's OLE drop target only
-                      // accepts `CF_HDROP`, which an in-page drag never carries. So on
-                      // Windows neither the DOM drop nor the native drop is delivered:
-                      // the gesture simply ends. `dragend` still reports where the
-                      // pointer stopped, which is enough to find the button it was aimed
-                      // at, and the `landed` flag keeps this a fallback rather than a
-                      // second execution wherever a drop did arrive.
+                      // `dragend` is the last event of the gesture on some engines and the
+                      // first on others: macOS reports the native drop *after* the button
+                      // is up, so landing here immediately would consume the gesture with
+                      // dragend's own coordinates and then throw away the real drop. Hand
+                      // it to a short timer instead - if the DOM drop or the native drop
+                      // arrives first it marks the gesture landed and this stands down.
+                      // The timer is what makes a row work on Windows, where WebView2's
+                      // OLE target accepts only `CF_HDROP`, so neither drop path is
+                      // delivered for an in-page drag and the gesture would otherwise end
+                      // with nothing at all having happened.
                       if (drag && !drag.landed) {
-                        const point = { x: event.clientX, y: event.clientY };
-                        // A row released outside the window went to Explorer or a chat
-                        // window, where nothing of ours runs. The hit-test has slack
-                        // around every button, so the edge has to be checked first.
-                        const inside =
-                          point.x >= 0 &&
-                          point.y >= 0 &&
-                          point.x <= window.innerWidth &&
-                          point.y <= window.innerHeight;
-                        landRecentRow(inside ? actionAtPoint(point) : null);
+                        const end = releasePoint(
+                          { x: event.clientX, y: event.clientY },
+                          dragPointer.current,
+                          { width: window.innerWidth, height: window.innerHeight },
+                        );
+                        const aimed = end ? actionAtPoint(end) : null;
+                        // Only an aim at a button is worth landing. When the pointer is
+                        // not over one, standing back is right either way: a real drop may
+                        // still be on its way, and a release off a button runs nothing.
+                        if (aimed) {
+                          const token = drag;
+                          window.setTimeout(() => landRecentRow(aimed, token), 260);
+                        }
                       }
                       setDropAction(null);
                       setDragging(false);
                       setRowDragging(false);
                       setDragPaths(null);
-                      // Some engines report the native drop only after the button is
-                      // already up, so the gesture stays recognised for a moment.
+                      // The gesture stays recognised a little longer than the fallback
+                      // needs: an engine that reports the drop after `dragend` must still
+                      // find it here, so it marks the gesture landed rather than reading
+                      // the same file as a fresh drop from outside the app.
                       if (!drag) return;
                       window.setTimeout(() => {
                         if (recentDrag.current === drag) recentDrag.current = null;
