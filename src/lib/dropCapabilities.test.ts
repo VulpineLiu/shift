@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { actionCanServe, convertible, kindFromPath, ocrCanRead } from "./dropCapabilities.ts";
+import {
+  actionCanServe,
+  convertible,
+  dropEffectFor,
+  kindFromPath,
+  ocrCanRead,
+} from "./dropCapabilities.ts";
 
 test("the classifier matches the backend's kind tables", () => {
   assert.equal(kindFromPath("C:\\Users\\me\\photo.HEIC"), "image");
@@ -50,4 +56,16 @@ test("a PDF converts but never reaches the OCR button", () => {
   assert.ok(actionCanServe("formats", ["/tmp/report.pdf"]));
   assert.ok(actionCanServe("tools", ["/tmp/report.pdf"]));
   assert.ok(!actionCanServe("ocr", ["/tmp/report.pdf"]));
+});
+
+test("the drag cursor refuses a button that cannot serve the files", () => {
+  assert.equal(dropEffectFor("ocr", ["/tmp/report.pdf"]), "none");
+  assert.equal(dropEffectFor("formats", ["/tmp/report.pdf"]), "copy");
+  assert.equal(dropEffectFor("tools", ["/tmp/report.pdf"]), "copy");
+  assert.equal(dropEffectFor("formats", ["/tmp/deck.key"]), "none");
+  assert.equal(dropEffectFor("ocr", ["/tmp/a.png"]), "copy");
+  // Nothing under the pointer is not a drop target either.
+  assert.equal(dropEffectFor(null, ["/tmp/report.pdf"]), "none");
+  // A payload that is not known yet is not a refusal.
+  assert.equal(dropEffectFor("ocr", null), "copy");
 });

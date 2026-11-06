@@ -1988,6 +1988,21 @@ kbd {
   transform: none;
 }
 
+/* The pointer is over a button that cannot serve this drag. The engine shows the
+   no-drop cursor because `rowDragOver` asks for `dropEffect: none`; the solid red
+   edge makes that same answer visible on the button itself. */
+.home-primary.is-drop-forbidden,
+.home-secondary.is-drop-forbidden {
+  cursor: not-allowed;
+}
+
+.home-primary-actions.has-drop-target .home-primary.is-drop-forbidden,
+.home-primary-actions.has-drop-target .home-secondary.is-drop-forbidden {
+  border-style: solid;
+  border-color: rgba(178, 64, 43, 0.48);
+  box-shadow: 0 0 0 3px rgba(178, 64, 43, 0.08);
+}
+
 .home-side {
   display: flex;
   flex-direction: column;

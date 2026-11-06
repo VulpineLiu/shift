@@ -87,5 +87,20 @@ export function actionCanServe(action: DropAction, paths: string[] | null): bool
   }
 }
 
+/**
+ * The cursor the engine should show for a button under the pointer.
+ *
+ * A spent button must say "no" before release, not only by greying out: leaving
+ * `dropEffect` at `copy` tells the operating system the drop is welcome, which is the
+ * mismatch users see as "it looks processable, but releasing does nothing". No button
+ * under the pointer is also no drop: the panel itself runs nothing.
+ */
+export function dropEffectFor(
+  action: DropAction | null,
+  paths: string[] | null,
+): "copy" | "none" {
+  return action && actionCanServe(action, paths) ? "copy" : "none";
+}
+
 /** The extensions the image picker offers when OCR is started by hand. */
 export const OCR_IMAGE_EXTENSIONS = IMAGE_EXTENSIONS;

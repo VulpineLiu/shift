@@ -52,6 +52,7 @@ import { FEEDBACK } from "../lib/feedback";
 import { hitTestDropTarget, releasePoint, toWindowPoint } from "../lib/dropTargets";
 import {
   actionCanServe,
+  dropEffectFor,
   OCR_IMAGE_EXTENSIONS,
   type DropAction,
 } from "../lib/dropCapabilities";
@@ -392,12 +393,15 @@ export function MainWindow() {
    * differs by engine, so both are listening and `landRecentRow` decides who was first.
    */
   function rowDragOver(event: DragEvent) {
-    if (!recentDrag.current) return;
+    const drag = recentDrag.current;
+    if (!drag) return;
     event.preventDefault();
-    event.dataTransfer.dropEffect = "copy";
     const point = { x: event.clientX, y: event.clientY };
     dragPointer.current = point;
     const next = actionAtPoint(point);
+    // A spent button must show the same refusal before release that it shows on
+    // release: `none` turns the operating system's cursor into a prohibition.
+    event.dataTransfer.dropEffect = dropEffectFor(next, [drag.path]);
     if (dropAction !== next) setDropAction(next);
   }
 
@@ -767,12 +771,14 @@ export function MainWindow() {
   }, [recent, historyQuery]);
 
   // One rule for all three buttons and both platforms: a button that cannot serve the
-  // files in flight shows spent, and a release on it does nothing. Being spent is the
-  // whole notice - there is no message to explain a refusal the user can already see.
+  // files in flight shows spent, and a release on it does nothing. The button under the
+  // pointer also gets a forbidden edge and the engine's no-drop cursor, so the refusal
+  // is visible before the user lets go.
   const spent = (action: DropAction) =>
     dragPaths !== null && !actionCanServe(action, dragPaths);
   // A button that cannot serve the drag is not a candidate, so it never lights up.
   const aimedAction = dropAction && actionCanServe(dropAction, dragPaths) ? dropAction : null;
+  const forbiddenAction = dropAction && spent(dropAction) ? dropAction : null;
 
   const outputLabel = (kind: WriteCheck["kind"]) =>
     kind === "screenshot" ? t("screenshots") : kind === "recording" ? t("recordings") : t("fileResults");
@@ -914,7 +920,8 @@ export function MainWindow() {
             <button
               className={`home-primary ${aimedAction === "formats" ? "is-drop-target" : ""} ${
                 spent("formats") ? "is-drop-unavailable" : ""
-              }`}
+              } ${forbiddenAction === "formats" ? "is-drop-forbidden" : ""}`}
+              aria-disabled={spent("formats") ? "true" : undefined}
               ref={(node) => {
                 dropTargets.current.formats = node;
               }}
@@ -932,7 +939,8 @@ export function MainWindow() {
             <button
               className={`home-secondary ${aimedAction === "tools" ? "is-drop-target" : ""} ${
                 spent("tools") ? "is-drop-unavailable" : ""
-              }`}
+              } ${forbiddenAction === "tools" ? "is-drop-forbidden" : ""}`}
+              aria-disabled={spent("tools") ? "true" : undefined}
               ref={(node) => {
                 dropTargets.current.tools = node;
               }}
@@ -948,11 +956,11 @@ export function MainWindow() {
             <button
               className={`home-secondary ${aimedAction === "ocr" ? "is-drop-target" : ""} ${
                 spent("ocr") ? "is-drop-unavailable" : ""
-              }`}
+              } ${forbiddenAction === "ocr" ? "is-drop-forbidden" : ""}`}
+              aria-disabled={spent("ocr") ? "true" : undefined}
               ref={(node) => {
                 dropTargets.current.ocr = node;
               }}
-              aria-disabled={spent("ocr") ? "true" : undefined}
               onClick={() => void spring("ocr", chooseOcr)}
             >
               {busy === "ocr" ? <LoaderCircle size={18} className="spin" /> : <ScanText size={18} />}
