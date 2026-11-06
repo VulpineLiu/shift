@@ -1,6 +1,6 @@
 [package]
 name = "shift"
-version = "0.1.10"
+version = "0.1.11"
 description = "A radial file utility with screenshot, recording and OCR."
 authors = ["Shift Contributors"]
 edition = "2021"
