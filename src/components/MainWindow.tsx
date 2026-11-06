@@ -52,6 +52,7 @@ import { FEEDBACK } from "../lib/feedback";
 import { hitTestDropTarget, releasePoint, toWindowPoint } from "../lib/dropTargets";
 import {
   actionCanServe,
+  dragPathsKnown,
   dropEffectFor,
   OCR_IMAGE_EXTENSIONS,
   type DropAction,
@@ -693,7 +694,8 @@ export function MainWindow() {
             setDragging(true);
             // `enter` is the first moment the carried files are known, which is
             // early enough to mark a button that cannot serve them.
-            setDragPaths(event.payload.paths);
+            const carried = event.payload.paths;
+            setDragPaths((current) => dragPathsKnown(current, carried));
             setDropAction(actionAt(event.payload.position));
             return;
           }
@@ -704,7 +706,7 @@ export function MainWindow() {
           if (event.payload.type === "leave") {
             setDragging(false);
             setDropAction(null);
-            setDragPaths(null);
+            if (!drag) setDragPaths(null);
             return;
           }
           if (event.payload.type === "drop") {
@@ -772,13 +774,19 @@ export function MainWindow() {
 
   // One rule for all three buttons and both platforms: a button that cannot serve the
   // files in flight shows spent, and a release on it does nothing. The button under the
-  // pointer also gets a forbidden edge and the engine's no-drop cursor, so the refusal
-  // is visible before the user lets go.
+  // pointer keeps its cursor, and the refusal itself is drawn on the button: a file
+  // from the file manager arrives through the native drag channel, where macOS fixes the
+  // drag operation to `copy`, so the cursor cannot carry the answer. The button must.
   const spent = (action: DropAction) =>
     dragPaths !== null && !actionCanServe(action, dragPaths);
   // A button that cannot serve the drag is not a candidate, so it never lights up.
   const aimedAction = dropAction && actionCanServe(dropAction, dragPaths) ? dropAction : null;
-  const forbiddenAction = dropAction && spent(dropAction) ? dropAction : null;
+  // The prohibition mark reads the same whichever way the file was picked up, and it
+  // stays for the length of the gesture rather than only while hovered.
+  const banMark = (action: DropAction) =>
+    spent(action) ? (
+      <span className="drop-ban" aria-hidden="true" />
+    ) : null;
 
   const outputLabel = (kind: WriteCheck["kind"]) =>
     kind === "screenshot" ? t("screenshots") : kind === "recording" ? t("recordings") : t("fileResults");
@@ -920,8 +928,8 @@ export function MainWindow() {
             <button
               className={`home-primary ${aimedAction === "formats" ? "is-drop-target" : ""} ${
                 spent("formats") ? "is-drop-unavailable" : ""
-              } ${forbiddenAction === "formats" ? "is-drop-forbidden" : ""}`}
-              aria-disabled={spent("formats") ? "true" : undefined}
+              }`}
+              disabled={spent("formats")}
               ref={(node) => {
                 dropTargets.current.formats = node;
               }}
@@ -935,12 +943,13 @@ export function MainWindow() {
                 <FileOutput size={18} />
               )}
               {t("convertFiles")}
+              {banMark("formats")}
             </button>
             <button
               className={`home-secondary ${aimedAction === "tools" ? "is-drop-target" : ""} ${
                 spent("tools") ? "is-drop-unavailable" : ""
-              } ${forbiddenAction === "tools" ? "is-drop-forbidden" : ""}`}
-              aria-disabled={spent("tools") ? "true" : undefined}
+              }`}
+              disabled={spent("tools")}
               ref={(node) => {
                 dropTargets.current.tools = node;
               }}
@@ -952,12 +961,13 @@ export function MainWindow() {
                 <Wrench size={18} />
               )}
               {t("fileTools")}
+              {banMark("tools")}
             </button>
             <button
               className={`home-secondary ${aimedAction === "ocr" ? "is-drop-target" : ""} ${
                 spent("ocr") ? "is-drop-unavailable" : ""
-              } ${forbiddenAction === "ocr" ? "is-drop-forbidden" : ""}`}
-              aria-disabled={spent("ocr") ? "true" : undefined}
+              }`}
+              disabled={spent("ocr")}
               ref={(node) => {
                 dropTargets.current.ocr = node;
               }}
@@ -965,6 +975,7 @@ export function MainWindow() {
             >
               {busy === "ocr" ? <LoaderCircle size={18} className="spin" /> : <ScanText size={18} />}
               {t("ocr")}
+              {banMark("ocr")}
             </button>
           </div>
           <p className="home-drop-hint">

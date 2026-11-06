@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   actionCanServe,
+  dragPathsKnown,
   convertible,
   dropEffectFor,
   kindFromPath,
@@ -68,4 +69,17 @@ test("the drag cursor refuses a button that cannot serve the files", () => {
   assert.equal(dropEffectFor(null, ["/tmp/report.pdf"]), "none");
   // A payload that is not known yet is not a refusal.
   assert.equal(dropEffectFor("ocr", null), "copy");
+});
+
+test("a Recent row keeps its own path when the native channel reports none", () => {
+  // macOS reports the page's own drag through the native channel too, with an empty
+  // file list: overwriting the row with `[]` spent nothing and lit all three buttons.
+  const row = ["/Users/me/files/report.pdf"];
+  assert.deepEqual(dragPathsKnown(row, []), row);
+  assert.ok(!actionCanServe("ocr", dragPathsKnown(row, [])));
+  assert.ok(actionCanServe("formats", dragPathsKnown(row, [])));
+  // A file from the file manager is the authority, in whichever order it arrives.
+  assert.deepEqual(dragPathsKnown(row, ["/tmp/photo.png"]), ["/tmp/photo.png"]);
+  // Nothing known and nothing reported stays unknown, which spends nothing.
+  assert.equal(dragPathsKnown(null, []), null);
 });

@@ -1974,33 +1974,73 @@ kbd {
   background: #fff1e7;
 }
 
-/* The drag carries a file this button cannot serve: spent, so it is read as a
-   candidate no more than a control that is switched off elsewhere in the app. */
+/* The drag carries a file this button cannot serve, so the button is switched off for
+   the length of the gesture and the prohibition sign is drawn over it. The answer has to
+   live on the button rather than in the cursor: a file from the file manager arrives
+   through the native drag channel, where macOS fixes the drag operation to `copy`, and
+   only the button says the same thing on both paths and both platforms.
+   Muted through its own colours rather than `opacity`, because a dimmed button would
+   dim the sign sitting on it, and the sign is the part that has to read. */
 .home-primary.is-drop-unavailable,
 .home-secondary.is-drop-unavailable {
-  opacity: var(--dimmed);
-  cursor: default;
+  position: relative;
+  border: 1px solid rgba(101, 64, 43, 0.14);
+  color: #b5a399;
+  background: rgba(255, 255, 255, 0.44);
+  box-shadow: none;
   transform: none;
+  cursor: not-allowed;
+  /* The aim is measured by coordinates, not by which element answers the event, so a
+     switched-off button must stay out of the way: taking the hit area would stop the
+     drag events on it and leave the gesture pointing at the last button that answered.
+     It also means no hover feedback is even possible. */
+  pointer-events: none;
 }
 
+/* A disabled control takes no hover feedback, and the sign makes that final: nothing
+   may make a spent button look reachable while the file is still in the air. */
 .home-primary.is-drop-unavailable:hover,
 .home-secondary.is-drop-unavailable:hover {
+  border: 1px solid rgba(101, 64, 43, 0.14);
+  color: #b5a399;
+  background: rgba(255, 255, 255, 0.44);
   transform: none;
+  box-shadow: none;
 }
 
-/* The pointer is over a button that cannot serve this drag. The engine shows the
-   no-drop cursor because `rowDragOver` asks for `dropEffect: none`; the solid red
-   edge makes that same answer visible on the button itself. */
-.home-primary.is-drop-forbidden,
-.home-secondary.is-drop-forbidden {
-  cursor: not-allowed;
+/* A candidate button is dashed while a file is in the air; a spent one keeps a plain
+   edge so the two states cannot be confused. */
+.home-primary-actions.has-drop-target .home-primary.is-drop-unavailable,
+.home-primary-actions.has-drop-target .home-secondary.is-drop-unavailable {
+  border: 1px solid rgba(101, 64, 43, 0.14);
 }
 
-.home-primary-actions.has-drop-target .home-primary.is-drop-forbidden,
-.home-primary-actions.has-drop-target .home-secondary.is-drop-forbidden {
-  border-style: solid;
-  border-color: rgba(178, 64, 43, 0.48);
-  box-shadow: 0 0 0 3px rgba(178, 64, 43, 0.08);
+/* The prohibition sign, drawn over the button's own label rather than beside it, and
+   belonging to no hit area of its own. Circle and bar are drawn here instead of through
+   an icon so the sign keeps the button's corner radius and stays crisp at any scale. */
+.drop-ban {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 34px;
+  height: 34px;
+  border: 2.5px solid #c33a22;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  opacity: 1;
+  pointer-events: none;
+}
+
+.drop-ban::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 26px;
+  height: 2.5px;
+  border-radius: 2px;
+  background: #c33a22;
+  transform: translate(-50%, -50%) rotate(-45deg);
 }
 
 .home-side {

@@ -102,5 +102,20 @@ export function dropEffectFor(
   return action && actionCanServe(action, paths) ? "copy" : "none";
 }
 
+/**
+ * What the drag in flight carries, kept across the two channels that report it.
+ *
+ * A Recent row registers its own path at `dragstart`, and the native channel can
+ * report the same gesture with no file names at all: a drag the page started carries a
+ * URI list, not the file list the native event reads. An empty report therefore means
+ * "nothing new", not "nothing carried" — writing `[]` over the row's path makes every
+ * button a candidate again, which is the mismatch of a processable cursor that hands
+ * back no action. Nothing known and nothing reported stays unknown, the one case where
+ * a button must not be spent.
+ */
+export function dragPathsKnown(known: string[] | null, reported: string[]): string[] | null {
+  return reported.length > 0 ? reported : known;
+}
+
 /** The extensions the image picker offers when OCR is started by hand. */
 export const OCR_IMAGE_EXTENSIONS = IMAGE_EXTENSIONS;
