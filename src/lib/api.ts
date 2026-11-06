@@ -81,6 +81,8 @@ export const api = {
   inspectFiles: (paths: string[]) => invoke<FileInfo[]>("inspect_files", { paths }),
   performFileAction,
   revealFile: (path: string) => invoke<void>("reveal_file", { path }),
+  /** Put an idle radial ring away so it cannot cover or claim the next drop. */
+  standDownRadial: () => invoke<void>("stand_down_radial"),
   openFile: (path: string) => invoke<void>("open_file", { path }),
   readTextFile: (path: string) => invoke<string>("read_text_file", { path }),
   readImageData: (path: string) => invoke<string>("read_image_data", { path }),
@@ -156,6 +158,6 @@ export const api = {
   onUpdateStatus: (handler: (status: UpdateStatus | null) => void) =>
     listen<UpdateStatus | null>("update://status", (event) => handler(event.payload)),
   getRuntimeInfo: () => invoke<RuntimeInfo>("machine_info"),
-  installRuntimeComponent: (componentId: string) =>
-    invoke<string>("install_runtime_component", { componentId }),
+  installRuntimeComponents: (componentIds: string[]) =>
+    invoke<void>("install_runtime_components", { componentIds }),
 };

@@ -1252,6 +1252,8 @@ fn receive_file(app: &AppHandle, mut stream: TcpStream) -> Result<(), String> {
     )?;
     let name = safe_name(&header.file_name).unwrap_or_else(|| "file".into());
     let path = target.to_string_lossy().to_string();
+    // Read the batch fields before the event below moves out of `header`.
+    let reveal = reveals_on_landing(&header);
     emit_transfer(
         app,
         TransferEvent {
@@ -1270,7 +1272,20 @@ fn receive_file(app: &AppHandle, mut stream: TcpStream) -> Result<(), String> {
         "app://file-result",
         serde_json::json!({ "outputs": [path], "message": name }),
     );
+    // A landed file follows the same rule as a finished conversion: the
+    // "show results in Finder" switch decides whether Finder comes forward.
+    if reveal && crate::settings::auto_reveal(app) {
+        let _ = crate::files::reveal_path(Path::new(&target));
+    }
     Ok(())
+}
+
+/// Whether a file that just landed should bring the file manager forward. A batch
+/// answers once, when its last file arrives, the way a batch conversion reveals one
+/// output instead of one per file. The `saturating_add` and the `>=` keep a legacy
+/// peer's header - which sends no batch fields, so both read 0 - still revealing.
+fn reveals_on_landing(header: &TransferHeader) -> bool {
+    header.batch_index.saturating_add(1) >= header.batch_total
 }
 
 fn emit_transfer(app: &AppHandle, event: TransferEvent) {
@@ -1637,6 +1652,37 @@ mod tests {
     #[test]
     fn magic_is_four_bytes() {
         assert_eq!(MAGIC.len(), 4);
+    }
+
+    /// A landed file reveals once per batch, never once per file, and a peer that
+    /// sends no batch fields still reveals.
+    #[test]
+    fn only_the_last_file_of_a_batch_reveals() {
+        let single = TransferHeader {
+            batch_index: 0,
+            batch_total: 1,
+            ..Default::default()
+        };
+        assert!(reveals_on_landing(&single));
+        let first = TransferHeader {
+            batch_index: 0,
+            batch_total: 3,
+            ..Default::default()
+        };
+        let middle = TransferHeader {
+            batch_index: 1,
+            batch_total: 3,
+            ..Default::default()
+        };
+        let last = TransferHeader {
+            batch_index: 2,
+            batch_total: 3,
+            ..Default::default()
+        };
+        assert!(!reveals_on_landing(&first));
+        assert!(!reveals_on_landing(&middle));
+        assert!(reveals_on_landing(&last));
+        assert!(reveals_on_landing(&TransferHeader::default()));
     }
 
     #[test]

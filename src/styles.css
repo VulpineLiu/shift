@@ -2670,6 +2670,17 @@ kbd {
   gap: 5px;
 }
 
+.runtime-head-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+.runtime-install-all {
+  margin-top: 0;
+}
+
 .runtime-refresh:disabled {
   cursor: default;
   opacity: var(--dimmed);

@@ -185,6 +185,8 @@ const messages: Record<Lang, Record<string, string>> = {
     runtimeInstall: "Install",
     runtimeInstalling: "Installing…",
     runtimeInstallComplete: "Installed {name}.",
+    runtimeInstallAll: "Install {count} components",
+    runtimeInstallManyComplete: "Installed {count} components.",
     runtimeInstallNeedsHomebrew:
       "Homebrew is required to install Pandoc and FFmpeg. Install Homebrew, then try again.",
     runtimeInstallNeedsWinget:
@@ -435,6 +437,8 @@ const messages: Record<Lang, Record<string, string>> = {
     runtimeInstall: "安装",
     runtimeInstalling: "安装中…",
     runtimeInstallComplete: "已安装 {name}。",
+    runtimeInstallAll: "一键安装 {count} 个组件",
+    runtimeInstallManyComplete: "已安装 {count} 个组件。",
     runtimeInstallNeedsHomebrew: "自动安装需要 Homebrew。请先安装 Homebrew，然后重试。",
     runtimeInstallNeedsWinget:
       "Windows 自动安装需要“应用安装程序”（WinGet）。安装或更新后请重试。",

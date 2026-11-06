@@ -36,7 +36,6 @@ pub struct RuntimeInfo {
 
 #[derive(Debug, Clone, Copy)]
 struct InstallTarget {
-    name: &'static str,
     package_id: &'static str,
     executable: &'static str,
 }
@@ -45,12 +44,10 @@ struct InstallTarget {
 fn macos_install_target(id: &str) -> Option<InstallTarget> {
     match id {
         "pandoc" => Some(InstallTarget {
-            name: "Pandoc",
             package_id: "pandoc",
             executable: "pandoc",
         }),
         "media" => Some(InstallTarget {
-            name: "FFmpeg",
             package_id: "ffmpeg",
             executable: "ffmpeg",
         }),
@@ -62,33 +59,27 @@ fn macos_install_target(id: &str) -> Option<InstallTarget> {
 fn windows_install_target(id: &str) -> Option<InstallTarget> {
     match id {
         "pandoc" => Some(InstallTarget {
-            name: "Pandoc",
             package_id: "JohnMacFarlane.Pandoc",
             executable: "pandoc",
         }),
         "media" => Some(InstallTarget {
-            name: "FFmpeg",
             package_id: "Gyan.FFmpeg",
             executable: "ffmpeg",
         }),
         "pdf-render" => Some(InstallTarget {
-            name: "Poppler",
             package_id: "oschwartz10612.Poppler",
             executable: "pdftoppm",
         }),
         // PDF-to-Word uses the same page renderer as PDF-to-image on Windows.
         "pdf-to-word" => Some(InstallTarget {
-            name: "Poppler",
             package_id: "oschwartz10612.Poppler",
             executable: "pdftoppm",
         }),
         "image-backend" => Some(InstallTarget {
-            name: "ImageMagick",
             package_id: "ImageMagick.ImageMagick",
             executable: "magick",
         }),
         "pdf-engine" => Some(InstallTarget {
-            name: "Typst PDF engine",
             package_id: "Typst.Typst",
             executable: "typst",
         }),
@@ -415,15 +406,33 @@ pub async fn machine_info() -> Result<RuntimeInfo, String> {
 }
 
 #[tauri::command]
-pub async fn install_runtime_component(component_id: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || install_runtime_component_sync(&component_id))
+pub async fn install_runtime_components(component_ids: Vec<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || install_runtime_components_sync(&component_ids))
         .await
-        .map_err(|error| format!("Could not install runtime component: {error}"))?
+        .map_err(|error| format!("Could not install runtime components: {error}"))?
 }
 
-fn install_runtime_component_sync(component_id: &str) -> Result<String, String> {
-    let target =
-        install_target(component_id).ok_or_else(|| "unsupported-runtime-component".to_string())?;
+/// Install a group of components as one request. The package managers hold one lock
+/// per tool, so the batch runs one install after another instead of racing itself,
+/// and a package that serves several rows (Poppler answers both PDF rows on Windows)
+/// is installed once. The first failure stops the batch: it is nearly always the
+/// package manager itself, so repeating the same failure per row would only add waits.
+/// Callers refresh afterwards, which is what reports the rows that did land.
+fn install_runtime_components_sync(component_ids: &[String]) -> Result<(), String> {
+    let mut installed: Vec<&'static str> = Vec::new();
+    for component_id in component_ids {
+        let target = install_target(component_id)
+            .ok_or_else(|| "unsupported-runtime-component".to_string())?;
+        if installed.contains(&target.package_id) {
+            continue;
+        }
+        install_target_package(target)?;
+        installed.push(target.package_id);
+    }
+    Ok(())
+}
+
+fn install_target_package(target: InstallTarget) -> Result<(), String> {
     let timeout = Duration::from_secs(15 * 60);
 
     #[cfg(target_os = "macos")]
@@ -438,7 +447,7 @@ fn install_runtime_component_sync(component_id: &str) -> Result<String, String> 
         if files::resolve_tool(target.executable).is_none() {
             return Err("homebrew-install-missing-binary".to_string());
         }
-        Ok(format!("{} was installed.", target.name))
+        Ok(())
     }
 
     #[cfg(target_os = "windows")]
@@ -464,7 +473,7 @@ fn install_runtime_component_sync(component_id: &str) -> Result<String, String> 
         if files::resolve_tool(target.executable).is_none() {
             return Err("winget-install-missing-binary".to_string());
         }
-        Ok(format!("{} was installed.", target.name))
+        Ok(())
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]

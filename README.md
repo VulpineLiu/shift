@@ -72,7 +72,7 @@ Shift lives in the menu bar (macOS) and the notification area (Windows), and it 
 
 **Use a tool (`Option + Shift`, or `Alt + Shift` on Windows).** Same gesture, and the wedges become tools for that file type instead of formats. While the ring is open, keep `Shift` held and press or release `Option`/`Alt` to flip between the format ring and the tool ring.
 
-**Prefer not to drag?** In the main window, **Convert files** and **File tools** open a picker and then show the same ring for what you chose; **OCR** picks an image and reads it. Dropping a file is **aimed**: the three buttons are the only drop targets, and the button you release on is the action it runs - **Convert files** opens the format ring, **File tools** the tool ring, **OCR** reads the image. All three light up as candidates while a drag is in flight, and only they react: the panel around them stays still. Release anywhere else and nothing happens at all. **OCR** greyed out means the file you are dragging is not one it can read: it refuses such a drop quietly rather than handing it to another ring, and it never answers with a message you have to dismiss.
+**Prefer not to drag?** In the main window, **Convert files** and **File tools** open a picker and then show the same ring for what you chose; **OCR** picks an image and reads it. Dropping a file is **aimed**: the three buttons are the only drop targets, and the button you release on is the action it runs - **Convert files** opens the format ring, **File tools** the tool ring, **OCR** reads the image. All three light up as candidates while a drag is in flight, and only they react: the panel around them stays still. Release anywhere else and nothing happens at all. A button that cannot serve the file you are dragging goes grey for the length of the gesture - **OCR** for anything that is not an image, **Convert files** for a format with nothing to convert it into - and a grey button is the whole refusal: the drop does nothing, silently, instead of opening an empty ring or handing the file to another ring. **File tools** never greys out, because its ring ends in Open, Reveal and Send. The same rule decides a drop in every case, whichever platform you are on and whether the file came from the file manager or from the Recent list.
 
 **Several files at once.** Multi-select with `⌘`/`Ctrl`-click, then drag. Every file is processed. With 2+ images or 2+ PDFs selected, a **Merge** wedge appears that combines them into a single PDF.
 
@@ -235,7 +235,7 @@ Tesseract.js with the LSTM core, running as WASM inside the app. `eng` and `chi_
 
 Shift keeps a live list of the other Shift copies on your network and uses it for an AirDrop-style transfer. Hover any row in **Recent** and press the send button, or open a file's **Tools** ring and release over **Send** — either way a picker opens with one card per device, and clicking a card starts the transfer. The Tools ring offers Send for every file type, and selecting several files sends them as one batch.
 
-Nothing lands without consent: the receiving machine shows a small card naming the sender and the file, with **Accept** and **Decline** and a countdown. Declining, closing the card, or letting it expire stops the transfer before a single file byte moves. An accepted batch is asked once, then the remaining files of that batch follow on their own. Accepted files are written to Shift's output folder, appear in that machine's Recent list, and a note names the sender. Names that already exist get ` 2`, ` 3` appended, and a partial transfer never leaves a half-written file behind.
+Nothing lands without consent: the receiving machine shows a small card naming the sender and the file, with **Accept** and **Decline** and a countdown. Declining, closing the card, or letting it expire stops the transfer before a single file byte moves. An accepted batch is asked once, then the remaining files of that batch follow on their own. Accepted files are written to Shift's output folder, appear in that machine's Recent list, and a note names the sender. Whether Finder (or Explorer) also comes forward is decided by the same **Show results in Finder** switch that governs finished conversions, and a batch reveals once rather than once per file. Names that already exist get ` 2`, ` 3` appended, and a partial transfer never leaves a half-written file behind.
 
 How it finds peers, with no server and no configuration:
 
@@ -320,7 +320,11 @@ their versions and paths, and what each one unlocks on this platform. A row that
 as missing also says how to fix it: anything installable carries an **Install** button
 (Pandoc and FFmpeg on macOS through Homebrew; Pandoc, FFmpeg, Poppler, ImageMagick and
 Typst on Windows through WinGet), and a row with no button is either built in or simply
-not used on that platform. Tools are also found on `PATH` and their
+not used on that platform. When more than one row is missing, the panel header adds
+**Install all**, which sends the missing rows as one request: the installs run one after
+another because the package managers hold a single lock, and a package that answers two
+rows — Poppler, which serves both PDF rows on Windows — is installed once. Tools are also
+found on `PATH` and their
 standard install locations at call time, so a missing dependency degrades one
 wedge rather than the app.
 

@@ -501,6 +501,28 @@ pub fn hide(app: &AppHandle) {
     }
 }
 
+/// Whether the ring belongs to a Shift-drag gesture in flight, as opposed to waiting on
+/// the pointer for a wedge to be clicked. The poller writes this before it shows the
+/// ring, so it is the answer that is already true when a gesture the panel owns begins.
+fn ring_is_dragging(app: &AppHandle) -> bool {
+    app.try_state::<AppState>()
+        .and_then(|state| state.radial_dragging.lock().ok().map(|value| *value))
+        .unwrap_or(false)
+}
+
+/// Put an idle ring away because a gesture the panel owns is beginning. A ring waiting
+/// for a click is only ever in the way: it covers the buttons a row is about to be
+/// dropped on, and it is borderless and always on top, so on Windows it also sits over
+/// whatever the pointer is aimed at. A ring in the middle of a Shift-drag belongs to
+/// that gesture, so it stays - the release that ends the gesture decides its fate.
+#[tauri::command]
+pub fn stand_down_radial(app: AppHandle) -> Result<(), String> {
+    if !ring_is_dragging(&app) {
+        hide(&app);
+    }
+    Ok(())
+}
+
 /// The ring's own commands decode image previews, so they run off the main thread
 /// and the ring never waits on a batch of large photos.
 #[tauri::command]

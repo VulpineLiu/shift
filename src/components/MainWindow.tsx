@@ -50,6 +50,11 @@ import { getInitialLang, publishLang, tLive, useI18n } from "../i18n";
 import { api } from "../lib/api";
 import { FEEDBACK } from "../lib/feedback";
 import { hitTestDropTarget, toWindowPoint } from "../lib/dropTargets";
+import {
+  actionCanServe,
+  OCR_IMAGE_EXTENSIONS,
+  type DropAction,
+} from "../lib/dropCapabilities";
 import { SetupPanel } from "./SetupPanel";
 import { SharePanel } from "./SharePanel";
 import { UpdatePanel } from "./UpdatePanel";
@@ -109,30 +114,12 @@ const DROP_ICONS = [
 
 type OutputKind = "files" | "screenshot" | "recording";
 
-/** The three primary buttons double as drop targets: files dropped on a button run that action. */
-type DropAction = "formats" | "tools" | "ocr";
-
-const OCR_EXTENSIONS = [
-  "png",
-  "jpg",
-  "jpeg",
-  "webp",
-  "tiff",
-  "tif",
-  "bmp",
-  "gif",
-  "heic",
-  "avif",
-];
+/* The three primary buttons double as drop targets: files dropped on a button run that
+   action. Which button a drag may land on is decided by `lib/dropCapabilities`. */
 
 const ARC_STEP_DEG = 13;
 const ARC_RADIUS = 140;
 const ARC_LIFT = 32;
-
-/** Whether every file a drag carries is one the OCR button can read. */
-function ocrCanRead(paths: string[]) {
-  return paths.every((path) => OCR_EXTENSIONS.includes(extensionOf(path)));
-}
 
 // WKWebView renders HEIC/AVIF natively; the icon fallback covers any decode failure.
 const THUMB_EXTENSIONS = [
@@ -245,7 +232,7 @@ export function MainWindow() {
   const [checking, setChecking] = useState(false);
   const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo | null>(null);
   const [runtimeLoading, setRuntimeLoading] = useState(false);
-  const [runtimeInstalling, setRuntimeInstalling] = useState<string | null>(null);
+  const [runtimeInstalling, setRuntimeInstalling] = useState<string[]>([]);
   const [runtimeError, setRuntimeError] = useState<string | null>(null);
   const [runtimeInstallHelp, setRuntimeInstallHelp] = useState<
     "homebrew" | "winget" | null
@@ -317,7 +304,7 @@ export function MainWindow() {
       filters: [
         {
           name: "Images",
-          extensions: OCR_EXTENSIONS,
+          extensions: OCR_IMAGE_EXTENSIONS,
         },
       ],
     });
@@ -331,7 +318,7 @@ export function MainWindow() {
   async function runOcrOn(paths: string[]) {
     // The button already showed it could not take this file, so a release on it
     // stays silent: no action, no message, nothing to acknowledge.
-    if (!ocrCanRead(paths)) return;
+    if (!actionCanServe("ocr", paths)) return;
     await api.openInEditor(paths[0]);
     window.setTimeout(() => {
       void emitTo("editor", "editor://run-ocr", {});
@@ -368,6 +355,9 @@ export function MainWindow() {
   function dropFiles(paths: string[], action: DropAction | null) {
     if (paths.length === 0) return Promise.resolve();
     if (!action) return Promise.resolve();
+    // The same rule the button's appearance already applied: a button that cannot
+    // serve this file runs nothing, rather than opening a wheel with nothing in it.
+    if (!actionCanServe(action, paths)) return Promise.resolve();
     if (action === "ocr") return runOcrOn(paths);
     return api.showFilesInRadial(paths, action).then(() => undefined);
   }
@@ -541,19 +531,26 @@ export function MainWindow() {
     return t(message);
   }
 
-  async function installRuntimeComponent(component: RuntimeComponent) {
-    if (runtimeInstalling) return;
-    setRuntimeInstalling(component.id);
+  async function installRuntimeComponents(components: RuntimeComponent[]) {
+    if (runtimeInstalling.length > 0 || components.length === 0) return;
+    setRuntimeInstalling(components.map((component) => component.id));
     setRuntimeError(null);
     setRuntimeInstallHelp(null);
     try {
-      await api.installRuntimeComponent(component.id);
-      await refreshRuntime();
-      flash(t("runtimeInstallComplete", { name: component.name }));
+      await api.installRuntimeComponents(components.map((component) => component.id));
+      flash(
+        components.length === 1
+          ? t("runtimeInstallComplete", { name: components[0].name })
+          : t("runtimeInstallManyComplete", { count: components.length }),
+        FEEDBACK.done,
+      );
     } catch (error) {
       setRuntimeError(describeRuntimeInstallError(error));
     } finally {
-      setRuntimeInstalling(null);
+      setRuntimeInstalling([]);
+      // A batch can stop at its first failure with the earlier installs already
+      // on disk, so the panel re-reads either way rather than trusting the reply.
+      await refreshRuntime();
     }
   }
 
@@ -756,11 +753,13 @@ export function MainWindow() {
     return recent.filter((item) => basename(item.path).toLowerCase().includes(needle));
   }, [recent, historyQuery]);
 
-  // A drag the OCR button cannot serve shows it spent while the gesture is in
-  // flight, which is the whole notice: releasing on it then does nothing at all.
-  const ocrUnavailable = dragPaths !== null && !ocrCanRead(dragPaths);
+  // One rule for all three buttons and both platforms: a button that cannot serve the
+  // files in flight shows spent, and a release on it does nothing. Being spent is the
+  // whole notice - there is no message to explain a refusal the user can already see.
+  const spent = (action: DropAction) =>
+    dragPaths !== null && !actionCanServe(action, dragPaths);
   // A button that cannot serve the drag is not a candidate, so it never lights up.
-  const aimedAction = ocrUnavailable && dropAction === "ocr" ? null : dropAction;
+  const aimedAction = dropAction && actionCanServe(dropAction, dragPaths) ? dropAction : null;
 
   const outputLabel = (kind: WriteCheck["kind"]) =>
     kind === "screenshot" ? t("screenshots") : kind === "recording" ? t("recordings") : t("fileResults");
@@ -779,6 +778,12 @@ export function MainWindow() {
           ),
         }))
         .filter((group) => group.components.length > 0)
+    : [];
+  // What the panel can fix by itself, in the order the rows appear. A shared package
+  // (Poppler answers both PDF rows on Windows) is listed twice here; the backend
+  // installs it once.
+  const runtimeInstallable = runtimeInfo
+    ? runtimeInfo.components.filter((component) => !component.available && component.installable)
     : [];
 
   return (
@@ -894,7 +899,9 @@ export function MainWindow() {
             }`}
           >
             <button
-              className={`home-primary ${aimedAction === "formats" ? "is-drop-target" : ""}`}
+              className={`home-primary ${aimedAction === "formats" ? "is-drop-target" : ""} ${
+                spent("formats") ? "is-drop-unavailable" : ""
+              }`}
               ref={(node) => {
                 dropTargets.current.formats = node;
               }}
@@ -910,7 +917,9 @@ export function MainWindow() {
               {t("convertFiles")}
             </button>
             <button
-              className={`home-secondary ${aimedAction === "tools" ? "is-drop-target" : ""}`}
+              className={`home-secondary ${aimedAction === "tools" ? "is-drop-target" : ""} ${
+                spent("tools") ? "is-drop-unavailable" : ""
+              }`}
               ref={(node) => {
                 dropTargets.current.tools = node;
               }}
@@ -925,12 +934,12 @@ export function MainWindow() {
             </button>
             <button
               className={`home-secondary ${aimedAction === "ocr" ? "is-drop-target" : ""} ${
-                ocrUnavailable ? "is-drop-unavailable" : ""
+                spent("ocr") ? "is-drop-unavailable" : ""
               }`}
               ref={(node) => {
                 dropTargets.current.ocr = node;
               }}
-              aria-disabled={ocrUnavailable ? "true" : undefined}
+              aria-disabled={spent("ocr") ? "true" : undefined}
               onClick={() => void spring("ocr", chooseOcr)}
             >
               {busy === "ocr" ? <LoaderCircle size={18} className="spin" /> : <ScanText size={18} />}
@@ -1011,18 +1020,42 @@ export function MainWindow() {
                       recentDrag.current = { path: item.path, landed: false };
                       setRowDragging(true);
                       setDragPaths([item.path]);
+                      // A ring left open from the last drop sits over these buttons,
+                      // borderless and always on top. Windows hands a drag to whichever
+                      // window is under the pointer, so that ring would claim this drop
+                      // and the button underneath would never see it.
+                      if (isTauri()) void api.standDownRadial().catch(() => undefined);
                       for (const [type, value] of Object.entries(dragOutPayload(item.path))) {
                         event.dataTransfer.setData(type, value);
                       }
                     }}
-                    onDragEnd={() => {
+                    onDragEnd={(event) => {
+                      const drag = recentDrag.current;
+                      // A row is dragged as a file, and WebView2's OLE drop target only
+                      // accepts `CF_HDROP`, which an in-page drag never carries. So on
+                      // Windows neither the DOM drop nor the native drop is delivered:
+                      // the gesture simply ends. `dragend` still reports where the
+                      // pointer stopped, which is enough to find the button it was aimed
+                      // at, and the `landed` flag keeps this a fallback rather than a
+                      // second execution wherever a drop did arrive.
+                      if (drag && !drag.landed) {
+                        const point = { x: event.clientX, y: event.clientY };
+                        // A row released outside the window went to Explorer or a chat
+                        // window, where nothing of ours runs. The hit-test has slack
+                        // around every button, so the edge has to be checked first.
+                        const inside =
+                          point.x >= 0 &&
+                          point.y >= 0 &&
+                          point.x <= window.innerWidth &&
+                          point.y <= window.innerHeight;
+                        landRecentRow(inside ? actionAtPoint(point) : null);
+                      }
                       setDropAction(null);
                       setDragging(false);
                       setRowDragging(false);
                       setDragPaths(null);
                       // Some engines report the native drop only after the button is
                       // already up, so the gesture stays recognised for a moment.
-                      const drag = recentDrag.current;
                       if (!drag) return;
                       window.setTimeout(() => {
                         if (recentDrag.current === drag) recentDrag.current = null;
@@ -1391,14 +1424,32 @@ export function MainWindow() {
                     <Cpu size={17} />
                     {t("runtimeComponents")}
                   </div>
-                  <button
-                    className="settings-link runtime-refresh"
-                    onClick={() => void refreshRuntime()}
-                    disabled={runtimeLoading || runtimeInstalling !== null}
-                  >
-                    <RefreshCw size={13} className={runtimeLoading ? "spin" : ""} />
-                    {runtimeLoading ? t("runtimeChecking") : t("runtimeRefresh")}
-                  </button>
+                  <div className="runtime-head-actions">
+                    {runtimeInstallable.length > 1 ? (
+                      <button
+                        className="runtime-install runtime-install-all"
+                        onClick={() => void installRuntimeComponents(runtimeInstallable)}
+                        disabled={runtimeLoading || runtimeInstalling.length > 0}
+                      >
+                        {runtimeInstalling.length > 0 ? (
+                          <LoaderCircle size={14} className="spin" />
+                        ) : (
+                          <Download size={14} />
+                        )}
+                        {runtimeInstalling.length > 0
+                          ? t("runtimeInstalling")
+                          : t("runtimeInstallAll", { count: runtimeInstallable.length })}
+                      </button>
+                    ) : null}
+                    <button
+                      className="settings-link runtime-refresh"
+                      onClick={() => void refreshRuntime()}
+                      disabled={runtimeLoading || runtimeInstalling.length > 0}
+                    >
+                      <RefreshCw size={13} className={runtimeLoading ? "spin" : ""} />
+                      {runtimeLoading ? t("runtimeChecking") : t("runtimeRefresh")}
+                    </button>
+                  </div>
                 </div>
                 <p className="runtime-summary">{t("runtimeSummary")}</p>
                 {runtimeError ? (
@@ -1465,15 +1516,15 @@ export function MainWindow() {
                         {!component.available && component.installable ? (
                           <button
                             className="runtime-install"
-                            onClick={() => void installRuntimeComponent(component)}
-                            disabled={runtimeInstalling !== null || runtimeLoading}
+                            onClick={() => void installRuntimeComponents([component])}
+                            disabled={runtimeLoading || runtimeInstalling.length > 0}
                           >
-                            {runtimeInstalling === component.id ? (
+                            {runtimeInstalling.includes(component.id) ? (
                               <LoaderCircle size={14} className="spin" />
                             ) : (
                               <Download size={14} />
                             )}
-                            {runtimeInstalling === component.id
+                            {runtimeInstalling.includes(component.id)
                               ? t("runtimeInstalling")
                               : t("runtimeInstall")}
                           </button>
