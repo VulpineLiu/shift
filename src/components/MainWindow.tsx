@@ -255,6 +255,13 @@ export function MainWindow() {
    * on `enter`, a Recent row on `dragstart`.
    */
   const [dragPaths, setDragPaths] = useState<string[] | null>(null);
+  /**
+   * Counts the drags this window has seen, so the cursor's verdict is handed to the
+   * native layer once per gesture as well. The native side opens every session permissive,
+   * which means the report it is given has to come after that - and only the arrival of a
+   * drag says when that is.
+   */
+  const [dragSession, setDragSession] = useState(0);
   const [hotkeys, setHotkeys] = useState<HotkeyStatus | null>(null);
   const dropTargets = useRef<Partial<Record<DropAction, HTMLElement | null>>>({});
   /**
@@ -702,6 +709,7 @@ export function MainWindow() {
           const drag = recentDrag.current;
           if (event.payload.type === "enter") {
             setDragging(true);
+            setDragSession((value) => value + 1);
             // `enter` is the first moment the carried files are known, which is
             // early enough to mark a button that cannot serve them.
             const carried = event.payload.paths;
@@ -735,6 +743,13 @@ export function MainWindow() {
           }
         })
         .then((unlisten) => unlisteners.push(unlisten));
+      // A refused drag ends without a drop and without a leave: the release is the only
+      // sign it is over, and the native layer is the only thing that sees it.
+      void listen("drop://cancelled", () => {
+        setDragging(false);
+        setDropAction(null);
+        setDragPaths(null);
+      }).then((unlisten) => unlisteners.push(unlisten));
       void listen<string>("app://error", (event) => flash(tLive(event.payload), FEEDBACK.error)).then((unlisten) =>
         unlisteners.push(unlisten),
       );
@@ -783,20 +798,27 @@ export function MainWindow() {
   }, [recent, historyQuery]);
 
   // One rule for all three buttons and both platforms: a button that cannot serve the
-  // files in flight shows spent, and a release on it does nothing. The button under the
-  // pointer keeps its cursor, and the refusal itself is drawn on the button: a file
-  // from the file manager arrives through the native drag channel, where macOS fixes the
-  // drag operation to `copy`, so the cursor cannot carry the answer. The button must.
+  // files in flight is switched off for the length of the gesture, and a release on it
+  // does nothing. The cursor says the same thing, because a refusal that only arrives
+  // after the file is let go reads as a dropped action: the button that can serve the
+  // drag keeps the copy badge AppKit paints for a willing destination, and the one that
+  // cannot takes the prohibition sign instead.
   const spent = (action: DropAction) =>
     dragPaths !== null && !actionCanServe(action, dragPaths);
   // A button that cannot serve the drag is not a candidate, so it never lights up.
   const aimedAction = dropAction && actionCanServe(dropAction, dragPaths) ? dropAction : null;
-  // The prohibition mark reads the same whichever way the file was picked up, and it
-  // stays for the length of the gesture rather than only while hovered.
-  const banMark = (action: DropAction) =>
-    spent(action) ? (
-      <span className="drop-ban" aria-hidden="true" />
-    ) : null;
+  // The same rule answers for the cursor: `none` where the pointer sits on a button that
+  // cannot serve the drag, or on the panel, which runs nothing either. With no drag in
+  // flight the answer is yes, because the next gesture must never start out refused.
+  const dragInFlight = dragging || rowDragging || dropAction !== null;
+  const dropRefused = dragInFlight && dropEffectFor(dropAction, dragPaths) === "none";
+  // Hand the verdict to the native layer: for a file from the file manager the drag never
+  // reaches the DOM on macOS, so only the native report can turn the cursor into the
+  // prohibition sign. See `src-tauri/src/drop_cursor.rs`.
+  useEffect(() => {
+    if (!isTauri()) return;
+    void api.setDropRefusal(dropRefused);
+  }, [dropRefused, dragSession]);
 
   const outputLabel = (kind: WriteCheck["kind"]) =>
     kind === "screenshot" ? t("screenshots") : kind === "recording" ? t("recordings") : t("fileResults");
@@ -953,7 +975,6 @@ export function MainWindow() {
                 <FileOutput size={18} />
               )}
               {t("convertFiles")}
-              {banMark("formats")}
             </button>
             <button
               className={`home-secondary ${aimedAction === "tools" ? "is-drop-target" : ""} ${
@@ -971,7 +992,6 @@ export function MainWindow() {
                 <Wrench size={18} />
               )}
               {t("fileTools")}
-              {banMark("tools")}
             </button>
             <button
               className={`home-secondary ${aimedAction === "ocr" ? "is-drop-target" : ""} ${
@@ -985,7 +1005,6 @@ export function MainWindow() {
             >
               {busy === "ocr" ? <LoaderCircle size={18} className="spin" /> : <ScanText size={18} />}
               {t("ocr")}
-              {banMark("ocr")}
             </button>
           </div>
           <p className="home-drop-hint">
@@ -1062,6 +1081,7 @@ export function MainWindow() {
                       recentDrag.current = { path: item.path, landed: false };
                       dragPointer.current = null;
                       setRowDragging(true);
+                      setDragSession((value) => value + 1);
                       setDragPaths([item.path]);
                       // Carry the file, not the row. The engine would otherwise photograph
                       // the row itself - thumbnail, name, age, folder and the five hover

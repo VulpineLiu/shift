@@ -147,6 +147,13 @@ export const api = {
     invoke<SwitchState>("set_update_check_enabled", { enabled }),
   setSetupReviewed: (reviewed: boolean) => invoke<boolean>("set_setup_reviewed", { reviewed }),
   getWedgeOrders: () => invoke<WedgeOrders>("get_wedge_orders"),
+  /**
+   * Hand the drag cursor's answer to the native layer, which is the only thing that can
+   * change it for a file coming from the file manager. Fire and forget: the drag keeps
+   * moving while this is in flight, and the newest report is the one that matters.
+   */
+  setDropRefusal: (refused: boolean) =>
+    invoke<void>("set_drop_refusal", { refused }).catch(() => undefined),
   updateCheck: () =>
     invoke<{ status: UpdateStatus; downloadReady: boolean }>("update_check"),
   updateStatus: () => invoke<UpdateStatus | null>("update_status"),

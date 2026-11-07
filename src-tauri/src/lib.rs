@@ -1,6 +1,7 @@
 mod autostart;
 mod capture;
 mod drag_bridge;
+mod drop_cursor;
 mod editor;
 mod files;
 mod history;
@@ -426,6 +427,7 @@ pub fn run() {
             settings::set_setup_reviewed,
             settings::get_wedge_orders,
             settings::reveal_output_directory,
+            drop_cursor::set_drop_refusal,
             update::update_check,
             update::update_status,
             update::update_download,

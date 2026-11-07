@@ -3910,6 +3910,7 @@ dependencies = [
  "image",
  "libc",
  "lopdf 0.45.0",
+ "objc2",
  "printpdf",
  "quick-xml 0.42.0",
  "serde",
