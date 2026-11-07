@@ -1,7 +1,7 @@
 use std::{
     ffi::OsStr,
     fs::{self, File},
-    io::{BufReader, Cursor, Write},
+    io::{BufReader, Cursor, Read, Write},
     path::{Path, PathBuf},
     process::Command,
     sync::OnceLock,
@@ -31,6 +31,13 @@ const DOCUMENT_EXTENSIONS: &[&str] = &[
 ];
 const PRESENTATION_EXTENSIONS: &[&str] = &["pptx", "ppt", "key"];
 const SPREADSHEET_EXTENSIONS: &[&str] = &["xlsx", "xls", "xlsb", "ods", "csv", "tsv", "numbers"];
+/// Inline editor data crosses the Tauri IPC boundary twice (read and save), so a
+/// file that is unusually large for an image is refused before it is base64
+/// encoded or decoded a second time.
+const MAX_EDITOR_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_EDITOR_IMAGE_PIXELS: u64 = 40_000_000;
+const MAX_EDITOR_DATA_URL_BYTES: usize = 128 * 1024 * 1024;
+const MAX_EDITOR_TEXT_BYTES: u64 = 8 * 1024 * 1024;
 
 fn extension_of(path: &Path) -> String {
     path.extension()
@@ -77,7 +84,16 @@ fn preview_for(path: &Path, ext: &str) -> Option<(String, Option<u32>, Option<u3
     if !IMAGE_EXTENSIONS.contains(&ext) {
         return None;
     }
-    let image = image::open(path).ok()?;
+    let bytes = read_file_limited(path, MAX_EDITOR_IMAGE_BYTES, "errImageTooLarge").ok()?;
+    let (width, height) = image::ImageReader::new(Cursor::new(&bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()?;
+    if u64::from(width) * u64::from(height) > MAX_EDITOR_IMAGE_PIXELS {
+        return None;
+    }
+    let image = image::load_from_memory(&bytes).ok()?;
     let (width, height) = image.dimensions();
     let preview = image.thumbnail(520, 520);
     let mut png = Vec::new();
@@ -89,6 +105,34 @@ fn preview_for(path: &Path, ext: &str) -> Option<(String, Option<u32>, Option<u3
         Some(width),
         Some(height),
     ))
+}
+
+fn read_file_limited(path: &Path, limit: u64, too_large: &str) -> Result<Vec<u8>, String> {
+    let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("errNotAFile".into());
+    }
+    if metadata.len() > limit {
+        return Err(too_large.into());
+    }
+
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    let metadata = file.metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("errNotAFile".into());
+    }
+    if metadata.len() > limit {
+        return Err(too_large.into());
+    }
+
+    let mut bytes = Vec::new();
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > limit {
+        return Err(too_large.into());
+    }
+    Ok(bytes)
 }
 
 pub fn inspect_paths(paths: &[String]) -> Result<Vec<FileInfo>, String> {
@@ -2014,11 +2058,14 @@ pub async fn open_file(path: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn read_text_file(path: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        fs::read_to_string(path).map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || read_text_file_in(Path::new(&path)))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn read_text_file_in(path: &Path) -> Result<String, String> {
+    let bytes = read_file_limited(path, MAX_EDITOR_TEXT_BYTES, "errTextTooLarge")?;
+    String::from_utf8(bytes).map_err(|error| error.to_string())
 }
 
 /// Return image bytes as a data URL. The editor draws this into a canvas and
@@ -2036,7 +2083,17 @@ fn image_data_url(path: &Path) -> Result<String, String> {
     if !IMAGE_EXTENSIONS.contains(&ext.as_str()) {
         return Err("This file is not a supported image.".to_string());
     }
-    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    let bytes = read_file_limited(path, MAX_EDITOR_IMAGE_BYTES, "errImageTooLarge")?;
+    if image::ImageReader::new(Cursor::new(&bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|reader| reader.into_dimensions().ok())
+        .is_some_and(|(width, height)| {
+            u64::from(width) * u64::from(height) > MAX_EDITOR_IMAGE_PIXELS
+        })
+    {
+        return Err("errImageTooLarge".into());
+    }
     Ok(format!(
         "data:{};base64,{}",
         image_mime(&ext),
@@ -2070,6 +2127,9 @@ fn save_image_data_in(
     suffix: Option<&str>,
     output_dir: Option<&Path>,
 ) -> Result<String, String> {
+    if data_url.len() > MAX_EDITOR_DATA_URL_BYTES {
+        return Err("errEditDataTooLarge".into());
+    }
     let encoded = data_url
         .split_once(',')
         .map(|(_, value)| value)
@@ -2077,6 +2137,19 @@ fn save_image_data_in(
     let bytes = STANDARD
         .decode(encoded)
         .map_err(|error| format!("Invalid image data: {error}"))?;
+    if bytes.len() as u64 > MAX_EDITOR_IMAGE_BYTES {
+        return Err("errEditDataTooLarge".into());
+    }
+    if image::ImageReader::new(Cursor::new(&bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|reader| reader.into_dimensions().ok())
+        .is_some_and(|(width, height)| {
+            u64::from(width) * u64::from(height) > MAX_EDITOR_IMAGE_PIXELS
+        })
+    {
+        return Err("errImageTooLarge".into());
+    }
     let image = image::load_from_memory(&bytes)
         .map_err(|error| format!("Could not decode edited image: {error}"))?;
     let input = Path::new(source);
@@ -2155,6 +2228,9 @@ fn save_text_near_in(
     suffix: Option<&str>,
     output_dir: Option<&Path>,
 ) -> Result<String, String> {
+    if text.len() as u64 > MAX_EDITOR_TEXT_BYTES {
+        return Err("errTextTooLarge".into());
+    }
     let input = Path::new(source);
     let output = unique_output_in(input, output_dir, suffix.unwrap_or(" (OCR)"), "txt")?;
     fs::write(&output, text).map_err(|error| describe_write_error(&output, error))?;
@@ -2348,6 +2424,26 @@ mod tests {
         .unwrap();
         assert_eq!(fs::read_to_string(&output).unwrap(), "hello");
         assert_eq!(Path::new(&output).parent(), Some(output_dir.as_path()));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn editor_reads_are_bounded_before_they_allocate() {
+        let dir = scratch_dir();
+        let text = dir.join("too-large.txt");
+        File::create(&text)
+            .unwrap()
+            .set_len(MAX_EDITOR_TEXT_BYTES + 1)
+            .unwrap();
+        assert_eq!(read_text_file_in(&text).unwrap_err(), "errTextTooLarge");
+        assert_eq!(read_text_file_in(&dir).unwrap_err(), "errNotAFile");
+
+        let image = dir.join("too-large.png");
+        File::create(&image)
+            .unwrap()
+            .set_len(MAX_EDITOR_IMAGE_BYTES + 1)
+            .unwrap();
+        assert_eq!(image_data_url(&image).unwrap_err(), "errImageTooLarge");
         fs::remove_dir_all(dir).unwrap();
     }
 

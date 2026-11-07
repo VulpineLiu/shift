@@ -131,8 +131,13 @@ fn capture_screen(app: &AppHandle, monitor: &tauri::Monitor) -> Result<CaptureSo
         }
     }
 
-    let (width, height) =
-        image::image_dimensions(&output).map_err(|error| format!("Invalid capture: {error}"))?;
+    let (width, height) = match image::image_dimensions(&output) {
+        Ok(dimensions) => dimensions,
+        Err(error) => {
+            let _ = fs::remove_file(&output);
+            return Err(format!("Invalid capture: {error}"));
+        }
+    };
     Ok(CaptureSource {
         path: output.to_string_lossy().to_string(),
         width,
@@ -421,12 +426,16 @@ pub fn crop_session(
     }
     let cropped = image.crop_imm(x, y, crop_width.min(width - x), crop_height.min(height - y));
     let directory = screenshot_directory(app)?;
-    let name = format!("Shift-{}.png", Local::now().format("%Y%m%d-%H%M%S"));
-    let output = directory.join(name);
+    let stem = format!("Shift-{}", Local::now().format("%Y%m%d-%H%M%S"));
+    let output = unique_capture_path(&directory, &stem)?;
     cropped
         .save_with_format(&output, image::ImageFormat::Png)
         .map_err(|error| error.to_string())?;
     Ok(output)
+}
+
+fn unique_capture_path(directory: &Path, stem: &str) -> Result<PathBuf, String> {
+    crate::files::unique_output_in(Path::new(stem), Some(directory), "", "png")
 }
 
 pub fn dismiss_capture(app: &AppHandle) {
@@ -604,5 +613,25 @@ fn open_screen_recording_settings_sync() -> Result<(), String> {
     #[cfg(not(target_os = "macos"))]
     {
         Err("Screen Recording settings are macOS-specific.".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn two_captures_in_the_same_second_do_not_overwrite() {
+        let directory =
+            std::env::temp_dir().join(format!("shift-capture-name-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let stem = "Shift-20260101-120000";
+        let first = unique_capture_path(&directory, stem).unwrap();
+        fs::write(&first, b"first").unwrap();
+        let second = unique_capture_path(&directory, stem).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(second.file_name().unwrap(), "Shift-20260101-120000 2.png");
+        assert_eq!(fs::read(&first).unwrap(), b"first");
+        fs::remove_dir_all(directory).ok();
     }
 }

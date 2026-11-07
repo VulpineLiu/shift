@@ -19,11 +19,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
+          components: rustfmt, clippy
       - run: pnpm install --frozen-lockfile
       - run: pnpm mac:drag-bridge
       - run: pnpm check
+      - run: pnpm test
       - run: pnpm build
+      - run: cargo fmt --check
+        working-directory: src-tauri
       - run: cargo test --lib
+        working-directory: src-tauri
+      - run: cargo clippy --all-targets -- -D warnings
         working-directory: src-tauri
       - run: pnpm tauri build --target universal-apple-darwin --debug --bundles app
         env:
@@ -41,18 +47,21 @@ jobs:
           node-version: 22
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
+      - run: pnpm test
       - run: pnpm build
-      - run: cargo check
+      - run: cargo fmt --check
+        working-directory: src-tauri
+      - run: cargo test --lib
         working-directory: src-tauri
       - run: pnpm tauri build --debug --no-bundle
 
-  # The Linux paths (grim, wf-recorder, x11grab, Poppler) are the only ones with no
-  # build or test job today, so nothing in the repository has ever compiled them.
-  # Ubuntu's desktop runner carries the GTK and WebKit packages Tauri needs, which a
-  # macOS machine cannot provide; `scripts/linux/Dockerfile` is the same dependency set
-  # for building the packages off CI.
+  # Linux compiles and runs the same TypeScript/Rust tests. Runtime capture still
+  # needs a real Wayland/X11 desktop; `scripts/linux/Dockerfile` carries the same
+  # dependency set for building the packages outside this workflow.
   linux:
     runs-on: ubuntu-22.04
     steps:
@@ -65,6 +74,8 @@ jobs:
           node-version: 22
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       - name: Install Tauri system dependencies
         run: |
           sudo apt-get update
@@ -73,7 +84,10 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev patchelf
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
+      - run: pnpm test
       - run: pnpm build
+      - run: cargo fmt --check
+        working-directory: src-tauri
       - run: cargo test --lib
         working-directory: src-tauri
       # Bundles deb and AppImage, so this is also the Linux release artifact that

@@ -38,6 +38,7 @@ export function Editor() {
   const [copied, setCopied] = useState<string | null>(null);
   const [copiedIsError, setCopiedIsError] = useState(false);
   const [textContent, setTextContent] = useState("");
+  const [textError, setTextError] = useState<string | null>(null);
   const copyTimer = useRef<number | null>(null);
   const sessionRef = useRef<EditorInfo | null>(null);
 
@@ -50,6 +51,7 @@ export function Editor() {
     setOcrProgress(0);
     setOcrStatus("");
     setTextContent("");
+    setTextError(null);
     // Anything opened for editing belongs in the library. Rust assigns the kind
     // and timestamp, so the editor does not classify the file a second time.
     void history.record([next.path]).catch(() => undefined);
@@ -81,9 +83,14 @@ export function Editor() {
   useEffect(() => {
     if (session?.kind !== "text") return;
     let cancelled = false;
-    void api.readTextFile(session.path).then((text) => {
-      if (!cancelled) setTextContent(text);
-    });
+    void api
+      .readTextFile(session.path)
+      .then((text) => {
+        if (!cancelled) setTextContent(text);
+      })
+      .catch((error) => {
+        if (!cancelled) setTextError(messageFrom(error));
+      });
     return () => {
       cancelled = true;
     };
@@ -253,6 +260,11 @@ export function Editor() {
             />
           ) : session.kind === "video" ? (
             <video src={url} controls autoPlay />
+          ) : session.kind === "text" && textError ? (
+            <div className="editor-file-fallback" role="alert">
+              <CircleAlert size={28} />
+              <strong>{t(textError)}</strong>
+            </div>
           ) : session.kind === "text" ? (
             <pre className="editor-text-preview">{textContent}</pre>
           ) : (

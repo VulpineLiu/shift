@@ -32,6 +32,11 @@ bytes and its SHA256:
 }
 ```
 
+Artifact names are restricted to ASCII letters, digits, `.`, `-` and `_`; path
+separators, `..`, spaces and shell metacharacters are rejected. The app also
+refuses a manifest over 256 KiB. These checks keep malformed manifest data out
+of download paths and out of the native handoff arguments.
+
 ## Supported release targets
 
 **Shift ships two installers: macOS (universal) and Windows x64.** That is a scope decision,
@@ -234,6 +239,12 @@ a new baked key; leaking it means an attacker can publish anything to the channe
 as leaking push access to `releases` already does today. Keep it outside the repository —
 `~/.config/shift-release/` is where the local publishing machine keeps it.
 
+`scripts/release-key.py` treats a file ending in `.pub` as an ed25519 public
+key and every other path as the 32-byte private key. `keygen` writes the private
+key (`release.ed25519`, mode 0600) and its public companion (`release.pub`). Keep
+the private key out of CI logs and do not rename the public file to a non-`.pub`
+name when using `pubkey`.
+
 ## Where a build looks for updates
 
 `src-tauri/build.rs` derives the feed from the `origin` remote at build time:
@@ -265,15 +276,17 @@ guessing at one.
    so restarts cannot spend the day's check twice.
 2. Versions are compared with semver rules, prereleases included: `0.2.0-alpha` sorts
    below `0.2.0`, so a test build does not offer to downgrade itself.
-3. Download writes into a temp folder, then two gates run before anything can be
-   installed: the byte length must equal the manifest's `size`, and the recomputed SHA256
-   must equal the manifest's `sha256`. A mismatch deletes the file and reports the error,
-   so a truncated or swapped installer never reaches the installer step.
+3. Download writes into a temp folder, then two gates run: the byte length must equal the
+   manifest's `size`, and the recomputed SHA256 must equal the manifest's `sha256`. Both
+   checks run again immediately before the handoff. A mismatch deletes the file and
+   reports the error, so a truncated or swapped installer never reaches the installer
+   step.
 4. **Install & relaunch** applies the verified artifact and restarts Shift on it, as
-   described in the next section; **Discard** removes the download. When an update is
-   available the tray menu gains a row that opens Settings on the Updates tab.
+   described in the next section; **Discard** removes the downloaded artifact as well as
+   the update status. When an update is available the tray menu gains a row that opens
+   Settings on the Updates tab.
 
-Manifest `schema` is checked, and a newer schema than this build understands is refused
+Manifest `schema` is checked; this build accepts exactly `1` and refuses anything else
 instead of being parsed optimistically. Unknown platform keys are ignored, so the
 manifest can name a platform an older app has never heard of. The Updates panel always
 states which of the two properties the current feed satisfies, so an unsigned channel
@@ -294,10 +307,12 @@ for that pid to disappear and only then touches the installed copy.
 
 Both scripts are written so a failure cannot end with Shift simply closed: every macOS
 failure path still `open`s the bundle it had, and the swap is `move aside, move in`, so a
-copy that fails halfway leaves the previous version where it was. Before the handoff
-starts, macOS writes a probe file next to the bundle — a root-owned copy in
-`/Applications` is reported as "open the downloaded installer yourself" rather than
-quietly quitting on an update that could not be applied.
+copy that fails halfway leaves the previous version where it was. The scripts themselves
+are fixed constants; the pid, installer, bundle and log paths are passed as process
+arguments, not interpolated into shell or batch source. Before the handoff starts, macOS
+writes a probe file next to the bundle — a root-owned copy in `/Applications` is reported
+as "open the downloaded installer yourself" rather than quietly quitting on an update
+that could not be applied.
 
 The Windows installer is the same one a user runs by hand, so the update path cannot drift
 from the manual one. Because the silent install comes from Shift itself, `${Silent}` skips
@@ -353,7 +368,10 @@ test, which is the proof that the check is real and not a pass-through.
 
 ## State of the published channel
 
-Checked against the live `releases` branch of this repository:
+This section is a historical audit of the published channel at the time it was
+performed. It is not a claim that the current `releases` branch still contains
+this version or that CI produced it. Re-run the verification below before using
+these numbers in release notes.
 
 Version **0.1.7**, checked by downloading each artifact back from the raw endpoint rather
 than trusting the local copy:
@@ -377,9 +395,9 @@ Both artifacts carry the key and the feed URL, which is what makes an in-app upg
 possible at all: a build whose binary predates those constants reports "this build has no
 feed" and can never see the channel, however new it is.
 
-The forge runs **no Actions**, so nothing on this list was built by CI: every artifact was
-cross-compiled on one macOS host and pushed with `scripts/publish-release.sh`. Treat "pass
-CI" in the contributing guide as a definition to run locally, not a gate that already ran.
+The workflow defines separate macOS, Windows and Linux jobs, but this audit did
+not record a linked CI run. Treat the local commands in `CONTRIBUTING.md` as the
+release gate unless a green run is attached to the release.
 
 A Linux release would slot in under the `linux` key with no code change — `artifact_keys_for`
 already answers `linux` for that host — so publishing one is a build task, not a feature.

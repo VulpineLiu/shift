@@ -44,6 +44,9 @@ const BATCH_WINDOW: Duration = Duration::from_secs(120);
 const SOCKET_LIFETIME: Duration = Duration::from_secs(30);
 /// Starts every transfer so a stray connection cannot corrupt a file.
 const MAGIC: &[u8; 4] = b"SHSF";
+/// A local-network attacker can mint unlimited beacon ids. Keep the visible peer
+/// table bounded so discovery cannot grow without limit.
+const MAX_PEERS: usize = 256;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -198,6 +201,12 @@ impl ShareState {
             return false;
         };
         let known = peers.contains_key(&beacon.id);
+        if !known && peers.len() >= MAX_PEERS {
+            peers.retain(|_, peer| peer.seen.elapsed() < PEER_TIMEOUT);
+            if peers.len() >= MAX_PEERS {
+                return false;
+            }
+        }
         peers.insert(
             beacon.id.clone(),
             KnownPeer {
@@ -1098,19 +1107,7 @@ where
         .set_read_timeout(Some(Duration::from_secs(120)))
         .map_err(|error| error.to_string())?;
     let mut file = fs::File::open(source).map_err(|error| error.to_string())?;
-    let mut buffer = vec![0u8; 64 * 1024];
-    let mut sent = 0u64;
-    while sent < header.size {
-        let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
-        if read == 0 {
-            break;
-        }
-        stream
-            .write_all(&buffer[..read])
-            .map_err(|error| error.to_string())?;
-        sent += read as u64;
-        on_progress(sent);
-    }
+    copy_file_body(&mut file, stream, header.size, &mut on_progress)?;
     stream.flush().map_err(|error| error.to_string())?;
 
     let mut ack = [0u8; 1];
@@ -1119,6 +1116,34 @@ where
         .map_err(|_| "share-no-ack".to_string())?;
     if ack[0] != 1 {
         return Err("share-rejected".to_string());
+    }
+    Ok(())
+}
+
+/// Copy exactly the number of bytes the header promised. Reading a fixed-size
+/// chunk would let a source file that grew after `metadata` push extra bytes into
+/// the stream, where the sender would mistake them for the receiver's ack.
+fn copy_file_body<R: Read, W: Write, P: FnMut(u64)>(
+    reader: &mut R,
+    writer: &mut W,
+    size: u64,
+    mut on_progress: P,
+) -> Result<(), String> {
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut sent = 0u64;
+    while sent < size {
+        let want = std::cmp::min(buffer.len() as u64, size - sent) as usize;
+        let read = reader
+            .read(&mut buffer[..want])
+            .map_err(|error| error.to_string())?;
+        if read == 0 {
+            return Err("The source file changed while it was being sent.".into());
+        }
+        writer
+            .write_all(&buffer[..read])
+            .map_err(|error| error.to_string())?;
+        sent += read as u64;
+        on_progress(sent);
     }
     Ok(())
 }
@@ -1226,10 +1251,19 @@ fn receive_file(app: &AppHandle, mut stream: TcpStream) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let directory = crate::settings::received_dir(app)?;
     let mut last_emit = Instant::now();
-    let (header, target) = accept_transfer(
+    let approved = std::cell::Cell::new(false);
+    let current = std::cell::RefCell::new(None);
+    let result = accept_transfer(
         &mut stream,
         &directory,
-        |header| await_decision(app, header),
+        |header| {
+            *current.borrow_mut() = Some(header.clone());
+            let answer = await_decision(app, header);
+            if answer.is_ok() {
+                approved.set(true);
+            }
+            answer
+        },
         |header, received| {
             // Throttle progress so a fast LAN link does not flood the UI.
             if last_emit.elapsed() < Duration::from_millis(120) {
@@ -1249,7 +1283,30 @@ fn receive_file(app: &AppHandle, mut stream: TcpStream) -> Result<(), String> {
                 },
             );
         },
-    )?;
+    );
+    let (header, target) = match result {
+        Ok(value) => value,
+        Err(error) => {
+            if approved.get() {
+                if let Some(header) = current.borrow().clone() {
+                    emit_transfer(
+                        app,
+                        TransferEvent {
+                            transfer_id: header.transfer_id,
+                            file_name: safe_name(&header.file_name)
+                                .unwrap_or_else(|| "file".into()),
+                            peer_name: header.peer_name,
+                            sent: 0,
+                            total: header.size,
+                            state: "error".into(),
+                            path: None,
+                        },
+                    );
+                }
+            }
+            return Err(error);
+        }
+    };
     let name = safe_name(&header.file_name).unwrap_or_else(|| "file".into());
     let path = target.to_string_lossy().to_string();
     // Read the batch fields before the event below moves out of `header`.
@@ -1523,6 +1580,27 @@ mod tests {
     }
 
     #[test]
+    fn the_peer_table_stops_accepting_new_ids_at_its_limit() {
+        let state = ShareState::default();
+        let address = SocketAddr::from(([192, 168, 1, 20], 50_000));
+        for index in 0..MAX_PEERS {
+            let mut peer = beacon();
+            peer.id = format!("peer-{index}");
+            assert!(state.note(&peer, address));
+        }
+
+        let mut extra = beacon();
+        extra.id = "one-too-many".into();
+        assert!(!state.note(&extra, address));
+        assert_eq!(state.peers_visible().len(), MAX_PEERS);
+
+        let mut known = beacon();
+        known.id = "peer-0".into();
+        assert!(!state.note(&known, address), "refreshing is not a new peer");
+        assert_eq!(state.peer("peer-0").unwrap().1.port(), 51_000);
+    }
+
+    #[test]
     fn peer_timeout_covers_a_legacy_peers_reply_cycle() {
         // Versions before the reply field answer once, forget this host after nine
         // seconds, then answer the next unicast refresh two seconds later.
@@ -1792,6 +1870,73 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), body);
         // No stray .shift-part files are left behind.
         assert_eq!(fs::read_dir(&inbound).unwrap().count(), 1);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn bytes_after_the_declared_size_never_cross_the_wire() {
+        let dir = std::env::temp_dir().join(format!("shift-long-{}", uuid::Uuid::new_v4()));
+        let source = dir.join("grew.bin");
+        fs::create_dir_all(&dir).unwrap();
+        let body: Vec<u8> = (0..130_000u32).map(|index| (index % 251) as u8).collect();
+        fs::write(&source, &body).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let inbound = dir.join("in");
+        let received_dir = inbound.clone();
+        let receiver = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            accept_transfer(&mut stream, &received_dir, |_| Ok(()), |_, _| {})
+        });
+
+        let mut stream = TcpStream::connect(address).unwrap();
+        let header = TransferHeader {
+            file_name: "grew.bin".into(),
+            size: 1_000,
+            peer_name: "Mini".into(),
+            transfer_id: "t-long".into(),
+            ..Default::default()
+        };
+        push_file(&mut stream, &source, &header, |_| {}).unwrap();
+        drop(stream);
+
+        let (_, target) = receiver.join().unwrap().unwrap();
+        assert_eq!(fs::read(target).unwrap(), body[..1_000]);
+        assert_eq!(fs::read_dir(&inbound).unwrap().count(), 1);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_source_that_shrinks_is_refused_without_a_partial_file() {
+        let dir = std::env::temp_dir().join(format!("shift-short-{}", uuid::Uuid::new_v4()));
+        let source = dir.join("shrank.bin");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&source, b"only some of the promised bytes").unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let inbound = dir.join("in");
+        let received_dir = inbound.clone();
+        let receiver = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            accept_transfer(&mut stream, &received_dir, |_| Ok(()), |_, _| {})
+        });
+
+        let mut stream = TcpStream::connect(address).unwrap();
+        let header = TransferHeader {
+            file_name: "shrank.bin".into(),
+            size: 1_000,
+            peer_name: "Mini".into(),
+            transfer_id: "t-short".into(),
+            ..Default::default()
+        };
+        let error = push_file(&mut stream, &source, &header, |_| {}).unwrap_err();
+        assert!(error.contains("source file changed"), "{error}");
+        drop(stream);
+
+        assert!(receiver.join().unwrap().is_err());
+        assert_eq!(fs::read_dir(&inbound).unwrap().count(), 0);
         fs::remove_dir_all(&dir).ok();
     }
 

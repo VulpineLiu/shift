@@ -665,6 +665,16 @@ export function MainWindow() {
       const transfer = event.payload;
       if (transfer.state === "received" && transfer.path) {
         flash(t("shareReceived", { name: transfer.fileName, peer: transfer.peerName }), FEEDBACK.notice);
+      } else if (transfer.state === "error") {
+        flash(
+          transfer.fileName
+            ? t("shareReceiveFailed", {
+                name: transfer.fileName,
+                peer: transfer.peerName || t("sharePeerFallback"),
+              })
+            : t("shareReceiveFailedGeneric"),
+          FEEDBACK.error,
+        );
       }
     });
     return () => {

@@ -1,12 +1,12 @@
 # Shift
 
-**A radial file workspace for macOS and Windows. Drag a file, release over a wedge, and the conversion happens on your machine.**
+**A radial file workspace for macOS and Windows. Drag a file, release over a wedge, and the conversion happens on your machine.** Linux is a source-build target, not a shipped release.
 
 **Language:** English · [简体中文](README.zh-CN.md)
 
 Shift puts file conversion, screenshot, screen recording, annotation, and bilingual OCR behind one radial menu that appears wherever you drop a file. No uploads, no account, no cloud round-trip — every byte is processed locally.
 
-Built on Tauri 2, Rust, React and TypeScript. Native capture and drag behaviour live behind per-platform adapters, so the radial menu, editor, and format catalogue are identical everywhere.
+Built on Tauri 2, Rust, React and TypeScript. Native capture and drag behaviour live behind per-platform adapters, so the radial menu, editor, and format catalogue are shared wherever the platform provides the underlying gesture.
 
 ---
 
@@ -29,6 +29,7 @@ Built on Tauri 2, Rust, React and TypeScript. Native capture and drag behaviour 
 - [Platform status](#platform-status)
 - [Build from source](#build-from-source)
 - [Architecture](#architecture)
+- [Documentation](#documentation)
 - [Repository layout](#repository-layout)
 - [Privacy](#privacy)
 - [Known limitations](#known-limitations)
@@ -160,7 +161,7 @@ The tool ring (`Option + Shift` while dragging). These are one-gesture operation
 | Mono | audio | `.m4a`, ` (mono)` | Downmix to single-channel 128k AAC |
 | Plain | document | `.txt` | Plain-text dump via Pandoc |
 | OCR | image, PDF | `.txt`, ` (OCR)` | See [OCR](#ocr) |
-| Edit / Annotate / Redact / Add BG | image | — | Opens the editor with the matching tool preselected |
+| Edit / Annotate / Redact / Add BG | image | — | Opens the image editor; choose the annotation tool from its toolbar |
 | Open · Reveal | any file | — | Hands off to the system default app or file manager |
 
 ## Compression, naming, cancellation
@@ -197,7 +198,7 @@ PDF→image and PDF split write into a new `Name pages` folder containing `Page 
 
 | Tool | Behaviour |
 | --- | --- |
-| Rectangle, Arrow, Highlight, Text | Freehand placement, colour and weight per annotation |
+| Rectangle, Arrow, Highlight, Text | Freehand placement; each tool has a fixed colour and line width |
 | Redact | Solid black bar, burnt into the output — not an overlay |
 | Pixelate | Real mosaic sampling of the region underneath, not a translucent fill |
 | Blur | Gaussian blur of the region, clipped to the shape you drew |
@@ -210,7 +211,7 @@ PDF→image and PDF split write into a new `Name pages` folder containing `Page 
 | Save copy / Copy | New file with a suffix, or straight to the clipboard |
 | Pin | Floats the image as an always-on-top window with copy and close |
 
-**Editor.** Images open the annotator; video opens a player; `txt` `md` `csv` `tsv` `html` `htm` open as editable text. Every editor host has Copy, Save As, Open, Reveal in Folder, OCR and Copy Text.
+**Editor.** Images open the annotator; video opens a player; `txt` `md` `csv` `tsv` `html` `htm` open as read-only text previews. Copy, Save As, Open and Reveal are available for every kind. OCR, Copy Text and Pin appear for images only; text is not edited in place. The editor refuses text over 8 MB and images over 64 MB or 40 megapixels, and reports the limit instead of loading them.
 
 ## Capture history library
 
@@ -297,9 +298,9 @@ A new macOS machine installs **`Shift-0.1.11-macOS-universal.dmg`**: builds are 
 
 The update channel is this repository: a `releases` branch holding the installers plus `shift-update.json`, which names each artifact, its size and its SHA256. The feed URL is derived from the git remote at build time - Gitea, GitHub and GitLab forms are known, and `SHIFT_UPDATE_URL` overrides it - so no update service has to be deployed anywhere.
 
-Once a day at startup, and on demand from Settings -> **Updates**, Shift reads the manifest, compares versions with semver rules including prereleases, and offers a download. A downloaded installer is checked twice before it can be installed: exact byte length, then a recomputed SHA256 that must match the manifest. A mismatch deletes the file and says so, so nothing half-downloaded launches. Publishing is one command, `scripts/publish-release.sh`, and `docs/RELEASE.md` covers the manifest format, the flags, and the difference between the integrity the hash proves and the authenticity a signed manifest adds (`--key` plus a key baked in with `SHIFT_UPDATE_PUBKEY`).
+Once a day at startup, and on demand from Settings -> **Updates**, Shift reads the manifest, compares versions with semver rules including prereleases, and offers a download. A downloaded installer must match the manifest's exact byte length and recomputed SHA256, and both checks run again immediately before the handoff that installs it. A mismatch deletes the file and reports the error, so a truncated or replaced installer never launches. **Discard** removes the downloaded installer as well as the status. Publishing is one command, `scripts/publish-release.sh`, and `docs/RELEASE.md` covers the manifest format, the flags, and the difference between the integrity the hash proves and the authenticity a signed manifest adds (`--key` plus a key baked in with `SHIFT_UPDATE_PUBKEY`).
 
-**Install & relaunch** finishes the update without leaving the app. macOS replaces its own `.app` bundle from the downloaded disk image and Windows runs the same installer silently, both from a helper script that starts once Shift has quit and then opens the new copy - so a conversion is interrupted, but nothing is left half-installed and a failed swap reopens the copy you had. The tab states your operating system, architecture, running version and the feed it reads above everything else, so one screenshot explains any report about an update.
+**Install & relaunch** finishes the update without leaving the app. macOS replaces its own `.app` bundle from the downloaded disk image and Windows runs the same installer silently, both from a helper script that starts once Shift has quit and then opens the new copy - so a conversion is interrupted, but nothing is left half-installed and a failed swap reopens the copy you had. The helper receives its paths as process arguments; they are never interpolated into the shell or batch script. The tab states your operating system, architecture, running version and the feed it reads above everything else, so one screenshot explains any report about an update.
 
 ## External dependencies
 
@@ -420,6 +421,17 @@ OCR: Tesseract.js WASM + bundled eng/chi_sim, in-process, offline
 
 The radial hit-test is pure geometry — one polar calculation shared by native pointer events, webview hover, and the Windows drop payload — so ring behaviour does not drift between platforms.
 
+## Documentation
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — process/window model, module boundaries, event and data flows.
+- [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) — product behaviour, output naming, platform differences and acceptance criteria.
+- [`docs/SECURITY.md`](docs/SECURITY.md) — trust boundaries, update integrity, LAN-transfer limits and residual risks.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — development setup, test gates and release checks.
+- [`docs/README.md`](docs/README.md) — index of every technical and release document.
+- [`docs/ENGINEERING-NOTES.md`](docs/ENGINEERING-NOTES.md) — regression ledger for paths that must not be simplified back into earlier failures.
+- [`docs/RELEASE.md`](docs/RELEASE.md) — release channel, signing and update handoff.
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) and [`docs/MOBILE.md`](docs/MOBILE.md) — future work and the mobile plan.
+
 ## Repository layout
 
 ```text
@@ -431,23 +443,21 @@ native/macos/        Swift sidecars: drag bridge, PDF renderer, doc renderer,
                      compiled into src-tauri/binaries/ by pnpm mac:drag-bridge
 scripts/            OCR staging, macOS sidecars, Windows installer, release build,
                     manifest publish and manifest signing
-public/tesseract/    WASM core + traineddata, generated, not committed
+public/tesseract/    WASM core + traineddata; refreshed by pnpm prepare:ocr and
+                     tracked so a clean checkout builds and runs OCR offline
 assets/              app icon source
 src-tauri/icons/     generated app icons per platform
-docs/                Windows build guide, release/update channel, engineering regression
-                     ledger, roadmap, mobile plan
-scripts/linux/       Dockerfile that builds the Linux deb/AppImage off CI
+docs/                architecture, behaviour specification, security model, release
+                     guide, engineering ledger, roadmap and mobile plan
+scripts/linux/       Dockerfile that builds Linux deb/AppImage packages
 .github/workflows/   CI definitions for macOS, Windows and Linux (see Contributing)
-FileFlipper/         separate companion project, its own repository
 ```
 
 ## Privacy
 
 Shift makes no internet requests for anything it does to your files. They are read, converted, and written locally; OCR runs in-process against bundled models; the history library is a local file. Nothing is uploaded, and nothing is collected.
 
-Two paths touch the network, and neither carries file content unless you ask: the **update check** fetches a manifest over HTTPS at most once a day - and an installer only when you press the button - while **Send to a device** talks to your local network alone.
-
-The one exception is opt-in by usage: **Send to a device** talks to your local network only — UDP beacons on `239.255.77.88:47888` plus a direct TCP connection between the two machines, carrying the machine name so each side can label the other. It is inert until you open that picker or another Shift sends you a file.
+Two paths touch the network, and neither carries file content unless you explicitly start that feature. The **update check** fetches a manifest over HTTPS at most once a day; it downloads an installer only when you press the button. **Send to a device** uses UDP beacons on `239.255.77.88:47888` and a direct TCP connection only to the machine you choose (or from another Shift that offers you a file). Discovery is silent while sharing is disabled, and a transfer begins only after the receiver accepts. LAN traffic is not authenticated or encrypted; [`docs/SECURITY.md`](docs/SECURITY.md) describes that boundary.
 
 ## Known limitations
 
@@ -456,13 +466,15 @@ The one exception is opt-in by usage: **Send to a device** talks to your local n
 - `.doc`, `.pages`, `.ppt`, `.key` and `.numbers` are recognised but not parsed — export to DOCX/PPTX/XLSX first.
 - HEIC/HEIF/AVIF are read through the system decoder, so conversion and the pixel tools both accept them. Neither format can be written on this path, so a pixel tool applied to one produces a PNG; AVIF is not an export target at all.
 - PDF compression resamples embedded images to at most 1440 px as q60 JPEG. It deliberately skips anything it cannot prove it can round-trip — masks, indexed or CMYK colour, JPX/JBIG2/CCITT — so exotic scans may still resist shrinking.
-- Windows recording and media conversion require `ffmpeg` on `PATH`. On Linux media conversion also requires it, area recording needs `wf-recorder` under Wayland and `ffmpeg` under X11, and neither path is exercised by the forge this repository is hosted on, so treat Linux capture as build-verified only.
+- Windows recording and media conversion require `ffmpeg` on `PATH`. On Linux media conversion also requires it, area recording needs `wf-recorder` under Wayland and `ffmpeg` under X11. Those runtime paths are not exercised by the macOS development host, so treat Linux capture as build-verified until checked on real hardware.
 - Linux is a build target, not a shipped product: no deb or AppImage is published, so the update channel carries no `linux` key and a Linux build finds nothing to download. `scripts/linux/Dockerfile` and the `linux` job in CI remain the recipe for anyone who wants one.
 - Dragging a library row out uses the webview's file-URL drag support. It is the standard `text/uri-list` payload with a `file://` entry plus the plain path, and it needs a gesture-level check on each platform; until then, **Send**, **Reveal** and the row's own buttons are the guaranteed paths for handing a file over. Dropping a row back onto Shift is checked: one gesture reports through the DOM, the native webview drop, or both, and the `landed` flag in `MainWindow.tsx` lets only the first through — the invariants are in `docs/ENGINEERING-NOTES.md`.
 - LAN sharing needs a network that allows peer traffic. Multicast is skipped by some guest and corporate Wi-Fi; those networks still work over the broadcast and unicast fallbacks, but two copies cannot meet across a router that isolates clients. The discovery invariants, permission checks and regression matrix are in `docs/ENGINEERING-NOTES.md`.
 - On Windows only one Shift copy per machine can hold the discovery port, so extra instances do not appear as peers.
-- Windows and Linux paths are compile-verified here, and the forge hosting this repository runs no Actions, so nothing is ever built by CI on your behalf. Gesture-level QA needs real Windows and Linux hardware.
+- Windows and Linux paths are compile-verified here and covered by the repository's CI definition where a runner is available; gesture-level QA still needs real Windows and Linux hardware.
 - Signing identity changes on macOS may require re-approving Screen Recording and Accessibility.
+- LAN sharing has no authentication or encryption. An accepted transfer proves only that you accepted an offer, not who sent it; use the feature on trusted networks.
+- Office ZIP/XML parsing and PDF rendering still lack one shared resource quota across every codec and external renderer. Editor previews are bounded, but unusually large or adversarial documents should be treated as untrusted input.
 
 Roadmap: `docs/ROADMAP.md`.
 
@@ -502,9 +514,9 @@ Quit from the tray and delete the app. Nothing is written outside your output fo
 
 ## Contributing
 
-Adding a format is one entry in `conversionFormats` in `src/lib/conversionFormats.ts`, its matrix test, and its handling in `perform_action` in `src-tauri/src/files.rs`. Adding a tool is one id in the right list in `src/lib/radialOrder.ts`, its label, its icon in `WEDGE_ICONS`, and one match arm in `executeAction` - the ring renders the same catalogue, so it appears with no other registration. Run `pnpm check`, `pnpm test`, `pnpm build` and `cargo test --lib` before pushing.
+Adding a format is one entry in `conversionFormats` in `src/lib/conversionFormats.ts`, its matrix test, and its handling in `perform_action` in `src-tauri/src/files.rs`. Adding a tool is one id in the right list in `src/lib/radialOrder.ts`, its label, its icon in `WEDGE_ICONS`, and one match arm in `executeAction` - the ring renders the same catalogue, so it appears with no other registration. The full pre-push sequence is `pnpm check`, `pnpm test`, `pnpm build`, `cargo fmt --check`, `cargo test --lib`, `cargo clippy --all-targets -- -D warnings` and `git diff --check`; [`CONTRIBUTING.md`](CONTRIBUTING.md) has the platform setup and manual matrix.
 
-`.github/workflows/ci.yml` carries macOS, Windows and Linux jobs, but **the forge hosting this repository has no Actions runner**, so those jobs are definitions rather than a live guarantee: nothing is built until a GitHub mirror, a Forgejo Actions instance, or a contributor runs them. The four commands above are what CI would run, plus `pnpm tauri build` per platform; `scripts/linux/Dockerfile` builds the Linux packages on a plain Docker host.
+`.github/workflows/ci.yml` defines macOS, Windows and Linux jobs. The workflow runs type checks, TypeScript tests, Rust formatting and tests on every job, plus Clippy and a universal macOS app build. Whether the current forge executes it depends on whether that forge has a runner configured; a local run remains the release gate, and no CI result should be inferred without a linked log. Full setup and the pre-push checklist are in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 **Forks and derivative works are welcome.** You may use, modify, redistribute, and build on this code commercially, provided you keep the copyright notice and the LICENSE file.
 

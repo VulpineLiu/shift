@@ -132,7 +132,7 @@ cargo test share:: -- --ignored --nocapture
 | 权限拒绝再允许 | macOS 本地网络或 Windows 防火墙从拒绝改为允许后，重新打开面板可发现。 |
 
 0.1.7 的用户验收环境是 Mac 与 Windows 各一台，升级后 Drop 设备发现正常。该结论
-覆盖真实跨系统发现，但仓库所在平台没有 CI，也没有自动化的双机网络夹具，因此发布前
+覆盖真实跨系统发现；CI workflow 能验证协议单元测试，但没有双机网络夹具，因此发布前
 仍需重复上面的手工矩阵。
 
 ## DOCX、Markdown 与图片转换
@@ -610,6 +610,56 @@ CSS 画，不用图标字体，保证任何缩放下都锐利）。
 把 unknown 变成文案的唯一途径。不可用控件统一用 `--dimmed` 与 `cursor: default`，
 `:hover` 一律带 `:not(:disabled)`。
 
+## 更新、分享与读取边界
+
+2026-11 的全面评审补了一组不应被简化掉的约束。它们共同处理的是同一类问题：
+**一个被声明为“已校验”的对象，在真正使用前仍可能变化，或声明值本身可能不可信。**
+
+### 更新链路
+
+| 约束 | 原因 |
+| --- | --- |
+| 清单里的文件名必须直接位于发布目录 | 路径分隔符、`..`、空格和 shell 元字符不能进入下载路径或交接参数；发布脚本产出的文件名只含 ASCII 字母、数字、`.`、`-`、`_` |
+| 清单下载后限制 256 KiB | 清单是小型 JSON；损坏或被替换的 feed 不应无限占用内存 |
+| 下载后校验是普通文件、精确字节数和 SHA256 | 只比较哈希仍会接受声明尺寸与实际尺寸不一致的输入 |
+| 安装前再次执行同一组校验 | 下载文件位于可写的临时目录，下载完成到用户点击安装之间存在 TOCTOU 窗口；失败时必须删除文件 |
+| macOS/Windows 辅助脚本使用固定脚本常量，路径作为进程参数传入 | 文件夹名不能改变 helper 的脚本文本；Windows `cmd.exe` 的参数解析仍需真机覆盖极端路径字符 |
+| `Discard` 删除实际下载物 | 只清状态会留下可被误用的旧安装包 |
+
+回归测试：`artifact_names_stay_inside_the_release_directory`、
+`an_installer_changed_after_download_is_refused`，以及两个 handoff 脚本的参数化
+检查。真实 Windows 交接仍需在 Windows 机器上验收。
+
+### 分享链路
+
+| 约束 | 原因 |
+| --- | --- |
+| peer 表最多 256 项，满时先清理过期项 | 未认证信标可伪造无限 id；可见列表不能无限增长 |
+| 发送端按 header 声明大小精确复制 | 源文件在 metadata 之后变长时，多出的字节会被接收端误当成 ack |
+| 源文件比声明短时立即失败 | 不允许用半截文件换取成功状态；接收端删除 `.shift-part` |
+| 只有用户已接受后的接收失败才弹错误 | 任意 TCP 扫描或坏握手不应产生用户可见的 toast |
+| 接收错误事件带文件名与 peer 名 | 失败要可定位，而不是只有一句泛化提示 |
+
+回归测试：`the_peer_table_stops_accepting_new_ids_at_its_limit`、
+`bytes_after_the_declared_size_never_cross_the_wire`、
+`a_source_that_shrinks_is_refused_without_a_partial_file`。
+
+分享协议本身仍无认证、无加密；这里修的是拒绝自动落盘、路径安全、字节边界和可见
+失败，不是身份认证。安全边界见 `docs/SECURITY.md`。
+
+### 编辑器读取
+
+| 数据 | 上限 | 测试 |
+| --- | --- | --- |
+| 文本预览 | 8 MiB | `editor_reads_are_bounded_before_they_allocate` |
+| 图片文件 | 64 MiB | 同上 |
+| 图片像素 | 4000 万 | 与钉图上限一致 |
+| 编辑后 data URL | 128 MiB | 解码前检查 |
+
+文本与图片在 Rust 读盘前检查路径是否为普通文件并执行上限；UI 只负责把返回的
+`errNotAFile` / `errTextTooLarge` / `errImageTooLarge` / `errEditDataTooLarge`
+翻译成文案。不要在只读预览里静默吞掉读取错误。
+
 ## 修改这些路径时的统一回归命令
 
 ```bash
@@ -618,10 +668,12 @@ git diff --check
 cd src-tauri
 cargo fmt --check
 cargo test --lib
+cargo clippy --all-targets -- -D warnings
 
 cd ..
 pnpm check
 pnpm test
+pnpm build
 ```
 
 发布构建还需额外完成本文对应章节的手工矩阵。任何一次修改如果改变了发现协议、转换

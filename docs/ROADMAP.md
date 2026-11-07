@@ -62,8 +62,8 @@ names what is still missing.
   unicast sweep; ordinary beacons receive one marked reply, and peer expiry is long enough
   for older copies to answer. The user-observed acceptance run covered one Mac and one
   Windows x64 machine after an upgrade. Unit tests cover the scan bounds, timeout and reply
-  semantics, but the live two-host check is manual because this forge runs no CI and the
-  repository has no second-machine fixture. Client-isolated Wi-Fi remains outside the app's
+  semantics, but the live two-host check is manual because the repository has no
+  second-machine fixture. Client-isolated Wi-Fi remains outside the app's
   control, and Windows still permits only one listener per machine. The exact invariants
   and manual matrix are in `docs/ENGINEERING-NOTES.md`.
 - Windows ARM64: the release pipeline ships only the x64 NSIS installer, checks its
@@ -162,9 +162,10 @@ Restricted to work this repository can do something about; hardware QA is last b
 commit closes it. Each item states the check that closes it. Linux packaging is deliberately
 absent — the platform is supported, not shipped.
 
-1. **A real CI run.** The forge (Gitea) returns 404 for `/actions/runs`, so `ci.yml` is
-   never executed. Either mirror to GitHub or install Forgejo Actions. Close: one green run
-   per platform whose log is linked from the release notes.
+1. **A verified CI run.** `ci.yml` defines macOS, Windows and Linux jobs, but no linked
+   run in this repository proves that the current hosting forge executes them. Either
+   configure a runner or run the workflow on a mirror. Close: one green run per platform
+   whose log is linked from the release notes.
 2. **Persistent job queue with cancel and retry.** `perform_file_action` already emits
    `app://file-action-progress` with real page counts, but a batch dies with the window and
    an error aborts the rest of the batch. Close: a queued batch survives an app restart,

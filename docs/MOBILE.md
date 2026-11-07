@@ -32,7 +32,7 @@ already perform every day:
 | --- | --- | --- |
 | Shift-drag out of the Finder row, release over a wedge | **Share sheet**, including the drag-and-drop share from Files/Photos/Safari where the picker slides out from under the finger | **Share sheet**, same shape, from any app |
 | Radial ring of wedges | The share sheet's own app list, plus a Share Extension whose UI we own | Share sheet targets, plus an Action/Share Activity we own |
-| Ring reorder in Settings | Share sheet "Edit Actions" ordering, mirrored in our Settings | Same, mirrored |
+| Ring order (desktop reads `settings.json`; no editor UI in 0.1.11) | Share sheet "Edit Actions" ordering, mirrored in a mobile Settings surface | Same, mirrored |
 
 So the mobile pitch is not "Shift in your pocket", it is: **release a share over a Shift
 action**. Concretely: long-press an image in Files → Share → Shift → *HEIC → PNG, then

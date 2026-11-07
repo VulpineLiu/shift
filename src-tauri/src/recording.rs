@@ -120,11 +120,17 @@ fn recording_directory(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn output_path(app: &AppHandle, extension: &str) -> Result<PathBuf, String> {
-    Ok(recording_directory(app)?.join(format!(
-        "Shift Recording {}.{}",
-        Local::now().format("%Y-%m-%d %H.%M.%S"),
-        extension
-    )))
+    let directory = recording_directory(app)?;
+    let stem = format!(
+        "Shift Recording {}",
+        Local::now().format("%Y-%m-%d %H.%M.%S")
+    );
+    unique_recording_path(&directory, &stem, extension)
+}
+
+fn unique_recording_path(directory: &Path, stem: &str, extension: &str) -> Result<PathBuf, String> {
+    let input = directory.join(format!("{stem}.{extension}"));
+    crate::files::unique_output_in(&input, Some(directory), "", extension)
 }
 
 fn start_process(
@@ -487,6 +493,24 @@ mod tests {
             height: 600.2,
         };
         assert_eq!(x11_geometry(&region), "801x600+13+30");
+    }
+
+    #[test]
+    fn recordings_from_the_same_second_do_not_overwrite() {
+        let directory =
+            std::env::temp_dir().join(format!("shift-recording-name-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let stem = "Shift Recording 2026-01-01 12.00.00";
+        let first = unique_recording_path(&directory, stem, "mov").unwrap();
+        fs::write(&first, b"first").unwrap();
+        let second = unique_recording_path(&directory, stem, "mov").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            second.file_name().unwrap(),
+            "Shift Recording 2026-01-01 12.00.00 2.mov"
+        );
+        assert_eq!(fs::read(&first).unwrap(), b"first");
+        fs::remove_dir_all(directory).ok();
     }
 
     #[test]

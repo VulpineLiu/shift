@@ -31,14 +31,33 @@ NO_PUSH=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --notes) NOTES_FILE="$2"; shift 2 ;;
+    --notes|--key|--branch)
+      if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+        echo "$1 needs a value" >&2
+        exit 2
+      fi
+      case "$1" in
+        --notes) NOTES_FILE="$2" ;;
+        --key) KEY_FILE="$2" ;;
+        --branch) BRANCH="$2" ;;
+      esac
+      shift 2
+      ;;
     --dry-run) DRY_RUN=1; shift ;;
     --no-push) NO_PUSH=1; shift ;;
-    --branch) BRANCH="$2"; shift 2 ;;
-    --key) KEY_FILE="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+[ -n "$BRANCH" ] || { echo "--branch cannot be empty" >&2; exit 2; }
+[ -z "$NOTES_FILE" ] || [ -f "$NOTES_FILE" ] || {
+  echo "notes file not found: $NOTES_FILE" >&2
+  exit 2
+}
+[ -z "$KEY_FILE" ] || [ -f "$KEY_FILE" ] || {
+  echo "release key not found: $KEY_FILE" >&2
+  exit 2
+}
 
 VERSION=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
 PLAN=$(mktemp /tmp/shift-release-plan.XXXXXX)

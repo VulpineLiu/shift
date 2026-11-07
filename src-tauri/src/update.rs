@@ -19,6 +19,7 @@
 
 use std::{
     collections::BTreeMap,
+    ffi::OsStr,
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -53,6 +54,9 @@ const BAKED_PUBLIC_KEY: &str = match option_env!("SHIFT_UPDATE_PUBKEY") {
 const FETCH_TIMEOUT: Duration = Duration::from_secs(20);
 /// Installers are tens of megabytes, so the download gets far longer than a probe.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
+/// The manifest is a small JSON document. Refuse an oversized response instead of
+/// letting a broken or hostile feed exhaust memory.
+const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
 /// Startup probes are throttled to this interval so a menu bar app does not reach
 /// the network on every launch.
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -307,13 +311,19 @@ fn parse_manifest(text: &str) -> Result<ReleaseManifest, String> {
     if manifest.version.trim().is_empty() {
         return Err("The manifest carries no version.".into());
     }
-    if manifest.schema > SUPPORTED_SCHEMA {
+    if manifest.schema != SUPPORTED_SCHEMA {
         return Err(format!(
-            "Manifest schema {} is newer than this build understands.",
+            "Manifest schema {} is not supported by this build (expected {SUPPORTED_SCHEMA}).",
             manifest.schema
         ));
     }
     for artifact in manifest.artifacts.values() {
+        if safe_artifact_name(&artifact.file).is_none() {
+            return Err("The manifest names an unsafe artifact file.".into());
+        }
+        if artifact.size == 0 {
+            return Err(format!("{} has no usable size.", artifact.file));
+        }
         if !is_sha256_hex(&artifact.sha256) {
             return Err(format!("{} has no usable SHA256.", artifact.file));
         }
@@ -325,14 +335,70 @@ fn is_sha256_hex(value: &str) -> bool {
     value.len() == 64 && value.chars().all(|character| character.is_ascii_hexdigit())
 }
 
+/// A manifest may only name a file that belongs directly in the release
+/// directory. Installer names produced by the release scripts are ASCII, so a
+/// strict basename allow-list also keeps path separators, shell metacharacters
+/// and Windows device names out of download and handoff paths.
+fn safe_artifact_name(value: &str) -> Option<&str> {
+    let name = value.trim();
+    if name.is_empty()
+        || value != name
+        || name == "."
+        || name == ".."
+        || name.ends_with('.')
+        || name.len() > 200
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        return None;
+    }
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    let reserved = matches!(
+        stem.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    );
+    if reserved {
+        return None;
+    }
+    Some(name)
+}
+
 /// The forge path for one artifact sits next to the manifest.
 fn raw_asset_url(file: &str) -> Result<String, String> {
     let base = manifest_url();
     if base.is_empty() {
         return Err("No update feed is configured.".into());
     }
+    let file = safe_artifact_name(file)
+        .ok_or_else(|| "The manifest names an unsafe artifact file.".to_string())?;
     let directory = base.rsplit_once('/').map(|(head, _)| head).unwrap_or(&base);
-    Ok(format!("{directory}/{}", file.trim_start_matches('/')))
+    Ok(format!("{directory}/{file}"))
 }
 
 /// One transport for both the manifest and the installers, using the platform's own
@@ -445,9 +511,19 @@ fn fetch_text(url: &str) -> Result<String, String> {
         uuid::Uuid::new_v4()
     ));
     download(url, &target, FETCH_TIMEOUT, || {})?;
-    let text = fs::read_to_string(&target).map_err(|error| error.to_string())?;
+    let result = (|| {
+        let size = fs::metadata(&target)
+            .map_err(|error| error.to_string())?
+            .len();
+        if size > MAX_MANIFEST_BYTES {
+            return Err(format!(
+                "The update manifest is too large ({size} bytes; limit {MAX_MANIFEST_BYTES})."
+            ));
+        }
+        fs::read_to_string(&target).map_err(|error| error.to_string())
+    })();
     let _ = fs::remove_file(&target);
-    Ok(text)
+    result
 }
 
 fn download_directory() -> PathBuf {
@@ -466,6 +542,29 @@ pub fn sha256_of(path: &Path) -> Result<String, String> {
         digest.update(&buffer[..read]);
     }
     Ok(hex::encode(digest.finalize()))
+}
+
+/// Re-check the exact properties that made a download installable. This runs
+/// again at install time because the file lives in a writable temp directory
+/// between download and handoff.
+fn verify_downloaded_artifact(path: &Path, size: u64, sha256: &str) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if !metadata.file_type().is_file() {
+        return Err("The downloaded update is not a regular file.".into());
+    }
+    if metadata.len() != size {
+        return Err(format!(
+            "The downloaded update changed size: expected {size} bytes, found {}.",
+            metadata.len()
+        ));
+    }
+    let actual = sha256_of(path)?;
+    if !actual.eq_ignore_ascii_case(sha256) {
+        return Err(format!(
+            "The downloaded update changed after verification: expected {sha256}, found {actual}."
+        ));
+    }
+    Ok(())
 }
 
 fn emit_progress(app: &AppHandle, downloaded: u64, total: u64, state: &str) {
@@ -636,7 +735,9 @@ pub async fn update_download(app: AppHandle) -> Result<UpdateStatus, String> {
                 manifest.version
             )
         })?;
-    let target = download_directory().join(&artifact.file);
+    let file_name = safe_artifact_name(&artifact.file)
+        .ok_or_else(|| "The manifest names an unsafe artifact file.".to_string())?;
+    let target = download_directory().join(file_name);
     let reporter = app.clone();
     let expected = artifact.sha256.clone();
     let total = artifact.size;
@@ -656,21 +757,12 @@ pub async fn update_download(app: AppHandle) -> Result<UpdateStatus, String> {
             },
         )?;
         let actual_size = fs::metadata(&target).map(|meta| meta.len()).unwrap_or(0);
-        if total > 0 && actual_size != total {
-            let _ = fs::remove_file(&target);
-            return Err(format!(
-                "Expected {} bytes but received {actual_size}. The download was discarded.",
-                total
-            ));
-        }
         emit_progress(&reporter, actual_size, total, "verifying");
-        let actual = sha256_of(&target)?;
-        if !actual.eq_ignore_ascii_case(&expected) {
+        if let Err(error) = verify_downloaded_artifact(&target, total, &expected) {
             let _ = fs::remove_file(&target);
-            return Err(format!(
-                "SHA256 mismatch: expected {expected}, got {actual}. The download was discarded."
-            ));
+            return Err(format!("{error} The download was discarded."));
         }
+        let actual = sha256_of(&target)?;
         let mut status = status_for(
             &manifest,
             Some(target.clone()),
@@ -700,7 +792,6 @@ fn bundle_path(exe: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-#[cfg(target_os = "macos")]
 /// Whether this copy can be replaced where it sits. The handoff moves the bundle
 /// aside and moves a new one in, which needs write access to the folder holding it
 /// rather than to the bundle: a copy in a root-owned folder is not replaceable, and
@@ -721,24 +812,25 @@ fn can_replace(bundle: &Path) -> bool {
     }
 }
 
-#[cfg(target_os = "macos")]
 /// The macOS handoff: wait for this process to quit, then replace the bundle with
 /// the one inside the downloaded disk image and open the new copy. Written as a
 /// script because the copy can only happen once this process is gone.
 ///
 /// Every failure path ends with `open` on the bundle, so a handoff that cannot
 /// finish leaves the previous copy running rather than leaving Shift closed.
-fn macos_handoff(pid: u32, image: &Path, bundle: &Path, log: &Path) -> String {
-    format!(
-        r#"#!/bin/sh
-pid="{pid}"
-image="{image}"
-bundle="{bundle}"
-log="{log}"
+#[cfg(target_os = "macos")]
+const MACOS_HANDOFF_SCRIPT: &str = r#"#!/bin/sh
+if [ "$#" -ne 4 ]; then
+  exit 2
+fi
+pid="$1"
+image="$2"
+bundle="$3"
+log="$4"
 while kill -0 "$pid" 2>/dev/null; do sleep 0.2; done
-mount="$TMPDIR/Shift Updates/mount.$$"
-[ -n "$TMPDIR" ] || mount="/tmp/Shift Updates/mount.$$"
-mkdir -p "${{mount%/*}}"
+mount_base="${TMPDIR:-/tmp}"
+mount="$mount_base/Shift Updates/mount.$$"
+mkdir -p "${mount%/*}"
 if ! /usr/bin/hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$image" >>"$log" 2>&1; then
   echo "mount failed" >>"$log"
   /usr/bin/open "$bundle"
@@ -764,25 +856,20 @@ fi
 [ "$status" -eq 0 ] || echo "handoff failed; reopening the previous copy" >>"$log"
 /usr/bin/open "$bundle"
 exit "$status"
-"#,
-        pid = pid,
-        image = image.display(),
-        bundle = bundle.display(),
-        log = log.display(),
-    )
-}
+"#;
 
 /// The Windows handoff: wait for this process to exit, run the installer silently,
 /// then start the copy the installer wrote. The installer refuses to overwrite a
 /// running EXE, so the wait is the whole point of the script.
 #[cfg(target_os = "windows")]
-fn windows_handoff(pid: u32, installer: &Path, log: &Path) -> String {
-    format!(
-        r#"@echo off
-setlocal EnableExtensions
-set "WAIT_FOR={pid}"
-set "INSTALLER={installer}"
-set "LOG={log}"
+const WINDOWS_HANDOFF_SCRIPT: &str = r#"@echo off
+setlocal EnableExtensions DisableDelayedExpansion
+set "WAIT_FOR=%~1"
+set "INSTALLER=%~2"
+set "LOG=%~3"
+if not defined WAIT_FOR exit /b 2
+if not defined INSTALLER exit /b 2
+if not defined LOG exit /b 2
 set /a TRIES=0
 :waitloop
 tasklist /FI "PID eq %WAIT_FOR%" /NH /FO CSV 2>nul | find /I "shift.exe" >nul || goto install
@@ -795,16 +882,12 @@ for /f "tokens=1,2,*" %%a in ('reg query "HKCU\Software\Shift" /v InstallDirecto
 start /wait "" "%INSTALLER%" /S
 if errorlevel 1 echo installer exited with %ERRORLEVEL% >> "%LOG%"
 if exist "%TARGET%" start "" "%TARGET%"
-"#,
-        pid = pid,
-        installer = installer.display(),
-        log = log.display(),
-    )
-}
+"#;
 
 /// Write a handoff script and start it detached, so it is still alive when this
-/// process has exited. `name` is the file in the update directory.
-fn spawn_handoff(name: &str, script: &str) -> Result<(), String> {
+/// process has exited. Paths travel as process arguments rather than interpolated
+/// script text, so folder names cannot change the helper's script source.
+fn spawn_handoff(name: &str, script: &str, arguments: &[&OsStr]) -> Result<(), String> {
     let path = download_directory().join(name);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -816,11 +899,11 @@ fn spawn_handoff(name: &str, script: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     let mut command = crate::process::command("cmd.exe");
     #[cfg(target_os = "windows")]
-    command.args(["/D", "/C", &path.to_string_lossy().to_string()]);
+    command.args(["/D", "/C"]).arg(&path).args(arguments);
     #[cfg(not(target_os = "windows"))]
     let mut command = crate::process::command("/bin/sh");
     #[cfg(not(target_os = "windows"))]
-    command.arg(&path);
+    command.arg(&path).args(arguments);
     command
         .spawn()
         .map_err(|error| format!("Could not start the updater: {error}"))?;
@@ -843,17 +926,33 @@ fn quit_for_update(app: &AppHandle) {
 /// system the way a double-click would.
 #[tauri::command]
 pub async fn update_install(app: AppHandle) -> Result<String, String> {
-    let path = app
+    let status = app
         .state::<UpdateState>()
         .status
         .lock()
         .ok()
-        .and_then(|guard| guard.as_ref().and_then(|status| status.path.clone()))
+        .and_then(|guard| guard.clone())
+        .filter(|status| status.state == "ready")
         .ok_or_else(|| "Download and verify an update first.".to_string())?;
+    let path = status
+        .path
+        .clone()
+        .ok_or_else(|| "Download and verify an update first.".to_string())?;
+    let expected_sha256 = status.sha256.clone();
+    let expected_size = status.size;
     tauri::async_runtime::spawn_blocking(move || {
         let artifact = PathBuf::from(&path);
         let log = download_directory().join("handoff.log");
         let pid = std::process::id();
+
+        if let Err(error) =
+            verify_downloaded_artifact(&artifact, expected_size, &expected_sha256)
+        {
+            let _ = fs::remove_file(&artifact);
+            return Err(format!(
+                "The downloaded update no longer matches the manifest. It was discarded: {error}"
+            ));
+        }
 
         // A bundled macOS build replaces itself; `open`ing the disk image instead
         // would leave the user dragging a window they were told to stop expecting.
@@ -871,16 +970,33 @@ pub async fn update_install(app: AppHandle) -> Result<String, String> {
                         "Shift cannot replace itself in {folder}. Open the downloaded installer to update by hand."
                     ));
                 }
-                let script = macos_handoff(pid, &artifact, &bundle, &log);
-                spawn_handoff("Shift-update.sh", &script)?;
+                let pid_argument = pid.to_string();
+                spawn_handoff(
+                    "Shift-update.sh",
+                    MACOS_HANDOFF_SCRIPT,
+                    &[
+                        OsStr::new(&pid_argument),
+                        artifact.as_os_str(),
+                        bundle.as_os_str(),
+                        log.as_os_str(),
+                    ],
+                )?;
                 quit_for_update(&app);
                 return Ok(path);
             }
         }
         #[cfg(target_os = "windows")]
         {
-            let script = windows_handoff(pid, &artifact, &log);
-            spawn_handoff("Shift-update.cmd", &script)?;
+            let pid_argument = pid.to_string();
+            spawn_handoff(
+                "Shift-update.cmd",
+                WINDOWS_HANDOFF_SCRIPT,
+                &[
+                    OsStr::new(&pid_argument),
+                    artifact.as_os_str(),
+                    log.as_os_str(),
+                ],
+            )?;
             quit_for_update(&app);
             return Ok(path);
         }
@@ -931,8 +1047,24 @@ pub async fn update_install(app: AppHandle) -> Result<String, String> {
 /// Drop the downloaded installer so the next check starts clean.
 #[tauri::command]
 pub fn update_clear(app: AppHandle) {
-    if let Ok(mut guard) = app.state::<UpdateState>().status.lock() {
-        *guard = None;
+    let downloaded = app
+        .state::<UpdateState>()
+        .status
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.take())
+        .and_then(|status| status.path);
+    if let Some(path) = downloaded {
+        let artifact = PathBuf::from(path);
+        let is_download = artifact.parent() == Some(download_directory().as_path())
+            && artifact
+                .file_name()
+                .and_then(OsStr::to_str)
+                .and_then(safe_artifact_name)
+                .is_some();
+        if is_download {
+            let _ = fs::remove_file(artifact);
+        }
     }
     let _ = app.emit("update://status", serde_json::Value::Null);
 }
@@ -1180,9 +1312,47 @@ mod tests {
     }
 
     #[test]
-    fn a_newer_schema_is_not_guessed_at() {
-        let error = parse_manifest(&SAMPLE.replace("\"schema\": 1", "\"schema\": 9")).unwrap_err();
-        assert!(error.contains("schema"), "{error}");
+    fn artifact_names_stay_inside_the_release_directory() {
+        for safe in ["Shift.dmg", "Shift-Setup_0.2.0.exe", "a.b_c-1.AppImage"] {
+            assert_eq!(safe_artifact_name(safe), Some(safe));
+        }
+        for unsafe_name in [
+            "",
+            ".",
+            "..",
+            "../Shift.dmg",
+            "folder/Shift.dmg",
+            r"folder\Shift.dmg",
+            "/tmp/Shift.dmg",
+            "Shift dmg",
+            "Shift.dmg;rm",
+            "Shift'$(whoami)",
+            "Shift%TEMP%.dmg",
+            "Shift\n.dmg",
+            " Shift.dmg",
+            "Shift.dmg ",
+            "Shift.dmg.",
+            "CON",
+            "NUL.txt",
+            "COM1",
+            "LPT9.log",
+        ] {
+            assert_eq!(safe_artifact_name(unsafe_name), None, "{unsafe_name:?}");
+        }
+        let traversal = SAMPLE.replace("Shift-macOS-universal.dmg", "../Shift.dmg");
+        assert!(parse_manifest(&traversal).is_err());
+        let empty = SAMPLE.replace("\"size\": 55113440", "\"size\": 0");
+        assert!(parse_manifest(&empty).is_err());
+    }
+
+    #[test]
+    fn only_the_supported_schema_is_accepted() {
+        for schema in [0, 2, 9] {
+            let manifest = SAMPLE.replace("\"schema\": 1", &format!("\"schema\": {schema}"));
+            let error = parse_manifest(&manifest).unwrap_err();
+            assert!(error.contains("schema"), "{error}");
+        }
+        assert!(parse_manifest(SAMPLE).is_ok());
     }
 
     #[test]
@@ -1205,13 +1375,12 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn the_macos_handoff_waits_for_this_process_before_it_touches_the_bundle() {
-        let script = macos_handoff(
-            4242,
-            Path::new("/tmp/Shift Updates/Shift.dmg"),
-            Path::new("/Applications/Shift.app"),
-            Path::new("/tmp/handoff.log"),
+        let script = MACOS_HANDOFF_SCRIPT;
+        assert!(
+            script.contains("pid=\"$1\""),
+            "the script lost its pid argument"
         );
-        assert!(script.contains("pid=\"4242\""), "the script lost our pid");
+        assert!(!script.contains("/Applications/Shift.app"));
         // The wait must come before any write to the bundle, or the copy races the
         // running executable.
         let wait = script.find("kill -0 \"$pid\"").expect("no wait loop");
@@ -1229,15 +1398,12 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn the_windows_handoff_installs_only_after_this_process_is_gone() {
-        let script = windows_handoff(
-            4242,
-            Path::new("C:\\Users\\me\\Shift-Setup.exe"),
-            Path::new("C:\\tmp\\handoff.log"),
-        );
+        let script = WINDOWS_HANDOFF_SCRIPT;
         assert!(
-            script.contains("set \"WAIT_FOR=4242\""),
+            script.contains("set \"WAIT_FOR=%~1\""),
             "the script lost our pid"
         );
+        assert!(!script.contains("C:\\Users\\me\\Shift-Setup.exe"));
         let wait = script
             .find("tasklist /FI \"PID eq %WAIT_FOR%\"")
             .expect("no wait");
@@ -1318,6 +1484,26 @@ mod tests {
             "ecd3fad7a4d35d7130c6748352d88f164f156375925f87464afe21b344af97dd"
         );
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_installer_changed_after_download_is_refused() {
+        let path = std::env::temp_dir().join(format!("shift-verify-{}", uuid::Uuid::new_v4()));
+        fs::write(&path, b"installer bytes").unwrap();
+        let digest = sha256_of(&path).unwrap();
+        verify_downloaded_artifact(&path, 15, &digest).unwrap();
+
+        let changed = b"installer bytes plus a change";
+        fs::write(&path, changed).unwrap();
+        let error = verify_downloaded_artifact(&path, 15, &digest).unwrap_err();
+        assert!(
+            error.contains("size") || error.contains("changed"),
+            "{error}"
+        );
+
+        let error = verify_downloaded_artifact(&path, changed.len() as u64, &digest).unwrap_err();
+        assert!(error.contains("changed after verification"), "{error}");
+        let _ = fs::remove_file(path);
     }
 
     /// The whole channel, offline: a manifest and its artifact served out of a
