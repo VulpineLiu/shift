@@ -117,6 +117,7 @@ export const api = {
     ),
   pinReady: (id: number | null) => invoke<void>("pin_ready", { id }),
   closePin: () => invoke<void>("close_pin"),
+  zoomPin: () => invoke<boolean>("zoom_pin"),
   getRadialContext: () => invoke<RadialContext | null>("get_radial_context"),
   hideRadial: () => invoke<void>("hide_radial"),
   showFilesInRadial: (files: string[], mode?: "actions" | "formats" | "tools") =>

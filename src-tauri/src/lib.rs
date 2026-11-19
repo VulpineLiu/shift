@@ -467,6 +467,7 @@ pub fn run() {
             editor::get_pinned_image,
             editor::pin_ready,
             editor::close_pin,
+            editor::zoom_pin,
             drag_bridge::get_radial_context,
             drag_bridge::hide_radial,
             drag_bridge::stand_down_radial,

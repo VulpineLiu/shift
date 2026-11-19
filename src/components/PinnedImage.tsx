@@ -1,7 +1,7 @@
 import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { writeImage } from "@tauri-apps/plugin-clipboard-manager";
-import { Copy, X } from "lucide-react";
+import { Copy, Maximize2, Minimize2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import { api } from "../lib/api";
@@ -22,6 +22,10 @@ export function PinnedImage() {
   );
   const [src, setSrc] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Whether the window is showing the enlarged size. Rust owns the real answer and
+  // the button only asks it to flip, so this exists to label the button the way the
+  // window looks rather than to remember a size the page cannot measure.
+  const [enlarged, setEnlarged] = useState(false);
   const latestId = useRef(0);
   const renderedId = useRef(0);
 
@@ -41,6 +45,8 @@ export function PinnedImage() {
       if (preview.id === renderedId.current) return;
       latestId.current = preview.id;
       setPath(preview.path);
+      // A new pin always opens small, whatever the last one was left at.
+      setEnlarged(false);
       const image = new Image();
       image.onload = () => {
         if (disposed) return;
@@ -101,6 +107,16 @@ export function PinnedImage() {
     await writeImage(path);
   }
 
+  async function zoom() {
+    try {
+      setEnlarged(await api.zoomPin());
+    } catch {
+      // The window stayed the size it was, so the label stays true and the press is
+      // simply repeated. A pin that cannot be resized has nothing the user is waiting
+      // to read, which is not worth covering the picture with an error card.
+    }
+  }
+
   if (error) {
     return <div className="pin-error" role="alert">{error}</div>;
   }
@@ -125,6 +141,14 @@ export function PinnedImage() {
         )}
       </div>
       <div className="pin-actions">
+        <button
+          type="button"
+          title={t(enlarged ? "restorePin" : "enlargePin")}
+          aria-pressed={enlarged}
+          onClick={() => void zoom()}
+        >
+          {enlarged ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
+        </button>
         <button type="button" title={t("copy")} onClick={() => void copy()}>
           <Copy size={13} />
         </button>
