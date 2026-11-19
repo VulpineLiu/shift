@@ -56,9 +56,13 @@ MASTER = 1024  # the master canvas `tauri icon` downsamples from
 TILE = 820  # tile edge; the committed icon.png is 410 of 512, i.e. 0.801
 TILE_CORNER = TILE * 228 / 1024  # same 0.222 corner ratio as the committed set
 WHEEL_R = 326  # wheel radius in master units
-WEDGE_INK = "#FFB25C"  # the warm amber the old master already carried
-HUB_INK = "#F04F24"  # the accent every button in the app is painted with
-TILE_INK = "#37221A"  # the espresso tile the plus is punched out of
+# The app icon is the tray mark with its colour turned on: one warm ground, one
+# cream mark, and the plus left as a hole in the mark so the ground shows through
+# it. That is the same figure/ground relationship the tray file has, which is what
+# "consistent design" meant in the request — the tray must be untinted because the
+# shell colours it, and a Dock tile needs a ground of its own.
+TILE_INK = "#FF6B35"  # the orange this project's own master already carried
+MARK_INK = "#FFF4EA"  # the cream every panel in the app is drawn on
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -145,15 +149,14 @@ def build_master_svg() -> str:
     tile sits on the user's wallpaper with nothing behind it, so it needs a
     ground of its own and gets to be warm.
 
-    Three flat colours and nothing else. No gradient, no drop shadow, no
-    radial shine and no per-wedge pastel tint, because that layered treatment
-    is a different visual language and is exactly why the old rainbow tile and
-    the crisp new mark read as two unrelated products. The hues are the app's
-    own rather than invented for the icon: `#FFB25C` is the tone the previous
-    master already carried and `#F04F24` is the accent every button in the
-    interface is painted with, and keeping the darker warm disc inside the
-    lighter ring preserves which end of the mark is which, so the Dock does not
-    invert on upgrade.
+    Two flat colours and nothing else. No gradient, no drop shadow, no radial
+    shine and no per-wedge pastel tint: that layered treatment is a different
+    visual language, and it is what made the old rainbow tile and the crisp
+    mark read as two unrelated products. The hues are the app's own rather than
+    invented for the icon — `#FF6B35` is the orange this project's master
+    already carried and `#FFF4EA` is the cream its panels are drawn on — and
+    the plus stays a hole rather than a second colour, so the mark sits on the
+    ground exactly the way it sits on the menu bar.
 
     The plus is drawn in the tile's own colour instead of cut through to
     transparency: on a Dock tile the two read identically, and a real hole
@@ -187,8 +190,8 @@ def build_master_svg() -> str:
         'fill="none" xmlns="http://www.w3.org/2000/svg">\n'
         f"  <rect x=\"{offset:.0f}\" y=\"{offset:.0f}\" width=\"{TILE}\" height=\"{TILE}\" "
         f'rx="{TILE_CORNER:.2f}" fill="{TILE_INK}"/>\n'
-        f'  <g fill="{WEDGE_INK}">\n' + "\n".join(wedges) + "\n  </g>\n"
-        f'  <circle cx="{center:.0f}" cy="{center:.0f}" r="{HUB * scale:.2f}" fill="{HUB_INK}"/>\n'
+        f'  <g fill="{MARK_INK}">\n' + "\n".join(wedges) + "\n  </g>\n"
+        f'  <circle cx="{center:.0f}" cy="{center:.0f}" r="{HUB * scale:.2f}" fill="{MARK_INK}"/>\n'
         f'  <path d="M{center - arm:.2f} {center:.0f}H{center + arm:.2f}'
         f'M{center:.0f} {center - arm:.2f}V{center + arm:.2f}" '
         f'stroke="{TILE_INK}" stroke-width="{bar:.2f}"/>\n'
@@ -221,7 +224,7 @@ def main() -> int:
     build_tray(args.tray_out)
     args.master_out.parent.mkdir(parents=True, exist_ok=True)
     args.master_out.write_text(build_master_svg(), encoding="utf-8")
-    print(f"wrote {_shown(args.master_out)} (flat three-colour master)")
+    print(f"wrote {_shown(args.master_out)} (flat two-colour master)")
 
     if args.tauri:
         # Full-bleed would be wrong: `tauri icon` scales the master rather than
