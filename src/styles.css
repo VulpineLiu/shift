@@ -4220,6 +4220,38 @@ body[data-view="radial"] .share-backdrop {
   box-shadow: inset 0 0 0 1.5px rgba(240, 79, 36, 0.55);
 }
 
+/* The favourite's own mark, on the leading corner of the thumbnail.
+
+   The star that sets a favourite lives in the row's action cluster, and that cluster
+   is `opacity: 0` until the pointer arrives, so across a list whose whole point is
+   outliving the files it names, a favourited file looked exactly like an ordinary one
+   until you hovered it. This mark is the half of the state that survives without a
+   hover; the inset ring above stays as the quiet half.
+
+   It hangs from the row rather than the thumbnail: the icon box is `overflow: hidden`
+   to clip pictures to its rounded corners, so a badge on that box would be cut off.
+   The row is already `position: relative`, and its own padding is the gutter the badge
+   sits in, which is why no thumbnail in the list has to move over it. On its own disc
+   it stays readable over a picture that happens to be dark, which a bare star would
+   not. */
+.home-recent-favorite {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 999px;
+  color: #e8891b;
+  background: rgba(255, 252, 249, 0.94);
+  box-shadow: 0 1px 3px rgba(60, 33, 18, 0.24);
+  /* The badge belongs to the row, not to the pointer: neither opening the file nor
+     dragging the row out of Shift may be interrupted by it. */
+  pointer-events: none;
+}
+
 .home-card-clear {
   flex: none;
   margin-left: -4px;
