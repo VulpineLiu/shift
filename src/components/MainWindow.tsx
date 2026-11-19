@@ -300,6 +300,14 @@ export function MainWindow() {
   const [sharePaths, setSharePaths] = useState<string[] | null>(null);
   const toastTimer = useRef<number | null>(null);
   const [, setNowTick] = useState(0);
+  /**
+   * How many rows the slow clock tick has to re-age. Kept in a ref because the tick
+   * lives in a mount-only effect and must not be rebuilt every time the list moves.
+   */
+  const recentCount = useRef(0);
+  useEffect(() => {
+    recentCount.current = recent.length;
+  }, [recent.length]);
   const [dropAction, setDropAction] = useState<DropAction | null>(null);
   /** True while a Recent row is being dragged, which the native `dragging` never covers. */
   const [rowDragging, setRowDragging] = useState(false);
@@ -837,15 +845,43 @@ export function MainWindow() {
     // Keeps the relative timestamps honest without re-reading storage constantly.
     // The same slow tick keeps relative timestamps and the hotkey-ownership
     // notice honest, so a copy that quits clears the warning without a restart.
-    const clockTimer = window.setInterval(() => {
-      setNowTick((value) => value + 1);
+    //
+    // Shift spends its life parked in the menu bar with this window hidden, and a
+    // timer that ignores that is the app waking up twice a minute to repaint a list
+    // nobody can see, forever. So the interval exists only while the page is
+    // visible - the same rule `useSystemSnapshot` in nex_squid applies to its
+    // polling - and an empty library is not worth a render at all, because the tick
+    // exists to re-age rows that are not there. The hotkey check still runs on
+    // becoming visible, which is the moment its answer could have changed.
+    let clockTimer: number | null = null;
+    const clockTick = () => {
+      if (recentCount.current > 0) setNowTick((value) => value + 1);
       if (isTauri()) void refreshHotkeys();
-    }, 30_000);
+    };
+    const startClock = () => {
+      if (clockTimer === null) clockTimer = window.setInterval(clockTick, 30_000);
+    };
+    const stopClock = () => {
+      if (clockTimer !== null) {
+        window.clearInterval(clockTimer);
+        clockTimer = null;
+      }
+    };
+    const onClockVisibility = () => {
+      if (document.hidden) stopClock();
+      else {
+        clockTick();
+        startClock();
+      }
+    };
+    startClock();
+    document.addEventListener("visibilitychange", onClockVisibility);
     return () => {
       unlisteners.forEach((unlisten) => unlisten());
       unsubscribeRecent();
       unsubscribeHistory();
-      window.clearInterval(clockTimer);
+      stopClock();
+      document.removeEventListener("visibilitychange", onClockVisibility);
       if (toastTimer.current) window.clearTimeout(toastTimer.current);
     };
     // Handlers only use stable setters and imported APIs.

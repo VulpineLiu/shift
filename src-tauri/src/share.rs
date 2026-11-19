@@ -47,6 +47,21 @@ const MAGIC: &[u8; 4] = b"SHSF";
 /// A local-network attacker can mint unlimited beacon ids. Keep the visible peer
 /// table bounded so discovery cannot grow without limit.
 const MAX_PEERS: usize = 256;
+/// How long the discovery thread may sleep inside `recv_from` before checking the
+/// clock again. This is the loop's heartbeat, so it is the whole cost of a Shift that
+/// is running and has nothing to do.
+const LISTEN_TIMEOUT: Duration = Duration::from_millis(400);
+/// The same wait while this copy stays silent on the discovery port. It still has to
+/// hear other copies — being switched off means "do not announce", not "be deaf", and
+/// a deaf copy cannot be sent to — but nothing is timed except a peer's expiry, so it
+/// can afford to wake a quarter as often.
+const LISTEN_TIMEOUT_SILENT: Duration = Duration::from_millis(1_600);
+/// How often stale peers are dropped and the list is compared against what the UI was
+/// last told. With peers live this stays sharp enough that a machine which stops
+/// answering leaves the list inside its own timeout; with none, the tick has nothing to
+/// expire and nothing to report, so it is worth a quarter as much.
+const PEER_CHECK: Duration = Duration::from_millis(600);
+const PEER_CHECK_IDLE: Duration = Duration::from_millis(2_400);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -246,6 +261,21 @@ impl ShareState {
         let before = peers.len();
         peers.retain(|_, peer| peer.seen.elapsed() < PEER_TIMEOUT);
         peers.len() != before
+    }
+
+    /// Whether this copy currently knows of another copy, ignoring its own id.
+    /// Used only to decide how often the discovery loop may check the clock, never
+    /// to decide what the peer list contains.
+    fn has_peers(&self) -> bool {
+        let local_id = self
+            .local
+            .lock()
+            .map(|local| local.id.clone())
+            .unwrap_or_default();
+        self.peers
+            .lock()
+            .map(|peers| peers.keys().any(|id| *id != local_id))
+            .unwrap_or(false)
     }
 
     fn add_pending(&self, transfer_id: &str, respond: mpsc::Sender<Decision>, notice_id: &str) {
@@ -760,6 +790,9 @@ fn beacon_loop(app: &AppHandle, mut sock: UdpSocket, local: &Beacon) {
     // working is replaced rather than abandoned, and the loop never exits.
     'discovery: loop {
         prepare(&sock);
+        // `prepare` gives a fresh socket the default heartbeat, so the cadence the
+        // loop wants is re-applied on the first pass rather than assumed.
+        let mut listen_timeout = Duration::ZERO;
         let opened = Instant::now();
         let mut last_announce = opened - BEACON_INTERVAL;
         let mut last_scan = opened - SWEEP_INTERVAL;
@@ -770,6 +803,18 @@ fn beacon_loop(app: &AppHandle, mut sock: UdpSocket, local: &Beacon) {
                 let state = app.state::<ShareState>();
                 (state.is_enabled(), state.take_refresh_request())
             };
+            // A silent copy has no beacon to time, so it can wait longer for the next
+            // packet and wake a quarter as often. An announced peer is still heard just
+            // as fast, because the announce clock below is untouched.
+            let wanted = if discoverable {
+                LISTEN_TIMEOUT
+            } else {
+                LISTEN_TIMEOUT_SILENT
+            };
+            if wanted != listen_timeout {
+                listen_timeout = wanted;
+                let _ = sock.set_read_timeout(Some(wanted));
+            }
             if discoverable && (refresh || last_announce.elapsed() >= BEACON_INTERVAL) {
                 announce(&sock, &payload);
                 let destinations = app.state::<ShareState>().peer_destinations();
@@ -826,7 +871,8 @@ fn beacon_loop(app: &AppHandle, mut sock: UdpSocket, local: &Beacon) {
                 }
             }
 
-            if last_peer_check.elapsed() >= Duration::from_millis(600) {
+            let watched = discoverable || app.state::<ShareState>().has_peers();
+            if last_peer_check.elapsed() >= if watched { PEER_CHECK } else { PEER_CHECK_IDLE } {
                 last_peer_check = Instant::now();
                 let state = app.state::<ShareState>();
                 state.expire();
@@ -1620,6 +1666,35 @@ mod tests {
         assert!(!state.is_enabled());
     }
 
+    /// The distinction the discovery thread's idle cadence is built on.
+    ///
+    /// Switching ShiftDrop off means "stop announcing", never "stop listening": a
+    /// silent copy still hears beacons, so another machine can still find and send to
+    /// it, and `expire()` still runs so a peer that went away really leaves the list.
+    /// A change that made a disabled copy deaf would look like a CPU win and quietly
+    /// break sending, so it is pinned here rather than only in a comment.
+    #[test]
+    fn a_silent_copy_still_knows_and_still_loses_peers() {
+        let state = ShareState::default();
+        let address: SocketAddr = "192.168.1.40:51234".parse().unwrap();
+        assert!(!state.has_peers(), "a fresh copy knows nobody");
+        state.enabled.store(false, Ordering::Relaxed);
+        assert!(
+            state.note(&beacon(), address),
+            "a silent copy must still record a peer it hears"
+        );
+        assert!(state.has_peers());
+        // The slow bookkeeping tick still has something to expire; if `expire` only
+        // ran while enabled, this peer would sit in the list forever pretending to be live.
+        state
+            .peers
+            .lock()
+            .unwrap()
+            .values_mut()
+            .for_each(|peer| peer.seen = Instant::now() - PEER_TIMEOUT);
+        assert!(state.expire(), "a silent copy must still expire its peers");
+        assert!(!state.has_peers());
+    }
     #[test]
     fn directed_broadcasts_follow_the_interface_netmask() {
         assert_eq!(

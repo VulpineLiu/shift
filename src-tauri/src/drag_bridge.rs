@@ -153,6 +153,8 @@ fn spawn_windows_monitor(app: &AppHandle) {
             unsafe {
                 GetCursorPos(&mut point);
             }
+            // Read once per pass so the sleep below and the arming test below agree.
+            let enabled = drag_enabled(&app);
 
             if !mouse_down {
                 // Release ends the gesture. macOS gets an explicit `cancel` from its
@@ -168,7 +170,7 @@ fn spawn_windows_monitor(app: &AppHandle) {
                 }
                 armed = false;
                 mouse_was_down = false;
-                thread::sleep(std::time::Duration::from_millis(33));
+                thread::sleep(monitor_pause(enabled, false));
                 continue;
             }
 
@@ -182,7 +184,7 @@ fn spawn_windows_monitor(app: &AppHandle) {
                     reported_foreground = true;
                     eprintln!("shift: press started inside Shift itself, ignoring this gesture");
                 }
-                thread::sleep(std::time::Duration::from_millis(33));
+                thread::sleep(monitor_pause(enabled, armed));
                 continue;
             }
             reported_foreground = false;
@@ -194,23 +196,23 @@ fn spawn_windows_monitor(app: &AppHandle) {
             let threshold_y = unsafe { GetSystemMetrics(SM_CYDRAG) }.max(4);
 
             if !armed {
-                if !drag_enabled(&app) {
+                if !enabled {
                     if !reported_disabled {
                         reported_disabled = true;
                         eprintln!("shift: drag ring is disabled in settings, ignoring the gesture");
                     }
-                    thread::sleep(std::time::Duration::from_millis(100));
+                    thread::sleep(monitor_pause(enabled, armed));
                     continue;
                 }
                 reported_disabled = false;
                 if !shift {
-                    thread::sleep(std::time::Duration::from_millis(33));
+                    thread::sleep(monitor_pause(enabled, armed));
                     continue;
                 }
                 if (point.x - down.x).abs() <= threshold_x
                     && (point.y - down.y).abs() <= threshold_y
                 {
-                    thread::sleep(std::time::Duration::from_millis(33));
+                    thread::sleep(monitor_pause(enabled, armed));
                     continue;
                 }
                 armed = true;
@@ -236,9 +238,32 @@ fn spawn_windows_monitor(app: &AppHandle) {
                 }
             }
 
-            thread::sleep(std::time::Duration::from_millis(33));
+            thread::sleep(monitor_pause(enabled, armed));
         }
     });
+}
+
+/// How long the Windows gesture watch sleeps before reading the mouse again.
+///
+/// The thread used to poll at 33ms for the whole life of the app: four user-input
+/// calls, thirty times a second, forever, including on a machine where the ring is
+/// switched off in Settings and no gesture can ever start. A disabled ring can afford
+/// a quarter second, because the only thing it is waiting for is the switch itself,
+/// and a flip in Settings is worth noticing within a blink rather than a frame.
+///
+/// An enabled ring keeps the original 33ms. That is not conservatism: the gesture is
+/// a press-drag-release, and the loop has to observe the press in order to measure
+/// the drag threshold from where the button went down. A slower watch does not merely
+/// notice a finished gesture late, it never records the press at all, so the ring
+/// silently stops opening for users who drag quickly. Once a gesture is in flight the
+/// fast cadence is required for the same reason, which is why `armed` outranks `enabled`.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn monitor_pause(enabled: bool, armed: bool) -> std::time::Duration {
+    if enabled || armed {
+        std::time::Duration::from_millis(33)
+    } else {
+        std::time::Duration::from_millis(250)
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -585,4 +610,40 @@ pub async fn show_files_in_radial(
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_enabled_ring_keeps_the_press_by_polling_at_33ms() {
+        // The gesture is only recognised because the loop sees the button go down and
+        // measures the drag threshold from that point, so the watch cannot be slowed
+        // while the feature is switched on.
+        assert_eq!(
+            monitor_pause(true, false),
+            std::time::Duration::from_millis(33),
+            "an enabled ring must keep sampling at the original cadence"
+        );
+    }
+
+    #[test]
+    fn a_disabled_ring_is_watched_four_times_a_second_instead_of_thirty() {
+        assert_eq!(
+            monitor_pause(false, false),
+            std::time::Duration::from_millis(250),
+            "a switched-off ring should not cost a 33ms input poll for the life of the app"
+        );
+    }
+
+    #[test]
+    fn a_gesture_in_flight_outranks_the_switch_being_flipped_off() {
+        // Settings can be reached mid-drag; a gesture that has already armed must not
+        // slow down and drop the rest of the movement it is tracking.
+        assert_eq!(
+            monitor_pause(false, true),
+            std::time::Duration::from_millis(33)
+        );
+    }
 }
