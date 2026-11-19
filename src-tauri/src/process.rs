@@ -23,6 +23,11 @@ const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
 /// would let a verbose child fill the pipe and block until the deadline.
 const MAX_CAPTURED_OUTPUT: usize = 4 * 1024 * 1024;
 
+/// Present in every message this module returns for a child that outlived its deadline.
+/// A caller that must treat "never answered" differently from "answered no" matches on
+/// this rather than on the whole sentence, whose seconds count varies.
+pub const TIMEOUT_MARKER: &str = "did not finish within";
+
 fn drain_output(mut reader: impl Read) -> Vec<u8> {
     let mut captured = Vec::new();
     let mut buffer = [0_u8; 8192];
@@ -127,7 +132,7 @@ pub fn output_with_timeout(
                 let _ = child.kill();
                 let _ = child.wait();
                 break Err(format!(
-                    "The command did not finish within {} seconds.",
+                    "The command {TIMEOUT_MARKER} {} seconds.",
                     timeout.as_secs()
                 ));
             }
@@ -166,6 +171,64 @@ pub fn status_with_timeout(
         .ok_or_else(|| "The converter exited without a status.".to_string())
 }
 
+/// `output_with_timeout` for a long-running install. The installer's exit code is only
+/// half the answer - `winget` says the things that matter ("already installed", "needs
+/// administrator") in its output - so this captures both, keeps the console hidden, and
+/// runs the child below the UI's priority the way `status_with_timeout` does.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn output_hidden_with_timeout(
+    program: impl AsRef<OsStr>,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<Output, String> {
+    let mut command = command(program);
+    background(&mut command);
+    command
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let deadline = Instant::now() + timeout;
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Could not start the command: {error}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .map(|pipe| std::thread::spawn(move || drain_output(pipe)));
+    let stderr = child
+        .stderr
+        .take()
+        .map(|pipe| std::thread::spawn(move || drain_output(pipe)));
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "The command {TIMEOUT_MARKER} {} seconds.",
+                    timeout.as_secs()
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("Could not monitor the command: {error}"));
+            }
+        }
+    };
+    Ok(Output {
+        status,
+        stdout: stdout
+            .and_then(|reader| reader.join().ok())
+            .unwrap_or_default(),
+        stderr: stderr
+            .and_then(|reader| reader.join().ok())
+            .unwrap_or_default(),
+    })
+}
+
 fn status_with_args_and_timeout(
     program: impl AsRef<OsStr>,
     args: &[&str],
@@ -190,7 +253,7 @@ fn status_with_args_and_timeout(
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!(
-                    "The conversion did not finish within {} seconds.",
+                    "The conversion {TIMEOUT_MARKER} {} seconds.",
                     started.elapsed().as_secs()
                 ));
             }

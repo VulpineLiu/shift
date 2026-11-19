@@ -596,11 +596,16 @@ fn find_winget_package_tool(name: &str, file_names: &[String]) -> Option<PathBuf
     None
 }
 
+/// Resolved Windows tool paths, keyed by the command name the caller asked for. The
+/// search walks several install trees, so it is done once per name; `reset_tool_cache`
+/// is what forgets it after an install changes the machine.
+#[cfg(target_os = "windows")]
+static WINDOWS_TOOL_CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<String, PathBuf>>> =
+    OnceLock::new();
+
 #[cfg(target_os = "windows")]
 fn find_windows_tool(name: &str) -> Option<PathBuf> {
-    static FOUND: OnceLock<std::sync::Mutex<std::collections::HashMap<String, PathBuf>>> =
-        OnceLock::new();
-    let cache = FOUND.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let cache = WINDOWS_TOOL_CACHE.get_or_init(Default::default);
     if let Some(path) = cache.lock().ok().and_then(|tools| tools.get(name).cloned()) {
         return Some(path);
     }
@@ -611,6 +616,114 @@ fn find_windows_tool(name: &str) -> Option<PathBuf> {
         }
     }
     found
+}
+
+/// Forget every resolved tool path. A package manager has just installed something, and
+/// a path found before that install is no longer a safe answer.
+#[cfg(target_os = "windows")]
+pub(crate) fn reset_tool_cache() {
+    if let Some(cache) = WINDOWS_TOOL_CACHE.get() {
+        if let Ok(mut tools) = cache.lock() {
+            tools.clear();
+        }
+    }
+}
+
+/// Pick up a PATH that changed while Shift was running.
+///
+/// An install writes the new directory into the registry, and a fresh shell or Explorer
+/// window picks it up from there; a running process keeps the environment block it was
+/// launched with. Without this, a component Shift has *just* installed stays invisible to
+/// its own resolver, and the panel reports an install that succeeded as a failure.
+/// Reading the two registry PATHs into the live environment also means every child
+/// process Shift starts from now on inherits it.
+#[cfg(target_os = "windows")]
+pub(crate) fn refresh_process_path() {
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    let mut directories: Vec<PathBuf> = std::env::split_paths(&current)
+        .filter(|directory| !directory.as_os_str().is_empty())
+        .collect();
+    let before = directories.len();
+    for key in [
+        (
+            windows_sys::Win32::System::Registry::HKEY_CURRENT_USER,
+            r"Environment",
+        ),
+        (
+            windows_sys::Win32::System::Registry::HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        ),
+    ] {
+        let Some(path) = windows_registry_path(key.0, key.1) else {
+            continue;
+        };
+        for directory in std::env::split_paths(&path) {
+            if !directory.as_os_str().is_empty() && !directories.contains(&directory) {
+                directories.push(directory);
+            }
+        }
+    }
+    if directories.len() == before {
+        return;
+    }
+    if let Ok(path) = std::env::join_paths(directories) {
+        std::env::set_var("PATH", path);
+    }
+}
+
+/// `Path` from a registry environment key: `HKCU\Environment` for the per-user PATH
+/// and the Session Manager key for the machine PATH.
+///
+/// `RegGetValueW` is asked without `RRF_NOEXPAND`, so a value stored as
+/// `REG_EXPAND_SZ` arrives with `%SystemRoot%`-style references already resolved, which
+/// is how the system builds a process environment from the same key.
+#[cfg(target_os = "windows")]
+fn windows_registry_path(
+    root: windows_sys::Win32::System::Registry::HKEY,
+    subkey: &str,
+) -> Option<std::ffi::OsString> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::Registry::{RegGetValueW, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ};
+
+    let subkey: Vec<u16> = subkey.encode_utf16().chain(std::iter::once(0)).collect();
+    let name: Vec<u16> = "Path".encode_utf16().chain(std::iter::once(0)).collect();
+    let filter = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ;
+    let mut size = 0_u32;
+    let queried = unsafe {
+        RegGetValueW(
+            root,
+            subkey.as_ptr(),
+            name.as_ptr(),
+            filter,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut size,
+        )
+    };
+    if queried != 0 || size == 0 {
+        return None;
+    }
+    let mut buffer = vec![0_u16; size as usize / std::mem::size_of::<u16>()];
+    let read = unsafe {
+        RegGetValueW(
+            root,
+            subkey.as_ptr(),
+            name.as_ptr(),
+            filter,
+            std::ptr::null_mut(),
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+        )
+    };
+    if read != 0 {
+        return None;
+    }
+    let end = buffer
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(buffer.len());
+    let raw = std::ffi::OsString::from_wide(&buffer[..end]);
+    Some(raw)
 }
 
 #[cfg(target_os = "windows")]

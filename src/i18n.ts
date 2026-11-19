@@ -202,6 +202,14 @@ const messages: Record<Lang, Record<string, string>> = {
       "Automatic installation requires Microsoft App Installer (WinGet). Install or update it, then try again.",
     runtimeInstallUnsupported: "Automatic installation is not available for this component.",
     runtimeInstallFailed: "Installation failed.",
+    runtimeInstallNeedsAdmin:
+      "This component installs machine-wide, so Windows asks for permission. The prompt was closed, so nothing was installed — press Install again and choose Yes.",
+    runtimeInstallNotOnPath:
+      "The installer finished, but Shift cannot find the tool yet. Restart Shift and press Refresh.",
+    runtimeInstallNoPackageManager:
+      "WinGet could not reach its package source. Check the network, or install the component yourself and press Refresh.",
+    runtimeInstallTimedOut:
+      "WinGet did not answer, usually because a Windows Update is holding the installer. Try again once it finishes.",
     runtimeOpenHomebrew: "Open brew.sh",
     runtimeOpenWinget: "WinGet setup guide",
     runtimeBundledInApp: "Included in Shift",
@@ -460,6 +468,14 @@ const messages: Record<Lang, Record<string, string>> = {
       "Windows 自动安装需要“应用安装程序”（WinGet）。安装或更新后请重试。",
     runtimeInstallUnsupported: "此组件暂不支持自动安装。",
     runtimeInstallFailed: "安装失败。",
+    runtimeInstallNeedsAdmin:
+      "该组件需要为整机安装，Windows 会请求管理员权限。授权窗口被关闭了，因此没有安装：请再次点击“安装”并选择“是”。",
+    runtimeInstallNotOnPath:
+      "安装程序已完成，但 Shift 暂时找不到该工具。请重启 Shift 后点击“重新检测”。",
+    runtimeInstallNoPackageManager:
+      "WinGet 无法连接组件源。请检查网络，或自行安装该组件后点击“重新检测”。",
+    runtimeInstallTimedOut:
+      "WinGet 没有响应，通常是被 Windows 更新占住了安装程序。等它结束后再试。",
     runtimeOpenHomebrew: "打开 brew.sh",
     runtimeOpenWinget: "打开 WinGet 安装说明",
     runtimeBundledInApp: "随 Shift 内置",

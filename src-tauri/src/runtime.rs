@@ -40,6 +40,176 @@ struct InstallTarget {
     executable: &'static str,
 }
 
+/// One argument set handed to `winget install`, tried in the order the installer uses
+/// them. A single command line is not enough because two of its flags depend on the
+/// package rather than on the caller: without `--source winget` a machine that also
+/// carries the msstore source can stop on an agreement that `--silent` never answers,
+/// and `--scope user` is refused outright by a package that only installs machine-wide.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WingetAttempt {
+    /// Pin the community source and ask for a per-user install explicitly. This is the
+    /// rung that can succeed where an unscoped install was refused for want of
+    /// administrator rights, and it still needs no elevation.
+    UserScope,
+    /// The same command without a scope, which is what this app has always sent: WinGet
+    /// picks the scope the package itself prefers.
+    Unscoped,
+    /// Force the machine-wide scope, where Poppler, FFmpeg, ImageMagick and Typst
+    /// live. Reaching it means elevating, so it is attempted last.
+    MachineScope,
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+impl WingetAttempt {
+    /// The order a package is offered to `winget`, unelevated. The unscoped shape leads
+    /// because it is the command line that has always been sent, so a package that
+    /// installs per-user by default is served on the first attempt exactly as before. The
+    /// explicit user scope follows as the no-prompt escape hatch for a package whose
+    /// default is machine-wide: WinGet rejects an unsupported scope while it is still
+    /// choosing an installer, so that rung costs a handshake rather than a download.
+    const LADDER: [WingetAttempt; 2] = [WingetAttempt::Unscoped, WingetAttempt::UserScope];
+
+    fn args(self, package_id: &str) -> Vec<String> {
+        let scope = match self {
+            WingetAttempt::UserScope => Some("user"),
+            WingetAttempt::Unscoped => None,
+            WingetAttempt::MachineScope => Some("machine"),
+        };
+        let mut args = vec![
+            "install".to_string(),
+            "--id".to_string(),
+            package_id.to_string(),
+            "--exact".to_string(),
+            // `winget` and not `msstore`: a store package needs an agreement these
+            // flags cannot settle, and none of the components Shift installs live there.
+            "--source".to_string(),
+            "winget".to_string(),
+            "--silent".to_string(),
+            "--accept-package-agreements".to_string(),
+            "--accept-source-agreements".to_string(),
+        ];
+        if let Some(scope) = scope {
+            args.push("--scope".to_string());
+            args.push(scope.to_string());
+        }
+        args
+    }
+}
+
+/// What one `winget` run means. WinGet reports several outcomes that are not failures
+/// as a non-zero exit code, so `ExitStatus::success()` alone cannot decide: reading
+/// "this package is already installed" as an error is exactly what makes the one-click
+/// install report failure on a machine where the component is fine.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WingetOutcome {
+    /// Installed, or already there. Either way the row's re-detection has the last word.
+    Succeeded,
+    /// WinGet itself cannot serve the request - disabled app execution alias, no
+    /// working source, no network. No package-shaped retry can fix that, so the batch
+    /// stops and says which.
+    Unrecoverable,
+    /// The package needs elevation, which an unelevated attempt cannot supply.
+    NeedsElevation,
+    /// A real failure of this attempt, worth retrying in another shape.
+    Failed,
+}
+
+/// WinGet raises its own `APPINSTALLER_CLI_ERROR_*` codes under facility `0x8A15`, and
+/// the two elevation outcomes arrive as plain Win32 errors under `0x8007`. Matching the
+/// whole code rather than its low 16 bits keeps a Win32 error that happens to share a
+/// tail with a WinGet code from being read as the wrong thing.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+mod winget_codes {
+    /// APPINSTALLER_CLI_ERROR_PACKAGE_ALREADY_INSTALLED
+    pub const ALREADY_INSTALLED: u32 = 0x8A15_002B;
+    /// APPINSTALLER_CLI_ERROR_UPDATE_NOT_APPLICABLE: the package is there and current.
+    pub const NO_UPGRADE_APPLICABLE: u32 = 0x8A15_0016;
+    /// APPINSTALLER_CLI_ERROR_NO_APPLICABLE_INSTALLER
+    pub const NO_APPLICABLE_INSTALLER: u32 = 0x8A15_0061;
+    /// APPINSTALLER_CLI_ERROR_INSTALLER_BLOCKED_BY_POLICY
+    pub const BLOCKED_BY_POLICY: u32 = 0x8A15_002D;
+    /// APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND
+    pub const PACKAGE_NOT_FOUND: u32 = 0x8A15_0018;
+    /// APPINSTALLER_CLI_ERROR_SOURCE_NOT_CONFIGURED
+    pub const SOURCE_NOT_CONFIGURED: u32 = 0x8A15_00A5;
+    /// APPINSTALLER_CLI_ERROR_CLIREPAIR_FAILED: the alias exists but WinGet cannot run.
+    pub const CLI_REPAIR_FAILED: u32 = 0x8A15_0003;
+    /// APPINSTALLER_CLI_ERROR_PACKAGE_IN_USE: something holds the install target open.
+    pub const PACKAGE_IN_USE: u32 = 0x8A15_0064;
+    /// ERROR_INSTALL_USEREXIT: the user said no to the elevation prompt.
+    pub const ELEVATION_DECLINED: u32 = 0x8007_012C;
+    /// ERROR_ELEVATION_REQUIRED
+    pub const ELEVATION_REQUIRED: u32 = 0x8007_04C7;
+}
+
+/// Classify a `winget` exit code.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn classify_winget_status(code: u32) -> WingetOutcome {
+    use winget_codes::*;
+    match code {
+        0 | ALREADY_INSTALLED | NO_UPGRADE_APPLICABLE => WingetOutcome::Succeeded,
+        NO_APPLICABLE_INSTALLER
+        | BLOCKED_BY_POLICY
+        | PACKAGE_NOT_FOUND
+        | SOURCE_NOT_CONFIGURED
+        | CLI_REPAIR_FAILED => WingetOutcome::Unrecoverable,
+        ELEVATION_DECLINED | ELEVATION_REQUIRED | PACKAGE_IN_USE => WingetOutcome::NeedsElevation,
+        _ => WingetOutcome::Failed,
+    }
+}
+
+/// Second opinion from what `winget` printed, used when the exit code is not one of the
+/// codes above. WinGet's own wording is the only place the two outcomes that matter
+/// most are distinguishable: an elevation the user refused and a source that was never
+/// agreed to both arrive as generic failures.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn classify_winget_output(output: &str) -> Option<WingetOutcome> {
+    let text = output.to_ascii_lowercase();
+    // "No applicable upgrade was found", "already installed", "Package is already
+    // installed" - the component is on the machine whatever the exit code said.
+    if text.contains("already installed") || text.contains("no applicable upgrade") {
+        return Some(WingetOutcome::Succeeded);
+    }
+    if text.contains("administrator")
+        || text.contains("elevated")
+        || text.contains("elevation")
+        || text.contains("run as admin")
+    {
+        return Some(WingetOutcome::NeedsElevation);
+    }
+    if text.contains("no official windows package manager source")
+        || text.contains("found no source")
+        || text.contains("source agreement")
+        || text.contains("the term 'winget'")
+        || text.contains("is not recognized")
+        || text.contains("server is unavailable")
+        // Reaching for the machine scope cannot fix a machine that cannot download, and
+        // an elevation prompt on top of a network failure reads as one more thing broken.
+        || text.contains("internet")
+        || text.contains("download")
+        || text.contains("unable to connect")
+        || text.contains("the server returned")
+    {
+        return Some(WingetOutcome::Unrecoverable);
+    }
+    None
+}
+
+/// Decide from the exit code first, since it is exact, and fall back to the installer's
+/// words for everything it leaves ambiguous. A code that is not in the table is a
+/// failure of *this* command line, so it stays `Failed` and the next shape is tried;
+/// matching the wording only for the phrases above is what keeps a genuine download
+/// error from being read as an elevation problem.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn classify_winget_with_output(code: u32, output: &str) -> WingetOutcome {
+    match classify_winget_status(code) {
+        WingetOutcome::Failed => classify_winget_output(output).unwrap_or(WingetOutcome::Failed),
+        outcome => outcome,
+    }
+}
+
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn macos_install_target(id: &str) -> Option<InstallTarget> {
     match id {
@@ -415,28 +585,56 @@ pub async fn install_runtime_components(component_ids: Vec<String>) -> Result<()
 /// Install a group of components as one request. The package managers hold one lock
 /// per tool, so the batch runs one install after another instead of racing itself,
 /// and a package that serves several rows (Poppler answers both PDF rows on Windows)
-/// is installed once. The first failure stops the batch: it is nearly always the
-/// package manager itself, so repeating the same failure per row would only add waits.
-/// Callers refresh afterwards, which is what reports the rows that did land.
+/// is installed once.
+///
+/// A row that fails does not abandon the rows after it: on Windows the usual reasons are
+/// per-package (a declined elevation prompt, one installer that refused), and dropping the
+/// rest would punish components that had nothing to do with the failure. Only an answer
+/// about WinGet itself - missing, no source, no answer - stops the batch, because every
+/// remaining row would spend its full timeout discovering the same thing. Callers refresh
+/// afterwards, which is what reports the rows that did land.
 fn install_runtime_components_sync(component_ids: &[String]) -> Result<(), String> {
     let mut installed: Vec<&'static str> = Vec::new();
+    let mut first_failure: Option<String> = None;
     for component_id in component_ids {
         let target = install_target(component_id)
             .ok_or_else(|| "unsupported-runtime-component".to_string())?;
         if installed.contains(&target.package_id) {
             continue;
         }
-        install_target_package(target)?;
+        if let Err(error) = install_target_package(target) {
+            if ends_the_batch(&error) {
+                return Err(error);
+            }
+            first_failure.get_or_insert(error);
+            continue;
+        }
         installed.push(target.package_id);
     }
-    Ok(())
+    match first_failure {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Whether an install failure is a verdict on the package manager rather than on one
+/// package, and therefore worth stopping a batch over.
+fn ends_the_batch(error: &str) -> bool {
+    matches!(
+        error,
+        "homebrew-missing"
+            | "winget-missing"
+            | "winget-unavailable"
+            | "winget-install-timeout"
+            | "winget-launch-failed"
+            | "unsupported-runtime-component"
+    )
 }
 
 fn install_target_package(target: InstallTarget) -> Result<(), String> {
-    let timeout = Duration::from_secs(15 * 60);
-
     #[cfg(target_os = "macos")]
     {
+        let timeout = Duration::from_secs(15 * 60);
         let brew = files::resolve_tool("brew").ok_or_else(|| "homebrew-missing".to_string())?;
         let status =
             crate::process::status_with_timeout(brew, &["install", target.package_id], timeout)
@@ -452,28 +650,7 @@ fn install_target_package(target: InstallTarget) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        let winget = files::resolve_tool("winget").ok_or_else(|| "winget-missing".to_string())?;
-        let status = crate::process::status_with_timeout(
-            winget,
-            &[
-                "install",
-                "--id",
-                target.package_id,
-                "--exact",
-                "--silent",
-                "--accept-package-agreements",
-                "--accept-source-agreements",
-            ],
-            timeout,
-        )
-        .map_err(|error| format!("winget-install-failed: {error}"))?;
-        if !status.success() {
-            return Err(format!("winget-install-failed: {status}"));
-        }
-        if files::resolve_tool(target.executable).is_none() {
-            return Err("winget-install-missing-binary".to_string());
-        }
-        Ok(())
+        install_windows_package(target)
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -481,6 +658,196 @@ fn install_target_package(target: InstallTarget) -> Result<(), String> {
         let _ = target;
         Err("runtime-install-unsupported".to_string())
     }
+}
+
+/// How long one unelevated `winget` run may take. A package manager that is going to
+/// answer at all answers in well under this; the ceiling exists so a run that stops on a
+/// prompt it can never be answered cannot spend the whole panel's patience twice.
+#[cfg(target_os = "windows")]
+const WINGET_TIMEOUT: Duration = Duration::from_secs(8 * 60);
+
+/// Longer for the elevated attempt, whose clock includes the time a person spends
+/// reading the UAC prompt.
+#[cfg(target_os = "windows")]
+const WINGET_ELEVATED_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
+/// Run `winget install` once and say what it meant.
+#[cfg(target_os = "windows")]
+fn run_winget(
+    winget: &Path,
+    attempt: WingetAttempt,
+    package_id: &str,
+) -> Result<WingetOutcome, String> {
+    let args = attempt.args(package_id);
+    let references: Vec<&str> = args.iter().map(String::as_str).collect();
+    // A run that never answered would not answer on the next shape either, so the
+    // timeout leaves here as its own code rather than being retried.
+    let output = crate::process::output_hidden_with_timeout(winget, &references, WINGET_TIMEOUT)
+        .map_err(|error| {
+            if error.contains(crate::process::TIMEOUT_MARKER) {
+                "winget-install-timeout".to_string()
+            } else {
+                "winget-launch-failed".to_string()
+            }
+        })?;
+    let code = output.status.code().unwrap_or(-1) as u32;
+    let report = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let outcome = classify_winget_with_output(code, &report);
+    if outcome != WingetOutcome::Succeeded {
+        // The exit code and the installer's own words are worth having in a log, and
+        // too long for a sentence: the panel shows a dictionary entry instead.
+        eprintln!("winget {code:#010x}: {}", report.trim());
+    }
+    Ok(outcome)
+}
+
+/// Whether the hosting shell said the elevation prompt was refused. PowerShell raises
+/// `OperationCanceledException` / "The operation was canceled by the user" for a dismissed
+/// UAC dialog, which is the only place that decision appears in words.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn elevation_was_declined(report: &str) -> bool {
+    let text = report.to_ascii_lowercase();
+    text.contains("canceled by the user")
+        || text.contains("cancelled by the user")
+        || text.contains("operationwas_canceled")
+        || text.contains("this operation requires elevation")
+}
+
+/// Install one WinGet package: several command lines, because the flags that decide
+/// success are properties of the package rather than of the caller, and one final check
+/// of what actually reached disk.
+#[cfg(target_os = "windows")]
+fn install_windows_package(target: InstallTarget) -> Result<(), String> {
+    let winget = files::resolve_tool("winget").ok_or_else(|| "winget-missing".to_string())?;
+    for attempt in WingetAttempt::LADDER {
+        match run_winget(&winget, attempt, target.package_id)? {
+            // Whatever the exit code said, the tool is either on this machine now or it
+            // is not, and that is the only question the panel answers.
+            WingetOutcome::Succeeded => return verify_windows_install(target),
+            WingetOutcome::Unrecoverable => return Err("winget-unavailable".to_string()),
+            WingetOutcome::Failed => continue,
+            // Keep working down the ladder: a package that answers "needs administrator"
+            // to an unscoped install may still install per-user, which is what the next
+            // rung asks for. A prompt is only raised once every unelevated shape has been
+            // refused, because the prompt itself is what makes an install feel broken to a
+            // user who expected a settings switch to just work.
+            WingetOutcome::NeedsElevation => continue,
+        }
+    }
+    match elevate_windows_install(target.package_id) {
+        // The only outcome the user can act on by pressing the button again.
+        Err(ElevationError::Declined) => Err("winget-elevation-declined".to_string()),
+        Err(ElevationError::Unavailable) => Err("winget-launch-failed".to_string()),
+        Ok(WingetOutcome::Unrecoverable) => Err("winget-unavailable".to_string()),
+        // A failure is a failure even when the disk check would also say "not there":
+        // the two have different advice, and "restart Shift" is only honest about an
+        // install that *reported* success.
+        Ok(WingetOutcome::Failed) => Err("winget-install-failed".to_string()),
+        // Asking a second time after the machine scope itself was refused would only
+        // repeat the refusal, and "restart Shift" would be the wrong advice: the blocker
+        // is administrator rights, which is exactly what that message tells the user.
+        Ok(WingetOutcome::NeedsElevation) => Err("winget-elevation-declined".to_string()),
+        // A machine-scope success lands in a directory the installer itself adds to the
+        // machine PATH, which is exactly what `verify_windows_install` re-reads.
+        Ok(WingetOutcome::Succeeded) => verify_windows_install(target),
+    }
+}
+
+/// The panel's answer is only as good as the last check: WinGet reporting success and
+/// the executable not existing are both reasons to say "missing", and neither is a
+/// reason to claim the install failed when the PATH simply has not been read again.
+#[cfg(target_os = "windows")]
+fn verify_windows_install(target: InstallTarget) -> Result<(), String> {
+    files::refresh_process_path();
+    files::reset_tool_cache();
+    if files::resolve_tool(target.executable).is_some() {
+        return Ok(());
+    }
+    // An installer that has just finished can still hold the new directory until its
+    // own cleanup writes the registry, so look once more after a short pause.
+    std::thread::sleep(Duration::from_secs(2));
+    files::refresh_process_path();
+    files::reset_tool_cache();
+    if files::resolve_tool(target.executable).is_some() {
+        return Ok(());
+    }
+    Err("winget-install-missing-binary".to_string())
+}
+
+/// What stopped the machine-wide attempt from running at all.
+#[cfg(target_os = "windows")]
+enum ElevationError {
+    /// Windows asked, and the answer was no: a decision the user made, not a malfunction,
+    /// and the only one that is fixed by pressing the same button again.
+    Declined,
+    /// The elevated install could not be started, so nothing was ever refused.
+    Unavailable,
+}
+
+/// Ask WinGet for the machine-wide install through a shell that can elevate, since a
+/// process started without a console cannot raise a UAC prompt of its own.
+///
+/// `Start-Process -Verb RunAs -Wait -PassThru` is the shape that works from a GUI app:
+/// PowerShell shows the prompt, waits for the installer, and hands back its exit code.
+/// The elevated `winget` prints into its own console, so its prose never reaches us, but
+/// the *hosting* shell's does - and that is where a dismissed prompt announces itself,
+/// which no exit code reports reliably.
+#[cfg(target_os = "windows")]
+fn elevate_windows_install(package_id: &str) -> Result<WingetOutcome, ElevationError> {
+    let script = format!(
+        "$p = Start-Process -FilePath winget.exe -ArgumentList '{}' -Verb RunAs -WindowStyle Hidden -Wait -PassThru; exit $p.ExitCode",
+        WingetAttempt::MachineScope
+            .args(package_id)
+            .iter()
+            .map(|argument| format!("'{argument}'"))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let output = crate::process::output_hidden_with_timeout(
+        powershell(),
+        &[
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &script,
+        ],
+        WINGET_ELEVATED_TIMEOUT,
+    )
+    // Either the shell is not there or the prompt was never answered; neither is a
+    // refusal, so neither is reported as one.
+    .map_err(|_| ElevationError::Unavailable)?;
+    let code = output.status.code().unwrap_or(-1) as u32;
+    let report = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // PowerShell reports a dismissed prompt as an exception rather than an exit code, and
+    // `Start-Process` answers 1223 (ERROR_CANCELLED) when the elevated child reports it.
+    if code == 1223 || elevation_was_declined(&report) {
+        return Err(ElevationError::Declined);
+    }
+    // The re-detection is the authority on whether the tool ended up usable, so a success
+    // here means "go and look", and a failure is classified for the caller.
+    if output.status.success() {
+        return Ok(WingetOutcome::Succeeded);
+    }
+    Ok(classify_winget_with_output(code, &report))
+}
+
+#[cfg(target_os = "windows")]
+fn powershell() -> PathBuf {
+    // The 64-bit path, so a 32-bit host cannot be handed the 32-bit shell whose WinGet
+    // view of the machine differs on a few packages.
+    let system =
+        env::var_os("SystemRoot").unwrap_or_else(|| std::ffi::OsString::from("C:\\Windows"));
+    PathBuf::from(system).join(r"System32\WindowsPowerShell\v1.0\powershell.exe")
 }
 
 fn machine_info_sync() -> RuntimeInfo {
@@ -724,6 +1091,191 @@ mod tests {
                 "{} is reported missing with no install entry",
                 component.id
             );
+        }
+    }
+
+    /// Regression for the Windows one-click install: every command line pinned the
+    /// community source, because an unpinned `winget` on a machine that also carries
+    /// msstore can stop on an agreement that `--silent` never answers, and the run then
+    /// looks identical to a slow install until the deadline kills it.
+    #[test]
+    fn every_winget_attempt_pins_the_community_source() {
+        for attempt in [
+            WingetAttempt::UserScope,
+            WingetAttempt::Unscoped,
+            WingetAttempt::MachineScope,
+        ] {
+            let args = attempt.args("Gyan.FFmpeg");
+            let joined = args.join(" ");
+            assert!(joined.contains("--source winget"), "{joined}");
+            assert!(joined.contains("--exact"), "{joined}");
+            assert!(joined.contains("--accept-source-agreements"), "{joined}");
+        }
+    }
+
+    /// Elevation is the last resort, so no unelevated rung may ask for the machine scope,
+    /// and the rung that goes first has to be the plain command line that this app has
+    /// always sent: a package that installs per-user by default must behave exactly as it
+    /// did before. The explicit user scope is the escape hatch tried second, for a package
+    /// whose default is machine-wide.
+    #[test]
+    fn the_ladder_escalates_scope_only_when_it_must() {
+        let scope = |attempt: WingetAttempt| -> Option<String> {
+            let args = attempt.args("pandoc");
+            let at = args.iter().position(|arg| arg == "--scope")?;
+            args.get(at + 1).cloned()
+        };
+        assert_eq!(scope(WingetAttempt::Unscoped), None);
+        assert_eq!(scope(WingetAttempt::UserScope), Some("user".into()));
+        assert_eq!(
+            scope(WingetAttempt::MachineScope),
+            Some("machine".into()),
+            "the escalated attempt must be explicit about the machine scope"
+        );
+        assert_eq!(
+            WingetAttempt::LADDER,
+            [WingetAttempt::Unscoped, WingetAttempt::UserScope],
+            "neither unelevated rung may request the machine scope"
+        );
+    }
+
+    /// The heart of the bug: WinGet reports "already installed" as a non-zero exit code.
+    /// Reading that as a failure is what made the panel say the one-click install failed
+    /// on a machine where the component was already present and working.
+    #[test]
+    fn an_already_installed_package_is_not_a_failure() {
+        use winget_codes::*;
+        assert_eq!(classify_winget_status(0), WingetOutcome::Succeeded);
+        assert_eq!(
+            classify_winget_status(ALREADY_INSTALLED),
+            WingetOutcome::Succeeded
+        );
+        assert_eq!(
+            classify_winget_status(NO_UPGRADE_APPLICABLE),
+            WingetOutcome::Succeeded
+        );
+    }
+
+    /// Only elevation-shaped codes may send the installer down the UAC path, and only
+    /// package-manager-shaped codes may stop a whole batch. A Win32 error that happens to
+    /// share the low 16 bits of a WinGet code must not be confused for one: that is why
+    /// the whole code is matched.
+    #[test]
+    fn exit_codes_are_separated_by_who_can_fix_them() {
+        use winget_codes::*;
+        assert_eq!(
+            classify_winget_status(ELEVATION_REQUIRED),
+            WingetOutcome::NeedsElevation
+        );
+        assert_eq!(
+            classify_winget_status(ELEVATION_DECLINED),
+            WingetOutcome::NeedsElevation
+        );
+        assert_eq!(
+            classify_winget_status(PACKAGE_IN_USE),
+            WingetOutcome::NeedsElevation
+        );
+        assert_eq!(
+            classify_winget_status(CLI_REPAIR_FAILED),
+            WingetOutcome::Unrecoverable
+        );
+        assert_eq!(
+            classify_winget_status(SOURCE_NOT_CONFIGURED),
+            WingetOutcome::Unrecoverable
+        );
+        assert_eq!(
+            classify_winget_status(BLOCKED_BY_POLICY),
+            WingetOutcome::Unrecoverable
+        );
+        // A plain Win32 code sharing a tail with a WinGet one stays an ordinary failure.
+        assert_eq!(classify_winget_status(0x8007_002B), WingetOutcome::Failed);
+        assert_eq!(classify_winget_status(0x8007_0005), WingetOutcome::Failed);
+    }
+
+    /// Two outcomes that arrive as generic failures are only separable from the
+    /// installer's wording, and both change what the user should do next.
+    #[test]
+    fn the_installer_own_words_break_a_tie() {
+        assert_eq!(
+            classify_winget_with_output(
+                0x8007_0005,
+                "Package installation failed: this package requires administrator privileges."
+            ),
+            WingetOutcome::NeedsElevation
+        );
+        assert_eq!(
+            classify_winget_with_output(0x8007_0005, "No applicable upgrade was found."),
+            WingetOutcome::Succeeded
+        );
+        assert_eq!(
+            classify_winget_with_output(0x8007_0005, "Found no source; agreements not accepted."),
+            WingetOutcome::Unrecoverable
+        );
+        // An exact code outranks the prose: an unhelpful log line cannot turn a real
+        // success into a retry.
+        assert_eq!(
+            classify_winget_with_output(0x8A15_002B, "installation failed"),
+            WingetOutcome::Succeeded
+        );
+        assert_eq!(
+            classify_winget_with_output(0x8007_0057, "something nobody has read yet"),
+            WingetOutcome::Failed
+        );
+        // A machine that cannot download must stop here. Left to fall through as an
+        // ordinary failure it would reach the elevated attempt and raise a UAC prompt
+        // that cannot possibly help, which is how a network outage gets reported as
+        // "installation failed" on a machine where the answer was "check your Wi-Fi".
+        for report in [
+            "Internet connection failed. Check your network.",
+            "Download of installer failed.",
+            "Unable to connect to the server.",
+        ] {
+            assert_eq!(
+                classify_winget_with_output(0x8A15_0101, report),
+                WingetOutcome::Unrecoverable,
+                "{report} should not escalate to an elevation prompt"
+            );
+        }
+    }
+
+    /// A declined elevation prompt is reported by the hosting shell in prose rather than
+    /// by a reliable exit code, and it is the one failure the panel answers with "press
+    /// Install again and choose Yes".
+    #[test]
+    fn a_closed_prompt_reads_as_a_refusal() {
+        assert!(elevation_was_declined(
+            "Start-Process : The operation was canceled by the user"
+        ));
+        assert!(elevation_was_declined(
+            "This operation requires elevation. Run as administrator."
+        ));
+        assert!(
+            !elevation_was_declined("Internet connection failed. Check your network."),
+            "a dead network is not a user saying no"
+        );
+    }
+
+    /// Only a verdict about the package manager may abandon the rest of a batch. Per-package
+    /// outcomes - a declined prompt, one installer that refused - must leave the other rows
+    /// free to install, because "一键安装" is asking for all of them.
+    #[test]
+    fn only_a_broken_package_manager_ends_the_batch() {
+        for code in [
+            "homebrew-missing",
+            "winget-missing",
+            "winget-unavailable",
+            "winget-install-timeout",
+            "winget-launch-failed",
+        ] {
+            assert!(ends_the_batch(code), "{code} should stop the batch");
+        }
+        for code in [
+            "winget-elevation-declined",
+            "winget-install-failed",
+            "winget-install-missing-binary",
+            "homebrew-install-missing-binary",
+        ] {
+            assert!(!ends_the_batch(code), "{code} should not stop the batch");
         }
     }
 }

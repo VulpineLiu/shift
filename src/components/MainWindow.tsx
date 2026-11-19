@@ -519,7 +519,7 @@ export function MainWindow() {
     setRuntimeInstallHelp(
       message === "homebrew-missing"
         ? "homebrew"
-        : message === "winget-missing"
+        : message === "winget-missing" || message === "winget-unavailable"
           ? "winget"
           : null,
     );
@@ -541,14 +541,23 @@ export function MainWindow() {
       console.error(message);
       return t("runtimeInstallFailed");
     }
-    if (message.startsWith("winget-install-failed:")) {
-      console.error(message);
-      return t("runtimeInstallFailed");
-    }
     if (
       message === "homebrew-install-missing-binary" ||
       message === "winget-install-missing-binary"
     ) {
+      // The installer reported success and Shift still cannot see the tool. On Windows
+      // that is nearly always a PATH the running process has not re-read, and it is
+      // fixed by restarting Shift rather than by pressing Install again.
+      if (message === "winget-install-missing-binary") return t("runtimeInstallNotOnPath");
+      return t("runtimeInstallFailed");
+    }
+    // Windows names each shape of failure it can distinguish, because "installation
+    // failed" cannot tell a closed UAC prompt from a dead network - and only one of
+    // those is fixed by pressing the same button again.
+    if (message === "winget-elevation-declined") return t("runtimeInstallNeedsAdmin");
+    if (message === "winget-unavailable") return t("runtimeInstallNoPackageManager");
+    if (message === "winget-install-timeout") return t("runtimeInstallTimedOut");
+    if (message === "winget-install-failed" || message === "winget-launch-failed") {
       return t("runtimeInstallFailed");
     }
     // Every failure the installer raises is a code it names here, so anything
