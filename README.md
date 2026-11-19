@@ -209,7 +209,7 @@ PDF→image and PDF split write into a new `Name pages` folder containing `Page 
 | Cutout | Samples the four corners, averages the background, keys it out to transparency |
 | Undo | Pops annotations first, then image-level operations |
 | Save copy / Copy | New file with a suffix, or straight to the clipboard |
-| Pin | Floats the image as an always-on-top window with copy and close |
+| Pin | Floats the image as an always-on-top window with enlarge, copy and close |
 
 **Editor.** Images open the annotator; video opens a player; `txt` `md` `csv` `tsv` `html` `htm` open as read-only text previews. Copy, Save As, Open and Reveal are available for every kind. OCR, Copy Text and Pin appear for images only; text is not edited in place. The editor refuses text over 8 MB and images over 64 MB or 40 megapixels, and reports the limit instead of loading them.
 
@@ -218,7 +218,7 @@ PDF→image and PDF split write into a new `Name pages` folder containing `Page 
 Every capture, conversion result and received file is written by Rust into one library in the app data directory (`history.json`, capped at 300 entries), so all windows share a single list and a webview cache clear cannot throw it away. Because it sits outside the bundle, **it survives an update and a reinstall**; the first launch after upgrading also adopts whatever the 0.1 webview had kept in its own store, so a list built before that change is not lost either. The main window's **Recent** card is that library:
 
 - **Search** once the list grows past a few rows; it filters on the file name.
-- **Favorite** a row to keep it through the capacity limit, a deleted file, and Clear.
+- **Favorite** a row to keep it through the capacity limit, a deleted file, and Clear. A favourited row carries a star on its thumbnail, so the list can be read without hovering it.
 - **Remove** one row, or **Clear** the library - favorite rows stay.
 - **Drag a row out** into Finder, a mail composer or a chat window: the row carries a `file://` URL, so the receiving application gets the file rather than a path string. The plain-text path travels with it for editors.
 - **Drag a row onto Convert files, File tools or OCR** to run just that action on a file you already used — the same gesture, inverted. Like any drop it has to land on a button; releasing it back over the list runs nothing.

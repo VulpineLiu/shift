@@ -1,10 +1,10 @@
 # Shift 工程回归台账
 
-本文件记录 0.1.2 到 0.1.11 之间已经踩过、并且不应再次引入的工程问题，重点覆盖：
+本文件记录 0.1.2 到 0.1.12 之间已经踩过、并且不应再次引入的工程问题，重点覆盖：
 
 - Drop / 局域网设备发现
 - DOCX、Markdown 与图片转换
-- 设置面板与「运行组件」的显示口径
+- 设置面板与「运行组件」的显示口径，以及 Windows 上的一键安装组件
 - macOS DMG 打包及在其它机器上的安装
 
 它记录的是实现约束、故障原因和回归方法，不是用户手册。修改相关代码或打包配置前，
@@ -24,6 +24,7 @@
 | 0.1.9 | 重新支持把「最近使用」拖回三个主操作按钮，并且**按钮是唯一落点**——松开在面板其他位置不执行任何操作（见「『最近使用』拖回主面板的三个按钮」）；设置面板字号统一到 `--text-*` 阶梯；取消「截图后」行为选项，固定为结果卡片；修复 macOS「运行组件」把 AppKit 文档渲染器报成 Pandoc 缺失且没有安装入口的回归。 |
 | 0.1.10 | 拖放反馈收束到按钮：面板自身不再做拖拽动画，松开在非按钮处彻底静默（去掉 0.1.9 的提示浮层）；「文字识别」对非图片直接拒绝，不再退回格式环；托盘「识别图片文字…」改为「文字识别」。 |
 | 0.1.11 | Windows 实测「最近使用」拖到三个按钮全部完不成：页内文件拖拽在 WebView2 上 DOM 与原生两条投递路径都可能不上报，改由 `dragEnd` 兜底；开始拖动时先让闲置圆环让开，它无边框且始终置顶，正压在按钮上（两节都在「『最近使用』拖回主面板的三个按钮」里）。三个按钮的可用性判定收进 `src/lib/dropCapabilities.ts`，两种语言、两条投递路径共用一条"能处理就处理，不能处理就禁止"的规则。同一节里另有两处：内部拖拽被原生 `enter` 报成"没有文件"、从而三个按钮全部点亮（`dragPathsKnown()` 改为合并），以及禁止态定为**按钮禁用＋光标禁止符号**——光标原本由 wry 固定回报 Copy、页面改不动，现在由 `src-tauri/src/drop_cursor.rs` 在运行时接管那两条回报方法，把页面的判定翻译成原生拖放的拒绝（同一节也记了这条路上"被拒绝的手势没有收尾事件"这个坑）。局域网接收的文件从此也受「完成后在访达中显示」控制，一批只在最后一个落地时显示一次；「运行组件」缺失多项时可以一次装完。 |
+| 0.1.12 | Windows 实测「运行组件」一键安装失败：`winget` 把“已经装过”报成非零退出码，界面就照着说安装失败（见「Windows 一键安装运行组件」）。同一节还记了 `--source` 未钉住导致的静默挂死、机器级组件必须提权、以及装完之后进程内 PATH 仍是旧值这三处。另有三处与系统资源相关的约束：托盘改用自绘的黑白模板图（`scripts/build-tray-icon.py` 重建，`icon_as_template` 只在 macOS 生效）；钉图窗口的放大尺寸与位置必须按 work area 与 DPI 换算后夹取，见「钉图窗口的放大与还原」；闲置时的取样节奏——伴生进程 `native/macos/drag-bridge.swift` 无按压时 10Hz、Windows 手势监视 `monitor_pause` 在圆环关闭时 250ms、发现线程静默时 1.6s——都要在“关掉了就别一直占 CPU”和“还听得见、还能过期”之间取平衡。 |
 
 历史提交可以这样定位：
 
@@ -407,9 +408,109 @@ N 个组件」，行内的单个安装按钮保持原样，两种入口调用同
 | --- | --- |
 | 后端逐个串行安装，不能并发 | `brew` 与 `winget` 同一时刻只允许一个安装，并发只会互相锁住并报错。 |
 | 同一个 `package_id` 只装一次 | Windows 上 `pdf-render` 与 `pdf-to-word` 都指向 Poppler，按行安装会重复下载同一个包。 |
-| 第一个失败就中止整批 | 失败几乎总是包管理器本身（没装 brew / winget、网络不通），后面每行再等一次超时只是把同一个错误重复 N 遍。 |
+| 只有“包管理器本身坏了”才中止整批 | 没装 brew / winget、没有源、网络不通、winget 不回应：剩下的行只会把同一个错误重复 N 遍、各等一次超时。但**单个包**的失败（用户关掉 UAC、某一个安装程序自己拒绝）必须继续往下装，否则「一键安装 N 个组件」会因为一个组件被拒绝而放弃其余四个。判定收在 `ends_the_batch()`，有测试钉住。 |
 | 无论成功失败都 `refreshRuntime()` | 中止的批次里先前的安装可能已经落盘，面板必须重新检测才能显示真实状态，不能相信这一个回复。 |
 | 安装结果的名字由界面措辞 | `install_runtime_components` 返回 `()`：按既有约定，后端只报代号，`runtimeInstallComplete` / `runtimeInstallManyComplete` 两种数量由界面选择。 |
+
+## Windows 一键安装运行组件
+
+### 0.1.12 之前实测必然失败
+
+用户在 Windows 机器上点「一键安装组件」报失败。原先的实现是一条
+`winget install --id X --exact --silent --accept-package-agreements --accept-source-agreements`，
+非零就报错，然后用 `resolve_tool()` 验证二进制在不在。四个独立原因都藏在这十行里：
+
+1. **`winget` 把"已经装过"报成非零退出码。** `0x8A15002B`（PACKAGE_ALREADY_INSTALLED）与
+   `0x8A150016`（没有可升级版本）都是成功语义，但 `ExitStatus::success()` 一律当真失败。
+   机器上已经有 Pandoc 的用户，越"没问题"越必然看到"安装失败"。
+2. **不钉 `--source`。** 同时挂了 msstore 源的机器上，未钉源的 `winget` 可能停在一条
+   `--silent` 永远不会回答的源协议上；表现就是"卡住不动"，最后由 15 分钟超时收成失败。
+3. **机器级组件必然要提权。** Poppler / FFmpeg / ImageMagick / Typst 默认装到
+   Program Files，需要管理员；Shift 自身是免管理员的 GUI 进程，`--silent` 拿不到 UAC 就
+   直接失败。原先没有任何提权路径。
+4. **装完之后再验证也找不到。** 进程只持有启动时的环境块：`winget` 写进注册表的
+   `%LOCALAPPDATA%\Microsoft\WinGet\Links` 不会回流到运行中的 Shift，`which` 于是仍按旧
+   PATH 回答，`winget-install-missing-binary` 把一次真正成功的安装报成失败。
+
+### 不能随意改掉的约束
+
+| 约束 | 原因 |
+| --- | --- |
+| 退出码先判，代码表认不出来时才看 `winget` 的措辞 | 退出码是精确信号；措辞只用来分家两件码里分不开的事（用户关掉了 UAC、源没有接受协议）。反过来让措辞压过码，一句无用的日志就能把成功改成重试。 |
+| 只按完整码匹配，不按低 16 位 | Win32 的 `0x8007_xxxx` 与 WinGet 的 `0x8A15_xxxx` 会撞低 16 位；只看尾巴会把普通的访问被拒读成"需要提权"。 |
+| 每条命令都带 `--source winget` | 去掉它就会在挂了 msstore 的机器上静默挂死到超时——而那看起来就是"安装失败"。 |
+| 阶梯：不指定 scope → `--scope user` → 提权 `--scope machine` | 第一档就是历来发出去的那条命令，默认装到用户目录的包行为完全不变；`--scope user` 是"不弹 UAC 也能装机器级包"的出口，且 WinGet 在选安装器阶段就会拒绝不支持的 scope，所以这一档只花一次握手而不是整包下载；UAC 是最后一招，因为一个本该是开关的操作弹出授权框，正是"看起来坏了"的来源。 |
+| 提权走 `powershell Start-Process -Verb RunAs -Wait -PassThru` | 无控制台的 GUI 进程自己弹不出 UAC；提权后的 `winget` 写在自己的控制台里，但**宿主** shell 的输出仍在我们手上，而"用户取消"只在这里以文字出现（1223 只是旁证）。 |
+| 成功与否最终由磁盘上有没有那个可执行文件决定 | 装完先 `refresh_process_path()` + `reset_tool_cache()` 再找。`RegGetValueW` 不加 `RRF_NOEXPAND`，注册表里的 `REG_EXPAND_SZ` 会像系统构造进程环境那样展开。找不到才说"没装上"，并且说成"重启 Shift 后重新检测"，而不是"安装失败"。 |
+| 单个包失败不许放弃整批 | 见上一节；判定在 `ends_the_batch()`。 |
+
+`src-tauri/src/process.rs` 里 `output_hidden_with_timeout()` 是这套逻辑唯一的输出通道：
+它同时保留 `CREATE_NO_WINDOW`（GUI 进程不闪控制台）与持续排空管道（否则子进程写满管道会
+一直堵到超时）。超时消息统一含 `TIMEOUT_MARKER`，调用方据此区分"没回答"与"回答不要"。
+
+### 回归测试
+
+```bash
+cd src-tauri
+cargo test --lib runtime
+```
+
+- `an_already_installed_package_is_not_a_failure`：钉住原因 1，也就是这次实测失败的主因。
+- `exit_codes_are_separated_by_who_can_fix_them`：谁能修就分给谁，并钉住低 16 位撞车。
+- `every_winget_attempt_pins_the_community_source`：三档命令都必须带 `--source winget`。
+- `the_ladder_escalates_scope_only_when_it_must`：未提权的两档都不许要求 machine scope。
+- `the_installer_own_words_break_a_tie` / `a_closed_prompt_reads_as_a_refusal`：措辞只在码
+  认不出来时生效，且"网络断了"不能被读成"用户说了不要"。
+- `only_a_broken_package_manager_ends_the_batch`：整批中止的判定。
+
+## 钉图窗口的放大与还原
+
+钉图窗口原先只有「复制」和「关闭」，用户要的「放大」按钮并不存在——不是坏了，是没有。
+现在一颗按钮管两个方向：放大到屏幕，或退回钉住时的大小。
+
+| 约束 | 原因 |
+| --- | --- |
+| 尺寸按 work area，不按整块屏幕 | `monitor.size()` 含菜单栏与 Dock。按整屏算出来的钉图会有一部分永远压在菜单栏底下，而无边框窗口拖不回自己身上。 |
+| 逻辑像素给 `set_size`，物理像素给 `set_position` | 两者单位不同。混用后在 2x 屏上放大就是两倍大、位置偏一半——这台机器上验得出来，在 1x 外接屏上看不出来，所以由 `PinArea::logical_size()` 显式换算并命名。 |
+| 先 `set_size` 再 `set_position` | 混合 DPI 的桌面上，改尺寸可能把窗口挪到另一块屏，此时窗口自己的 scale factor 已经变了；顺序反过来位置就按旧的 scale 算。 |
+| 放大幅度封顶 3 倍 | 预览最长边本来就是 1040 px（`PIN_PREVIEW_EDGE`）。再往上只是把锯齿摊开，用户看到的是糊成一片的马赛克，不是更大的字。 |
+| 放大以窗口中心为锚点，并夹在 work area 内 | 以左上角为锚点读起来像"窗口被搬走了"；不夹取的话，贴着屏幕右缘钉住的图一放大就整张跑到屏幕外。 |
+| 每次重新钉都回到小图 | 窗口是复用而不是重建（`PIN_ENLARGED` 是唯一的记录）。否则上一次放到最大的用户，接下来每一张钉图都糊满全屏。 |
+| 读不到显示器就答小图，不猜 | `pin_window_size(.., None, true)` 走的是小图那一支。按一块幻影屏幕算出来的尺寸，是把图放到用户够不着的地方。 |
+
+按钮的文案（放大 / 恢复原大小）跟的是页面自己那份 `enlarged`，而真实尺寸只有 Rust 知道；
+`zoom_pin` 把翻转后的状态返回给页面，两边才不会各说各话。
+
+### 回归测试
+
+```bash
+cd src-tauri && cargo test --lib editor
+```
+
+`a_fresh_pin_never_exceeds_its_own_picture_or_520_px`、`enlarging_fills_the_screen_but_stays_inside_it`、
+`a_small_picture_is_not_blown_up_to_the_ceiling`、`an_enlarged_pin_grows_from_its_centre`、
+`a_pin_against_a_screen_edge_grows_inward_not_off_screen`。后两条钉的是"从中心放大"和
+"贴边时向内长"，因为它们在 1x 的单屏开发机上看起来永远是对的。
+
+## 闲置时的取样节奏
+
+Shift 绝大部分时间是停在菜单栏里没人碰的。这一节的每条节奏都是从实测里挑出来的，
+目的是把"关掉了就别一直占 CPU"和"还听得见、还能过期"同时满足。
+
+| 位置 | 节奏 | 原因 |
+| --- | --- | --- |
+| `native/macos/drag-bridge.swift` | 无按压 10Hz，按住切 30Hz | 伴生进程是**另一个被跟踪的进程**，原先永远 30Hz，而且每跳都分配一个 CGEvent 去读一个没人要的鼠标位置。与 0.1.11 的产物 A/B：空转 6 秒 20ms CPU → 0ms，按住 12 秒两边都是 30ms——手势采样一点没变粗。`NSTimer` 不能改自己的间隔，所以是换掉计时器而不是调它。 |
+| `src-tauri/src/drag_bridge.rs` `monitor_pause`（Windows） | 圆环开着 33ms，关了 250ms | 圆环开着时必须 33ms：这条循环要靠观察到"按下"才能从按下点量起拖拽阈值，放慢不是"晚一点发现"，而是**根本记不住按下**，于是快速拖动的用户从此开不了环。只有关掉圆环时才敢放慢，那时要等的只有开关本身。 |
+| `src-tauri/src/share.rs` 发现线程 | 信标 2s / 扫段 30s 不动；静默时收包等待 400ms→1.6s，无 peer 时账目检查 600ms→2.4s | **关掉 ShiftDrop 不等于变聋**：字段注释写的是"不主动播报"，`recv_from` 从来不受 `enabled` 约束，所以一台关掉的机器仍然听得见、仍然能被别人选来发送；`expire()` 也必须继续跑，否则一小时前的 peer 会永远挂在列表里冒充在线。所以省的是唤醒次数，不是探测能力。播报与扫段的频率一点没动，peer 被发现的速度因此不变。 |
+| `src/components/MainWindow.tsx` 30 秒时钟 | 页面可见才跑 | 主窗口一生大部分时间是隐藏的；隐藏的页面里每 30 秒重绘一次没人看的列表，正是 nex_squid `useSystemSnapshot` 用 `visibilitychange` 停掉的那类开销。空列表连 `setNowTick` 都省了——重新计时的是不存在的行。 |
+| 最近列表缩略图 | `IntersectionObserver` 只保留在视线内的图片 | `loading="lazy"` 只**推迟**解码，从不**释放**。在 WKWebView 里用 250 张真实截图量过：静止时 13 张解码，滚到底单调涨到 136 张再也不降；观察者接管后同样的滚动稳定在约 20 张。root 必须是列表本身而不是视口——行的裁剪来自列表的 `overflow-y`。 |
+
+托盘图标也在这一节，因为它省的是同一个东西：`src-tauri/icons/tray-template.png` 是
+`scripts/build-tray-icon.py` 画的纯 alpha 黑白标记（中性灰只在 Windows 上当底色用，
+macOS 完全忽略颜色），`icon_as_template(cfg!(target_os = "macos"))` 只在 macOS 生效——
+Windows 没有可以请求的着色。**别把它换回 `app.default_window_icon()`**：那是 512px 的彩色
+转盘，`tray-icon` 会把它按 18pt 高等比缩放，在菜单栏里就是一团色块，这正是"系统图标该是
+黑白"这条反馈的来由。
 
 ## 「最近使用」拖回主面板的三个按钮
 
