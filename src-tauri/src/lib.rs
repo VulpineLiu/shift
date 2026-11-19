@@ -225,16 +225,28 @@ pub fn refresh_tray_language(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// The wheel mark, drawn flat and alpha-only so the shell can tint it.
+/// Regenerate with `scripts/build-tray-icon.py`.
+const TRAY_ICON: &[u8] = include_bytes!("../icons/tray-template.png");
+
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let persisted = settings::load(app);
     let language = locale::preferred(Some(&persisted.language));
     set_tray_language(language);
     let menu = tray_menu(app, language)?;
+    // The system draws this one, not the app's colour wheel: a flat mark that
+    // macOS tints black or white for the menu bar, and that stays legible at the
+    // 16 px the Windows notification area allows. The coloured icon is unreadable
+    // at both sizes, which is what "use a black/white system icon" asked for.
+    let icon = tauri::image::Image::from_bytes(TRAY_ICON)?;
 
-    let mut tray = TrayIconBuilder::with_id("shift")
+    let tray = TrayIconBuilder::with_id("shift")
         .menu(&menu)
         .show_menu_on_left_click(true)
         .tooltip("Shift")
+        .icon(icon)
+        // Template images are a macOS idea; Windows has no tinting to ask of.
+        .icon_as_template(cfg!(target_os = "macos"))
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => show_main(app),
             "capture" => start_capture_from_event(app, "screenshot"),
@@ -251,9 +263,6 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             "quit" => app.exit(0),
             _ => {}
         });
-    if let Some(icon) = app.default_window_icon() {
-        tray = tray.icon(icon.clone());
-    }
     tray.build(app)?;
     Ok(())
 }
