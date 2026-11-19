@@ -1736,16 +1736,29 @@ kbd {
   backdrop-filter: blur(18px);
 }
 
-.permission-banner {
+/* The one place that owns the top-centre geometry. Each banner used to carry it,
+   which meant two banners were the same two rectangles and only an if/else chain
+   kept them from printing over each other. Now they flow, so an update notice and a
+   permission problem can both be read. */
+.home-alerts {
   position: absolute;
   top: 18px;
   left: 50%;
   z-index: 3;
   display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: min(92%, 620px);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.permission-banner {
+  display: flex;
   align-items: center;
   gap: 10px;
-  max-width: min(92%, 620px);
-  transform: translateX(-50%);
+  max-width: 100%;
   padding: 10px 11px 10px 14px;
   border: 1px solid rgba(217, 79, 31, 0.2);
   border-radius: var(--radius-sm);
@@ -1756,6 +1769,30 @@ kbd {
   font-weight: 600;
   line-height: 1.4;
   backdrop-filter: blur(12px);
+  /* The stack lets clicks through around a banner, but a banner is a control. */
+  pointer-events: auto;
+}
+
+/* An available release is good news, and the Settings panel already colours it with
+   the same green as `.update-new`; a permission problem stays terracotta. */
+.permission-banner.is-update {
+  border-color: rgba(20, 121, 74, 0.22);
+  color: #14603f;
+  background: rgba(238, 250, 244, 0.94);
+  box-shadow: 0 8px 24px rgba(20, 121, 74, 0.1);
+}
+
+.permission-banner.is-update svg {
+  color: #14794a;
+}
+
+.permission-banner.is-update button {
+  color: #f4fffa;
+  background: #14794a;
+}
+
+.permission-banner.is-update button:hover {
+  background: #0f6439;
 }
 
 .permission-banner svg {

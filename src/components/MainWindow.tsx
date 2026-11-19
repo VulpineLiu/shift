@@ -60,6 +60,7 @@ import {
 import { SetupPanel } from "./SetupPanel";
 import { SharePanel } from "./SharePanel";
 import { UpdatePanel } from "./UpdatePanel";
+import { useUpdateFlow } from "../lib/useUpdate";
 import {
   basename,
   dirname,
@@ -297,6 +298,15 @@ export function MainWindow() {
   const [recent, setRecent] = useState<RecentItem[]>(getLocalRecentItems);
   /** Filter text for the history library, matched against the file name. */
   const [historyQuery, setHistoryQuery] = useState("");
+  /**
+   * The update channel, read here so a new release can be announced on the panel the
+   * user actually looks at instead of only inside Settings. Mounting a second copy of
+   * the flow next to Settings > 软件更新 is what the hook is built for: it reads the
+   * status Rust already remembers and subscribes to the broadcasts it already sends,
+   * so the two views converge and neither triggers an extra network check.
+   */
+  const update = useUpdateFlow();
+  const updatePending = update.status?.state === "available" || update.status?.state === "ready";
   const [sharePaths, setSharePaths] = useState<string[] | null>(null);
   const toastTimer = useRef<number | null>(null);
   const [, setNowTick] = useState(0);
@@ -354,6 +364,16 @@ export function MainWindow() {
   function openRuntimeFromSetup() {
     void finishSetup();
     setSettingsTab("runtime");
+    setSettingsOpen(true);
+  }
+
+  /**
+   * Settings → 软件更新, from either entry point: the tray's update row and the
+   * banner at the top of this window both land here, so the two cannot drift apart
+   * on which tab they open or on whether the panel is already showing another tab.
+   */
+  function openUpdates() {
+    setSettingsTab("updates");
     setSettingsOpen(true);
   }
 
@@ -830,8 +850,7 @@ export function MainWindow() {
       // The tray's update row lands here: open Settings on the Updates tab so the
       // download and its SHA256 are the next thing the user sees.
       void listen("app://open-updates", () => {
-        setSettingsTab("updates");
-        setSettingsOpen(true);
+        openUpdates();
       }).then((unlisten) => unlisteners.push(unlisten));
       // A capture card's Send button: this window owns the peer list, so the card
       // asks here rather than duplicating the discovery UI.
@@ -1009,21 +1028,41 @@ export function MainWindow() {
 
       <main className="home-main">
         <section className="home-drop">
-          {screenAccess === false ? (
-            <div className="permission-banner" role="alert">
-              <ShieldAlert size={16} />
-              <span>{t("screenPermissionPrompt")}</span>
-              <button onClick={() => void api.openScreenRecordingSettings()}>
-                {t("openScreenSettings")}
-              </button>
-            </div>
-          ) : hotkeys && !hotkeys.live ? (
-            <div className="permission-banner" role="alert">
-              <ShieldAlert size={16} />
-              <span>{hotkeys.others.length > 0 ? t("hotkeysDead") : t("hotkeysNotLive")}</span>
-              <button onClick={() => void reclaimHotkeys()}>{t("hotkeysFix")}</button>
-            </div>
-          ) : null}
+          {/* A stack rather than a chain of alternatives: an update and a broken
+              permission are different news, and hiding one behind the other meant a
+              user who fixed the first never learned about the second. A release is
+              announced here, on the panel the user actually looks at, rather than
+              only inside Settings. */}
+          <div className="home-alerts">
+            {updatePending ? (
+              <div className="permission-banner is-update" role="status">
+                <Sparkle size={16} />
+                <span>
+                  {t(
+                    update.status?.state === "ready" ? "updateReadyOnPanel" : "updateAvailableOnPanel",
+                    { version: update.status?.availableVersion ?? "" },
+                  )}
+                </span>
+                <button onClick={openUpdates}>{t("updateOpenPanel")}</button>
+              </div>
+            ) : null}
+            {screenAccess === false ? (
+              <div className="permission-banner" role="alert">
+                <ShieldAlert size={16} />
+                <span>{t("screenPermissionPrompt")}</span>
+                <button onClick={() => void api.openScreenRecordingSettings()}>
+                  {t("openScreenSettings")}
+                </button>
+              </div>
+            ) : null}
+            {hotkeys && !hotkeys.live ? (
+              <div className="permission-banner" role="alert">
+                <ShieldAlert size={16} />
+                <span>{hotkeys.others.length > 0 ? t("hotkeysDead") : t("hotkeysNotLive")}</span>
+                <button onClick={() => void reclaimHotkeys()}>{t("hotkeysFix")}</button>
+              </div>
+            ) : null}
+          </div>
           <div className="home-drop-art" aria-hidden="true">
             {DROP_ICONS.map(({ icon: Icon, tone }, index) => {
               // Place every card on one circle: x follows sin(angle) and the outer

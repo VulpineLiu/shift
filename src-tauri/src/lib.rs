@@ -511,6 +511,9 @@ pub fn run() {
                 }
             }
 
+            // Before the tray is built, so a release noticed on an earlier run also
+            // brings back its tray row and not just the banner.
+            update::restore_notice(app.handle());
             setup_tray(app.handle())?;
             register_shortcuts(app.handle())?;
             drag_bridge::spawn(app.handle());

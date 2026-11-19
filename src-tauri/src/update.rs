@@ -84,7 +84,7 @@ struct ReleaseManifest {
 /// The newest manifest shape this build can read.
 const SUPPORTED_SCHEMA: u32 = 1;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateStatus {
     /// "current" | "available" | "ready" | "unavailable" | "error"
@@ -530,6 +530,95 @@ fn download_directory() -> PathBuf {
     std::env::temp_dir().join("Shift Updates")
 }
 
+/// Where the last notice is remembered, next to the history library and outside the
+/// app bundle, so an upgrade keeps it.
+fn notice_path(app: &AppHandle) -> Option<PathBuf> {
+    Some(app.path().app_data_dir().ok()?.join("update-notice.json"))
+}
+
+/// What a remembered notice is still worth after this build started, if anything.
+///
+/// Two things can have changed while Shift was closed. The release may have been
+/// installed, in which case the version being advertised is the one now running and
+/// the notice has to go — otherwise an update banner keeps offering the user the
+/// version they are already on, forever. And a `ready` notice promises an installer
+/// sitting in a temporary folder the system is free to empty, so that claim is only
+/// kept while the file is really there; without it the notice becomes `available`,
+/// which is true and simply means downloading again.
+fn revive_notice(status: UpdateStatus, running: &str) -> Option<UpdateStatus> {
+    if !version_is_newer(&status.available_version, running) {
+        return None;
+    }
+    let mut status = status;
+    // The remembered field is the version that asked, not the one answering now.
+    status.current_version = running.to_string();
+    if status.state == "ready" {
+        let installer_on_disk = status
+            .path
+            .as_deref()
+            .is_some_and(|path| Path::new(path).is_file());
+        if !installer_on_disk {
+            status.state = "available".into();
+            status.path = None;
+        }
+    }
+    Some(status)
+}
+
+/// Keep the remembered notice in step with the last check. Only a notice worth
+/// showing is written; any other outcome clears the file, so a stale answer can never
+/// outlive the check that produced it.
+fn remember_notice(app: &AppHandle, status: &UpdateStatus) {
+    let Some(path) = notice_path(app) else {
+        return;
+    };
+    if !matches!(status.state.as_str(), "available" | "ready") {
+        let _ = fs::remove_file(path);
+        return;
+    }
+    if let Ok(text) = serde_json::to_string(status) {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(path, text);
+    }
+}
+
+/// Restore the remembered notice at startup, so a release found yesterday is still
+/// announced today.
+///
+/// The probe is throttled to one a day, so without this the banner and its tray row
+/// appear on the morning a release is found and are gone for every launch after that
+/// — including the launch that follows an update, when the user is most likely to look.
+/// A copy that has been told to stop checking for updates is also a copy that does not
+/// want to be told, so nothing is restored while the switch is off.
+pub fn restore_notice(app: &AppHandle) {
+    if !crate::settings::load(app).update_check_enabled {
+        return;
+    }
+    let Some(path) = notice_path(app) else {
+        return;
+    };
+    let remembered: Option<UpdateStatus> = fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok());
+    let Some(remembered) = remembered else {
+        return;
+    };
+    match revive_notice(remembered, &current_version()) {
+        Some(status) => {
+            if let Ok(mut guard) = app.state::<UpdateState>().status.lock() {
+                *guard = Some(status.clone());
+            }
+            let _ = app.emit("update://status", status);
+        }
+        // Read and rejected is still a reason to stop carrying it.
+        None => {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 pub fn sha256_of(path: &Path) -> Result<String, String> {
     let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
     let mut digest = Sha256::new();
@@ -578,11 +667,13 @@ fn emit_progress(app: &AppHandle, downloaded: u64, total: u64, state: &str) {
     );
 }
 
-/// Report the outcome to every open window and keep it for the next panel mount.
+/// Report the outcome to every open window, keep it for the next panel mount, and
+/// remember the ones worth carrying to the next launch.
 fn publish(app: &AppHandle, status: UpdateStatus) -> UpdateStatus {
     if let Ok(mut guard) = app.state::<UpdateState>().status.lock() {
         *guard = Some(status.clone());
     }
+    remember_notice(app, &status);
     let _ = app.emit("update://status", status.clone());
     status
 }
@@ -1066,6 +1157,11 @@ pub fn update_clear(app: AppHandle) {
             let _ = fs::remove_file(artifact);
         }
     }
+    // Discarding is the user saying no to this notice, so the remembered copy goes
+    // with it; otherwise the banner would be back on the next launch.
+    if let Some(path) = notice_path(&app) {
+        let _ = fs::remove_file(path);
+    }
     let _ = app.emit("update://status", serde_json::Value::Null);
 }
 
@@ -1106,6 +1202,83 @@ pub fn spawn_startup_check(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A remembered notice, at the two states worth carrying across a launch.
+    fn notice(state: &str, available: &str, path: Option<&str>) -> UpdateStatus {
+        UpdateStatus {
+            state: state.to_string(),
+            current_version: "0.1.12".into(),
+            available_version: available.into(),
+            file_name: format!("Shift-{available}-macOS-universal.dmg"),
+            size: 1,
+            sha256: "0".repeat(64),
+            notes: String::new(),
+            date: "2026-11-19".into(),
+            path: path.map(str::to_string),
+            message: String::new(),
+            feed_url: "https://forge/api/raw/mula/nex_shift/releases/shift-update.json".into(),
+            signed: true,
+            artifact_key: "macos".into(),
+        }
+    }
+
+    /// The whole point of remembering a notice is that the next launch still shows
+    /// it; everything else here is about what the next launch may have invalidated.
+    #[test]
+    fn a_notice_for_a_release_still_ahead_survives_the_launch() {
+        let revived = revive_notice(notice("available", "0.2.0", None), "0.1.12").unwrap();
+        assert_eq!(revived.state, "available");
+        assert_eq!(revived.available_version, "0.2.0");
+        // The remembered `current_version` is the version that asked, not the one
+        // answering now, so an old file must not report the old build as running.
+        assert_eq!(revived.current_version, "0.1.12");
+    }
+
+    #[test]
+    fn an_installed_release_stops_being_announced() {
+        // The user updated, the app restarted, and the notice still says 0.2.0 is
+        // available. Without this rule the banner offers the version already running.
+        assert!(revive_notice(notice("ready", "0.2.0", None), "0.2.0").is_none());
+        assert!(revive_notice(notice("ready", "0.2.0", None), "0.3.0").is_none());
+    }
+
+    #[test]
+    fn a_ready_notice_without_its_installer_downgrades_rather_than_lying() {
+        // `ready` promises a verified file in a temporary folder the system may empty
+        // while Shift is closed, so the claim only holds while the file is there.
+        let missing = revive_notice(
+            notice(
+                "ready",
+                "0.2.0",
+                Some("/tmp/definitely-not-here-9f3c21.dmg"),
+            ),
+            "0.1.12",
+        )
+        .unwrap();
+        assert_eq!(
+            missing.state, "available",
+            "cannot offer an install it cannot do"
+        );
+        assert_eq!(missing.path, None);
+        assert_eq!(
+            missing.available_version, "0.2.0",
+            "the release is still news"
+        );
+
+        let on_disk = std::env::temp_dir().join("shift-notice-test-9f3c21.dmg");
+        fs::write(&on_disk, b"installer").unwrap();
+        let kept = revive_notice(
+            notice("ready", "0.2.0", Some(on_disk.to_str().unwrap())),
+            "0.1.12",
+        )
+        .unwrap();
+        let _ = fs::remove_file(&on_disk);
+        assert_eq!(
+            kept.state, "ready",
+            "a real verified download stays installable"
+        );
+        assert_eq!(kept.path.as_deref(), on_disk.to_str());
+    }
 
     /// `set_var` is process-wide and tests run in parallel, so anything that reads
     /// or writes the feed override has to hold this.
