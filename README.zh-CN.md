@@ -296,7 +296,7 @@ Shift 会持续维护局域网内其他 Shift 实例的列表，并据此提供 
 
 ## 软件更新
 
-新的 macOS 机器请安装 **`Shift-0.1.11-macOS-universal.dmg`**：本项目的构建采用 ad-hoc 签名且未做公证，Gatekeeper 会把 Shift 判为身份不明的开发者。双击挂载镜像，把 `Shift.app` 拖进「应用程序」，然后允许首次启动一次（右键 → 打开，或在「系统设置 → 隐私与安全性」中点「允许」）。软件内升级自己下载的是同一个镜像、不经浏览器，因此不会弹窗。详见 `docs/RELEASE.md`。
+新的 macOS 机器请安装 **`Shift-0.1.12-macOS-universal.dmg`**：本项目的构建采用 ad-hoc 签名且未做公证，Gatekeeper 会把 Shift 判为身份不明的开发者。双击挂载镜像，把 `Shift.app` 拖进「应用程序」，然后允许首次启动一次（右键 → 打开，或在「系统设置 → 隐私与安全性」中点「允许」）。软件内升级自己下载的是同一个镜像、不经浏览器，因此不会弹窗。详见 `docs/RELEASE.md`。
 
 更新通道就是这个仓库：一条 `releases` 分支保存安装包以及 `shift-update.json` 清单，清单写明每个安装包的名称、体积与 SHA256。更新源地址在构建时由 git 远端推导——已适配 Gitea、GitHub、GitLab 三种形式，也可用 `SHIFT_UPDATE_URL` 覆盖——因此无需额外部署任何更新服务。
 
@@ -370,7 +370,7 @@ pnpm mac:release
 scripts/build-windows-release.sh
 ```
 
-发布链只产出两个安装包：`Shift-0.1.11-macOS-universal.dmg` 与 `Shift-Setup-0.1.11-win-x64.exe`。macOS 是单个通用 Mach-O，内含通用版的拖拽、PDF 渲染与文档渲染伴生进程；Windows ARM64 通过更新清单的兼容回退使用 x64 安装包。完整步骤见 `docs/BUILD_WINDOWS.md` 与 `docs/RELEASE.md`。
+发布链只产出两个安装包：`Shift-0.1.12-macOS-universal.dmg` 与 `Shift-Setup-0.1.12-win-x64.exe`。macOS 是单个通用 Mach-O，内含通用版的拖拽、PDF 渲染与文档渲染伴生进程；Windows ARM64 通过更新清单的兼容回退使用 x64 安装包。完整步骤见 `docs/BUILD_WINDOWS.md` 与 `docs/RELEASE.md`。
 
 **权限（macOS）。** 截图与录屏需要「屏幕录制」，输出目录需要「文件与文件夹」授权，带声音录屏需要「麦克风」，「发送到设备」需要「本地网络」。Shift 会在打开截图遮罩前先检查屏幕录制权限，因此被拒绝时给出的是可操作的提示，而不是一张全黑的截图。「本地网络」被拒绝时比较安静：Shift 仍会发出广播、也能回应主动找它的实例，但收不到组播，设备列表于是始终为空。ad-hoc 签名每次重新构建都会得到新的代码身份，而 macOS 正是按这个身份记录上述授权，所以升级后可能重新询问；改用 Developer ID 签名即可保持稳定。
 
