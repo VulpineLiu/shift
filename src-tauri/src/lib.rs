@@ -226,7 +226,8 @@ pub fn refresh_tray_language(app: &AppHandle) -> Result<(), String> {
 }
 
 /// The wheel mark, drawn flat and alpha-only so the shell can tint it.
-/// Regenerate with `scripts/build-tray-icon.py`.
+/// Regenerate with `scripts/build-icons.py`, which draws the app icon from the
+/// same geometry so the two cannot drift apart.
 const TRAY_ICON: &[u8] = include_bytes!("../icons/tray-template.png");
 
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
