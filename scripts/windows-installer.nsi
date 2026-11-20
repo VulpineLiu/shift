@@ -111,11 +111,15 @@ Function .onInit
 
   nsExec::Exec 'taskkill /IM shift.exe /F'
   Pop $0
+  ; taskkill returns once termination is requested; give Windows a moment to
+  ; release the mapped EXE before File tries to overwrite it.
+  Sleep 800
 FunctionEnd
 
 Function un.onInit
   nsExec::Exec 'taskkill /IM shift.exe /F'
   Pop $0
+  Sleep 800
 FunctionEnd
 
 Section "Install"
@@ -162,7 +166,12 @@ Section "PostInstall"
     ReadRegStr $0 HKCU "${WEBVIEW_KEY}" "pv"
   ${EndIf}
   ${If} $0 == ""
-    MessageBox MB_OK|MB_ICONINFORMATION "$(webview_missing)"
+    ; A silent install is driven by Shift's updater and has nobody to dismiss a
+    ; dialog. The missing runtime is still worth saying out loud on a manual
+    ; install, but a box here would hold the update open forever.
+    ${IfNot} ${Silent}
+      MessageBox MB_OK|MB_ICONINFORMATION "$(webview_missing)"
+    ${EndIf}
   ${EndIf}
 SectionEnd
 

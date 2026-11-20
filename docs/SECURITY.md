@@ -103,8 +103,8 @@ Controls:
 - the installer is checked for exact byte length and SHA256 after download;
 - both checks run again immediately before installing;
 - the installer must be a regular file, not a symlink;
-- macOS and Windows handoff scripts receive paths as process arguments, not
-  interpolated shell/batch text;
+- macOS and Windows handoff scripts receive paths as process arguments or
+  environment variables, never interpolated shell/batch text;
 - `Discard` deletes the downloaded artifact, not just the UI state.
 
 Residual risk:

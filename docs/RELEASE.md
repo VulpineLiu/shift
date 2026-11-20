@@ -308,16 +308,19 @@ for that pid to disappear and only then touches the installed copy.
 Both scripts are written so a failure cannot end with Shift simply closed: every macOS
 failure path still `open`s the bundle it had, and the swap is `move aside, move in`, so a
 copy that fails halfway leaves the previous version where it was. The scripts themselves
-are fixed constants; the pid, installer, bundle and log paths are passed as process
-arguments, not interpolated into shell or batch source. Before the handoff starts, macOS
+are fixed constants; the pid, installer, bundle and log paths arrive through process
+arguments or environment variables, never interpolated into shell or batch source. The
+Windows launcher also keeps the outer quote layer that `cmd.exe /C` would otherwise strip
+from a script path containing spaces. Before the handoff starts, macOS
 writes a probe file next to the bundle — a root-owned copy in `/Applications` is reported
 as "open the downloaded installer yourself" rather than quietly quitting on an update
 that could not be applied.
 
 The Windows installer is the same one a user runs by hand, so the update path cannot drift
 from the manual one. Because the silent install comes from Shift itself, `${Silent}` skips
-the interactive "Shift is running, close it?" box: the app already told the user it is
-about to restart, and a box nobody can answer would abort the update.
+the interactive "Shift is running, close it?" box and the WebView2 warning: the app
+already told the user it is about to restart, and a box nobody can answer would abort or
+hang the update.
 
 This is not a delta update and not a signature check on the running binary: the same
 SHA256 gate that guards a manual install is the only integrity gate, and the manifest
