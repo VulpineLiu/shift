@@ -6,6 +6,8 @@ work.
 | Document | Audience | Contents |
 | --- | --- | --- |
 | [`../README.md`](../README.md) / [`../README.zh-CN.md`](../README.zh-CN.md) | Users | Features, formats, shortcuts, privacy, known limitations |
+| [`INSTALL.md`](INSTALL.md) | Users and support | Installation, first run, permissions, optional components, troubleshooting, uninstall |
+| [`../CHANGELOG.md`](../CHANGELOG.md) | Users and maintainers | What changed in each version |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Contributors | Process/window model, module ownership, events, data flows |
 | [`SPECIFICATION.md`](SPECIFICATION.md) | Product and QA | Observable behaviour, naming, limits, acceptance criteria |
 | [`SECURITY.md`](SECURITY.md) | Security reviewers and maintainers | Trust boundaries, update and LAN risk, residual gaps |

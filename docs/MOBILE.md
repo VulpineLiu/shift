@@ -262,4 +262,4 @@ Each step ships something usable on its own; none depends on a feature Shift lac
 | One FFmpeg binary per platform | iOS: no, Android: measure | `AVFoundation` covers most mobile media needs at zero licence risk; Android's codecs are as capable but the surface is fragmented |
 | Shared OCR engine or native | Native | Vision and ML Kit beat Tesseract WASM on speed and Chinese accuracy; a shared engine buys nothing users can see |
 | Catalogue home | `shift-core` | Desktop can read from it; phones and desktop cannot drift apart |
-| Priced app to fund it | Undecided | The desktop app is MIT and free; a paid mobile app is defensible but changes the project's centre of gravity |
+| Priced app to fund it | Undecided | The desktop app is GPL-3.0 and free; a paid mobile app is defensible but changes the project's centre of gravity |

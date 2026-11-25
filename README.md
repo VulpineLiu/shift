@@ -294,13 +294,15 @@ Each is overridable in Settings. File actions offer a *collect everything in one
 
 ## Updates
 
-A new macOS machine installs **`Shift-0.1.13-macOS-universal.dmg`**: builds are ad-hoc signed and not notarized, so Gatekeeper calls Shift an unidentified developer. Double-click the image, drag `Shift.app` to /Applications, then allow the first launch once (right-click → Open, or 允许 in System Settings → Privacy & Security). In-app updates download the same image without a browser, so they never prompt. Details in `docs/RELEASE.md`.
+Installing for the first time? [`docs/INSTALL.md`](docs/INSTALL.md) covers both platforms, first-run permissions and troubleshooting.
 
-The update channel is this repository: a `releases` branch holding the installers plus `shift-update.json`, which names each artifact, its size and its SHA256. The feed URL is derived from the git remote at build time - Gitea, GitHub and GitLab forms are known, and `SHIFT_UPDATE_URL` overrides it - so no update service has to be deployed anywhere.
+A new macOS machine installs **`Shift-0.1.14-macOS-universal.dmg`**: builds are ad-hoc signed and not notarized, so Gatekeeper calls Shift an unidentified developer. Double-click the image, drag `Shift.app` to /Applications, then allow the first launch once (right-click → Open, or Allow in System Settings → Privacy & Security). In-app updates download the same image without a browser, so they never prompt. Details in `docs/RELEASE.md`.
+
+The update channel is the upstream repository: a `releases` branch holding the installers plus `shift-update.json`, which names each artifact, its size and its SHA256. The feed URL is derived from the git remote at build time - Gitea, GitHub and GitLab forms are known, and `SHIFT_UPDATE_URL` overrides it - so no update service has to be deployed anywhere.
 
 Once a day at startup, and on demand from Settings -> **Updates**, Shift reads the manifest, compares versions with semver rules including prereleases, and offers a download. A release that has been found is announced at the top of the main window - **Shift x.y.z is available**, with one button that opens Settings -> Updates - and it stays announced across restarts, including the restart that follows an update, because the notice is remembered on disk rather than held in memory. Since the probe itself runs at most once a day, a notice that only lived in RAM would be visible on the morning it was discovered and invisible every launch after. A downloaded installer must match the manifest's exact byte length and recomputed SHA256, and both checks run again immediately before the handoff that installs it. A mismatch deletes the file and reports the error, so a truncated or replaced installer never launches. **Discard** removes the downloaded installer as well as the status. Publishing is one command, `scripts/publish-release.sh`, and `docs/RELEASE.md` covers the manifest format, the flags, and the difference between the integrity the hash proves and the authenticity a signed manifest adds (`--key` plus a key baked in with `SHIFT_UPDATE_PUBKEY`).
 
-**Install & relaunch** finishes the update without leaving the app. macOS replaces its own `.app` bundle from the downloaded disk image and Windows runs the same installer silently, both from a helper script that starts once Shift has quit and then opens the new copy - so a conversion is interrupted, but nothing is left half-installed and a failed swap reopens the copy you had. The helper receives its paths as process arguments or environment variables, never by splicing them into the shell or batch script; the Windows launcher also keeps the outer quote layer `cmd.exe /C` otherwise strips from a path containing spaces. The tab states your operating system, architecture, running version and the feed it reads above everything else, so one screenshot explains any report about an update.
+**Install & relaunch** finishes the update without leaving the app. macOS replaces its own `.app` bundle from the downloaded disk image and Windows runs the same installer silently, both from a helper script that starts once Shift has quit and then opens the new copy - so a conversion is interrupted, but nothing is left half-installed and a failed swap reopens the copy you had. The Windows helper follows the same launch contract as Squid: `cmd.exe` receives only one quoted script path, and the pid, installer and log paths are written into that script, so a temp path containing spaces is never split into extra command-line tokens. The tab states your operating system, architecture, running version and the feed it reads above everything else, so one screenshot explains any report about an update.
 
 ## External dependencies
 
@@ -379,7 +381,7 @@ pnpm mac:release
 scripts/build-windows-release.sh
 ```
 
-The release pipeline deliberately emits exactly two installers: `Shift-0.1.13-macOS-universal.dmg` and `Shift-Setup-0.1.13-win-x64.exe`. The macOS app is one universal Mach-O including universal drag, PDF-render and doc-render sidecars. Windows ARM64 uses the x64 installer through the update manifest's compatibility fallback. Full details are in `docs/BUILD_WINDOWS.md` and `docs/RELEASE.md`.
+The release pipeline deliberately emits exactly two installers: `Shift-0.1.14-macOS-universal.dmg` and `Shift-Setup-0.1.14-win-x64.exe`. The macOS app is one universal Mach-O including universal drag, PDF-render and doc-render sidecars. Windows ARM64 uses the x64 installer through the update manifest's compatibility fallback. Full details are in `docs/BUILD_WINDOWS.md` and `docs/RELEASE.md`.
 
 **Permissions (macOS).** Screen Recording for capture, Files & Folders for the output folders you choose, Microphone when recording with audio, and Local Network for **Send to a device**. Shift checks Screen Recording before opening the overlay, so a denial surfaces an actionable error rather than a black screenshot. A denied Local Network grant is quieter: Shift still sends its beacons and still answers anyone who addresses it directly, but it receives no group traffic, so the device list simply stays empty. Ad-hoc signed builds get a new code identity on every rebuild and macOS keys these grants to that identity, so an upgrade can ask again; distribution with Developer ID keeps them stable.
 
@@ -423,6 +425,8 @@ The radial hit-test is pure geometry — one polar calculation shared by native 
 
 ## Documentation
 
+- [`docs/INSTALL.md`](docs/INSTALL.md) — installation, first-run permissions, optional components, troubleshooting and uninstall.
+- [`CHANGELOG.md`](CHANGELOG.md) — what changed in each version.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — process/window model, module boundaries, event and data flows.
 - [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) — product behaviour, output naming, platform differences and acceptance criteria.
 - [`docs/SECURITY.md`](docs/SECURITY.md) — trust boundaries, update integrity, LAN-transfer limits and residual risks.
@@ -518,10 +522,10 @@ Adding a format is one entry in `conversionFormats` in `src/lib/conversionFormat
 
 `.github/workflows/ci.yml` defines macOS, Windows and Linux jobs. The workflow runs type checks, TypeScript tests, Rust formatting and tests on every job, plus Clippy and a universal macOS app build. Whether the current forge executes it depends on whether that forge has a runner configured; a local run remains the release gate, and no CI result should be inferred without a linked log. Full setup and the pre-push checklist are in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-**Forks and derivative works are welcome.** You may use, modify, redistribute, and build on this code commercially, provided you keep the copyright notice and the LICENSE file.
+**Forks and derivative works are welcome.** You may use, modify and redistribute this code, including commercially, under the terms of the GNU GPL v3: derivative works must stay under the same license and ship their source.
 
 ## License
 
-Released under the **MIT License** — see [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Released under the **GNU General Public License v3.0**. Copyright (C) 2026 mula.liu. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 The app builds against Tauri (MIT / Apache-2.0), React (MIT), Lucide (ISC), and Tesseract.js with its English and Simplified Chinese models (Apache-2.0).

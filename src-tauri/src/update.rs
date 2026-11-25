@@ -952,15 +952,19 @@ exit "$status"
 /// The Windows handoff: wait for this process to exit, run the installer silently,
 /// then start the copy the installer wrote. The installer refuses to overwrite a
 /// running EXE, so the wait is the whole point of the script.
-#[cfg(target_os = "windows")]
-const WINDOWS_HANDOFF_SCRIPT: &str = r#"@echo off
+///
+/// The pid, installer and log paths are written into the script rather than passed
+/// after `/C`. This is the same launch contract as Squid: `cmd.exe` sees one quoted
+/// argument, the script path, and cannot strip the quotes from a path containing
+/// spaces.
+#[cfg(any(target_os = "windows", test))]
+fn windows_handoff(pid: u32, installer: &Path, log: &Path) -> String {
+    format!(
+        r#"@echo off
 setlocal EnableExtensions DisableDelayedExpansion
-set "WAIT_FOR=%SHIFT_UPDATE_PID%"
-set "INSTALLER=%SHIFT_UPDATE_INSTALLER%"
-set "LOG=%SHIFT_UPDATE_LOG%"
-if not defined WAIT_FOR exit /b 2
-if not defined INSTALLER exit /b 2
-if not defined LOG exit /b 2
+set "WAIT_FOR={pid}"
+set "INSTALLER={installer}"
+set "LOG={log}"
 echo handoff started %DATE% %TIME% >> "%LOG%"
 set /a TRIES=0
 :waitloop
@@ -978,22 +982,16 @@ if exist "%TARGET%" (
 ) else (
   echo target missing: %TARGET% >> "%LOG%"
 )
-"#;
-
-/// `cmd.exe /C` strips the first and last quote from its command when there is
-/// more than one pair. Without the extra layer, the quoted path to this script
-/// (which lives under `%TEMP%\Shift Updates`) loses its opening quote and the
-/// helper never runs. The script path itself travels in an environment variable,
-/// so no user-controlled path is spliced into the command line.
-#[cfg(any(target_os = "windows", test))]
-fn windows_handoff_launch() -> &'static str {
-    "\"\"%SHIFT_UPDATE_SCRIPT%\"\""
+"#,
+        pid = pid,
+        installer = installer.display(),
+        log = log.display(),
+    )
 }
 
 /// Write a handoff script and start it detached, so it is still alive when this
-/// process has exited. Paths travel as process arguments or environment variables
-/// rather than interpolated script text, so folder names cannot change the
-/// helper's script source.
+/// process has exited. macOS passes its paths as arguments; Windows writes them
+/// into the generated script and gives `cmd.exe` only the script path.
 fn spawn_handoff(name: &str, script: &str, arguments: &[&OsStr]) -> Result<(), String> {
     let path = download_directory().join(name);
     if let Some(parent) = path.parent() {
@@ -1005,19 +1003,12 @@ fn spawn_handoff(name: &str, script: &str, arguments: &[&OsStr]) -> Result<(), S
     fs::write(&path, script).map_err(|error| error.to_string())?;
     #[cfg(target_os = "windows")]
     let mut command = {
-        use std::os::windows::process::CommandExt;
-
+        let _ = arguments;
         let mut command = crate::process::command("cmd.exe");
-        // Keep every path out of the command line. `cmd.exe` expands these
-        // variables after its `/C` quote handling, so spaces, `&` and `%` in a
-        // profile folder cannot change the command it runs.
-        command
-            .env("SHIFT_UPDATE_SCRIPT", &path)
-            .env("SHIFT_UPDATE_PID", arguments[0])
-            .env("SHIFT_UPDATE_INSTALLER", arguments[1])
-            .env("SHIFT_UPDATE_LOG", arguments[2])
-            .args(["/D", "/S", "/C"]);
-        command.raw_arg(windows_handoff_launch());
+        // Match Squid's proven handoff: one quoted script path after `/C`, with
+        // the parameters already in the script. More than one quoted token makes
+        // cmd.exe strip the first and last quote from a path containing spaces.
+        command.args(["/D", "/C"]).arg(&path);
         command
     };
     #[cfg(not(target_os = "windows"))]
@@ -1107,15 +1098,11 @@ pub async fn update_install(app: AppHandle) -> Result<String, String> {
         }
         #[cfg(target_os = "windows")]
         {
-            let pid_argument = pid.to_string();
+            let script = windows_handoff(pid, &artifact, &log);
             spawn_handoff(
                 "Shift-update.cmd",
-                WINDOWS_HANDOFF_SCRIPT,
-                &[
-                    OsStr::new(&pid_argument),
-                    artifact.as_os_str(),
-                    log.as_os_str(),
-                ],
+                &script,
+                &[],
             )?;
             quit_for_update(&app);
             return Ok(path);
@@ -1597,32 +1584,55 @@ mod tests {
         assert!(script.contains("hdiutil detach"));
     }
 
-    #[cfg(target_os = "windows")]
     #[test]
     fn the_windows_handoff_installs_only_after_this_process_is_gone() {
-        let script = WINDOWS_HANDOFF_SCRIPT;
+        let script = windows_handoff(
+            1234,
+            Path::new(
+                r"C:\Users\me\AppData\Local\Temp\Shift Updates\Shift-Setup-0.1.14-win-x64.exe",
+            ),
+            Path::new(r"C:\Users\me\AppData\Local\Temp\Shift Updates\handoff.log"),
+        );
         assert!(
-            script.contains("set \"WAIT_FOR=%SHIFT_UPDATE_PID%\""),
-            "the script lost the environment variable carrying our pid"
+            script.contains("set \"WAIT_FOR=1234\""),
+            "the script lost our pid"
+        );
+        assert!(
+            script.contains("Shift-Setup-0.1.14-win-x64.exe"),
+            "the script lost the installer path"
         );
         assert!(!script.contains("C:\\Users\\me\\Shift-Setup.exe"));
         let wait = script
             .find("tasklist /FI \"PID eq %WAIT_FOR%\"")
             .expect("no wait");
-        let install = script.find("\"%INSTALLER\" /S").expect("no silent install");
+        let install = script
+            .find("\"%INSTALLER%\" /S")
+            .expect("no silent install");
         assert!(wait < install);
         assert!(script.contains("start \"\" \"%TARGET%\""), "never restarts");
     }
 
     #[test]
-    fn the_windows_handoff_command_keeps_its_outer_quote_layer() {
-        // `cmd.exe /C` strips the first and last quote when the command has more
-        // than one quoted token. The script path is under a folder with a space,
-        // so without this second layer the helper is silently never started.
-        let launch = windows_handoff_launch();
-        assert_eq!(launch, "\"\"%SHIFT_UPDATE_SCRIPT%\"\"");
-        assert!(launch.starts_with("\"\""));
-        assert!(launch.ends_with("\"\""));
+    fn the_windows_handoff_passes_only_the_script_path() {
+        let mut command = crate::process::command("cmd.exe");
+        command
+            .args(["/D", "/C"])
+            .arg(r"C:\Users\me\AppData\Local\Temp\Shift Updates\Shift-update.cmd");
+        let arguments: Vec<_> = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            arguments.len(),
+            3,
+            "cmd must receive no extra quoted tokens"
+        );
+        assert_eq!(arguments[0], "/D");
+        assert_eq!(arguments[1], "/C");
+        assert_eq!(
+            arguments[2],
+            r"C:\Users\me\AppData\Local\Temp\Shift Updates\Shift-update.cmd"
+        );
     }
 
     #[test]

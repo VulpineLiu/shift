@@ -12,8 +12,8 @@ An orphan branch named `releases` holds exactly one release:
 releases/
 ├── shift-update.json
 ├── shift-update.sig
-├── Shift-0.1.13-macOS-universal.dmg
-└── Shift-Setup-0.1.13-win-x64.exe
+├── Shift-0.1.14-macOS-universal.dmg
+└── Shift-Setup-0.1.14-win-x64.exe
 ```
 
 `shift-update.json` names the version and, per platform, the artifact file, its size in
@@ -22,12 +22,12 @@ bytes and its SHA256:
 ```json
 {
   "schema": 1,
-  "version": "0.1.13",
+  "version": "0.1.14",
   "date": "2026-10-26",
   "notes": "",
   "artifacts": {
-    "macos": { "file": "Shift-0.1.13-macOS-universal.dmg", "sha256": "…", "size": 0 },
-    "windows": { "file": "Shift-Setup-0.1.13-win-x64.exe", "sha256": "…", "size": 0 }
+    "macos": { "file": "Shift-0.1.14-macOS-universal.dmg", "sha256": "…", "size": 0 },
+    "windows": { "file": "Shift-Setup-0.1.14-win-x64.exe", "sha256": "…", "size": 0 }
   }
 }
 ```
@@ -35,7 +35,7 @@ bytes and its SHA256:
 Artifact names are restricted to ASCII letters, digits, `.`, `-` and `_`; path
 separators, `..`, spaces and shell metacharacters are rejected. The app also
 refuses a manifest over 256 KiB. These checks keep malformed manifest data out
-of download paths and out of the native handoff arguments.
+of download paths and out of the native handoff inputs.
 
 ## Supported release targets
 
@@ -307,14 +307,21 @@ for that pid to disappear and only then touches the installed copy.
 
 Both scripts are written so a failure cannot end with Shift simply closed: every macOS
 failure path still `open`s the bundle it had, and the swap is `move aside, move in`, so a
-copy that fails halfway leaves the previous version where it was. The scripts themselves
-are fixed constants; the pid, installer, bundle and log paths arrive through process
-arguments or environment variables, never interpolated into shell or batch source. The
-Windows launcher also keeps the outer quote layer that `cmd.exe /C` would otherwise strip
-from a script path containing spaces. Before the handoff starts, macOS
+copy that fails halfway leaves the previous version where it was. The macOS script is a
+fixed constant and receives its paths as arguments. The Windows script is generated for
+each attempt with the pid, installer and log paths written into it; `cmd.exe` receives
+only one quoted script path, matching Squid's proven launch contract. This matters because
+`cmd.exe /C` strips the first and last quote when it sees more than one quoted token, and
+`%TEMP%\Shift Updates` contains a space. Before the handoff starts, macOS
 writes a probe file next to the bundle — a root-owned copy in `/Applications` is reported
 as "open the downloaded installer yourself" rather than quietly quitting on an update
 that could not be applied.
+
+Builds through 0.1.12, and the original 0.1.13 package, contain the old multi-argument
+launcher. Those copies cannot install any release from inside the app: the helper never
+starts, so the deadlock has to be broken by one manual install of the republished 0.1.13
+or 0.1.14 package. A copy that already runs the republished 0.1.13 can update to 0.1.14
+normally.
 
 The Windows installer is the same one a user runs by hand, so the update path cannot drift
 from the manual one. Because the silent install comes from Shift itself, `${Silent}` skips

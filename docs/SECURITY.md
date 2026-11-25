@@ -103,8 +103,9 @@ Controls:
 - the installer is checked for exact byte length and SHA256 after download;
 - both checks run again immediately before installing;
 - the installer must be a regular file, not a symlink;
-- macOS and Windows handoff scripts receive paths as process arguments or
-  environment variables, never interpolated shell/batch text;
+- macOS receives handoff paths as process arguments; Windows writes them into a
+  generated batch file whose only command-line argument is the script path, matching
+  Squid's launch contract; artifact names are sanitized before either path is formed;
 - `Discard` deletes the downloaded artifact, not just the UI state.
 
 Residual risk:

@@ -296,13 +296,15 @@ Shift 会持续维护局域网内其他 Shift 实例的列表，并据此提供 
 
 ## 软件更新
 
-新的 macOS 机器请安装 **`Shift-0.1.13-macOS-universal.dmg`**：本项目的构建采用 ad-hoc 签名且未做公证，Gatekeeper 会把 Shift 判为身份不明的开发者。双击挂载镜像，把 `Shift.app` 拖进「应用程序」，然后允许首次启动一次（右键 → 打开，或在「系统设置 → 隐私与安全性」中点「允许」）。软件内升级自己下载的是同一个镜像、不经浏览器，因此不会弹窗。详见 `docs/RELEASE.md`。
+第一次安装？macOS 与 Windows 的安装步骤、首次运行授权与故障排查见 [`docs/INSTALL.md`](docs/INSTALL.md)。
 
-更新通道就是这个仓库：一条 `releases` 分支保存安装包以及 `shift-update.json` 清单，清单写明每个安装包的名称、体积与 SHA256。更新源地址在构建时由 git 远端推导——已适配 Gitea、GitHub、GitLab 三种形式，也可用 `SHIFT_UPDATE_URL` 覆盖——因此无需额外部署任何更新服务。
+新的 macOS 机器请安装 **`Shift-0.1.14-macOS-universal.dmg`**：本项目的构建采用 ad-hoc 签名且未做公证，Gatekeeper 会把 Shift 判为身份不明的开发者。双击挂载镜像，把 `Shift.app` 拖进「应用程序」，然后允许首次启动一次（右键 → 打开，或在「系统设置 → 隐私与安全性」中点「允许」）。软件内升级自己下载的是同一个镜像、不经浏览器，因此不会弹窗。详见 `docs/RELEASE.md`。
+
+更新通道就是上游仓库：一条 `releases` 分支保存安装包以及 `shift-update.json` 清单，清单写明每个安装包的名称、体积与 SHA256。更新源地址在构建时由 git 远端推导——已适配 Gitea、GitHub、GitLab 三种形式，也可用 `SHIFT_UPDATE_URL` 覆盖——因此无需额外部署任何更新服务。
 
 Shift 每天启动时检查一次（也可在设置 → **软件更新** 中手动检查），读取清单、按含预发布规则的 semver 比较版本，然后提供下载。发现的版本会显示在主窗口顶部——「Shift x.y.z 可以升级了」，旁边一个按钮直接跳到设置 → 软件更新——并且**跨启动保留**，包括升级装完之后的那一次启动：提示是记在磁盘上的，不是只存在内存里。探测本身一天最多跑一次，所以只活在内存里的话，新版本只在被发现的问题当天出现，之后每次启动都再也看不到。下载完成的安装包必须与清单的体积和重新计算的 SHA256 一致，而且这两项会在交接给安装脚本前**再次校验**。任一不符即删除文件并明确报错，因此半成品或被替换的安装包永远不会启动。点击「丢弃」会同时删除已下载的安装包和状态。发布只需一条命令 `scripts/publish-release.sh`；`docs/RELEASE.md` 说明清单格式、参数，以及可选的 ed25519 清单签名——签名用来证明清单的来源，而不只是下载内容与清单一致。
 
-**「安装并重启」让你在应用内完成升级**：macOS 会用下载好的磁盘镜像替换自己的 `.app`，Windows 会静默运行同一个安装程序，两者都由一个在 Shift 退出后才启动的辅助脚本执行，完成后自动打开新版本——正在进行的转换会被中断，但不会装到一半卡住，替换失败也会重新打开原来的版本。辅助脚本通过进程参数或环境变量接收路径，路径不会被拼接进 shell 或批处理脚本文本；Windows 启动器还保留了一层外层引号，否则 `cmd.exe /C` 会把含空格路径的首尾引号剥掉。该标签页最上方依次显示本机系统、架构、当前版本与更新源，截一张图就能说明升级问题出在哪里。
+**「安装并重启」让你在应用内完成升级**：macOS 会用下载好的磁盘镜像替换自己的 `.app`，Windows 会静默运行同一个安装程序，两者都由一个在 Shift 退出后才启动的辅助脚本执行，完成后自动打开新版本——正在进行的转换会被中断，但不会装到一半卡住，替换失败也会重新打开原来的版本。Windows 交接与 Squid 使用同一套启动契约：`cmd.exe` 只接收一个带引号的脚本路径，pid、安装包与日志路径直接写进脚本，因此含空格的临时目录不会被拆成额外的命令行参数。该标签页最上方依次显示本机系统、架构、当前版本与更新源，截一张图就能说明升级问题出在哪里。
 
 ## 外部依赖
 
@@ -370,7 +372,7 @@ pnpm mac:release
 scripts/build-windows-release.sh
 ```
 
-发布链只产出两个安装包：`Shift-0.1.13-macOS-universal.dmg` 与 `Shift-Setup-0.1.13-win-x64.exe`。macOS 是单个通用 Mach-O，内含通用版的拖拽、PDF 渲染与文档渲染伴生进程；Windows ARM64 通过更新清单的兼容回退使用 x64 安装包。完整步骤见 `docs/BUILD_WINDOWS.md` 与 `docs/RELEASE.md`。
+发布链只产出两个安装包：`Shift-0.1.14-macOS-universal.dmg` 与 `Shift-Setup-0.1.14-win-x64.exe`。macOS 是单个通用 Mach-O，内含通用版的拖拽、PDF 渲染与文档渲染伴生进程；Windows ARM64 通过更新清单的兼容回退使用 x64 安装包。完整步骤见 `docs/BUILD_WINDOWS.md` 与 `docs/RELEASE.md`。
 
 **权限（macOS）。** 截图与录屏需要「屏幕录制」，输出目录需要「文件与文件夹」授权，带声音录屏需要「麦克风」，「发送到设备」需要「本地网络」。Shift 会在打开截图遮罩前先检查屏幕录制权限，因此被拒绝时给出的是可操作的提示，而不是一张全黑的截图。「本地网络」被拒绝时比较安静：Shift 仍会发出广播、也能回应主动找它的实例，但收不到组播，设备列表于是始终为空。ad-hoc 签名每次重新构建都会得到新的代码身份，而 macOS 正是按这个身份记录上述授权，所以升级后可能重新询问；改用 Developer ID 签名即可保持稳定。
 
@@ -413,6 +415,8 @@ OCR：Tesseract.js WASM + 内置 eng/chi_sim，进程内运行，完全离线
 
 ## 技术文档
 
+- [`docs/INSTALL.md`](docs/INSTALL.md) —— 安装、首次运行授权、可选组件、故障排查与卸载。
+- [`CHANGELOG.md`](CHANGELOG.md) —— 每个版本改了什么。
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) —— 进程/窗口模型、模块边界、事件与数据流。
 - [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) —— 产品行为规范、输出命名、平台差异与验收标准。
 - [`docs/SECURITY.md`](docs/SECURITY.md) —— 信任边界、更新完整性、局域网传输限制与剩余风险。
@@ -507,10 +511,10 @@ Shift 对文件做的任何处理都不会发起互联网请求。文件在本�
 
 `.github/workflows/ci.yml` 定义了 macOS、Windows、Linux 三个任务。每个任务都会运行类型检查、TypeScript 测试、Rust 格式检查与单元测试；macOS 任务还运行 Clippy 和通用应用构建。当前托管平台是否真正执行这些任务，取决于它是否配置了执行器；本地运行仍是发布门禁，没有链接到实际日志时不得声称 CI 已通过。完整环境与推送前检查见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
 
-**欢迎二次开发。** 你可以免费使用、修改、再发布本代码，也可用于商业项目，只需保留原版权声明与 LICENSE 文件。
+**欢迎二次开发。** 你可以免费使用、修改、再发布本代码，也可用于商业项目，但衍生作品必须同样以 GNU GPL v3 发布并提供源码。
 
 ## 许可证
 
-以 **MIT 许可证**发布——见 [LICENSE](LICENSE) 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+以 **GNU 通用公共许可证 v3.0** 发布。版权所有 (C) 2026 mula.liu。见 [LICENSE](LICENSE) 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 本应用构建使用了 Tauri（MIT / Apache-2.0）、React（MIT）、Lucide（ISC），以及 Tesseract.js 与其英文、简体中文模型（Apache-2.0）。

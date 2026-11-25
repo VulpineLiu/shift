@@ -1,6 +1,7 @@
 # Third-party notices
 
-Shift includes or builds against the following open-source components:
+Shift itself is licensed under GPL-3.0; see `LICENSE`. It includes or builds
+against the following open-source components:
 
 - Tauri: MIT or Apache-2.0.
 - React: MIT.

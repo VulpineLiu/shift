@@ -1,8 +1,9 @@
 [package]
 name = "shift"
-version = "0.1.13"
+version = "0.1.14"
 description = "A radial file utility with screenshot, recording and OCR."
-authors = ["Shift Contributors"]
+authors = ["mula.liu"]
+license = "GPL-3.0-only"
 edition = "2021"
 
 [lib]
